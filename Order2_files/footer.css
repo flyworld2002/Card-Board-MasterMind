@@ -1,0 +1,50 @@
+﻿.bottomContainer {  margin: 24px 0; clear:both; }
+.feedback { background: url("images/feedback.png") no-repeat center center; display: inline-block; width: 198px; height: 128px;  vertical-align: middle;  }
+.feedback h4 { color: #86B437; text-align: center; width: 100px; margin: 32px auto 10px auto;  }
+.feedback button { margin-left: 25px; }
+footer { text-align: center; width: 975px; margin: 24px auto; line-height: 20px; font-size: 11px; }
+footer table { margin: 0 auto; }
+
+.twitterShare{width:300px;text-align:center;margin:0 auto}
+.footerWrap hr{margin-right:10px}
+
+.footerWrap {margin-top:24px; clear:both; }
+.footerWrap hr{margin-right:10px}
+.footerWrapInner{display:inline-block;vertical-align:top}
+
+.footerMain div:first-child{padding-left:0;}
+.footerMain div:nth-child(5){border:none;}
+
+.footerCol h3{color:#595959;margin:0 0 10px 0;}
+.footerCol ul{margin-left:0px;margin-bottom:24px; padding-left: 0;}
+.footerCol li{padding:5px 0px}
+.footerCol{display:inline-block;width:175px;vertical-align:top;font-size:12px;line-height:14px;border-right:1px solid #DCDADB;height:300px;padding-left:16px;}
+.footerCol a{color: #595959;}
+.footerCol a:hover{text-decoration:underline}
+.footerCol:nth-child(3){ width:140px}
+.footerCol:nth-child(4){width:160px}
+
+
+.singles_sealed_wrapper{background:url("http://magic.tcgplayer.com/reno/images/TID_1/tiny_pointer.jpg") no-repeat scroll 0 10px}
+.singles_sealed_wrapper span{margin-left:10px;}
+.prod_type{margin-left:7px;font-size:11px}
+.footerCol li{padding:5px 0px;text-align: left;}
+.copyright{display:inline-block;border-left:1px solid #dcdadb;width:240px;text-align:center;font-size:11px;padding:20px;color:#595959}
+.disclaimer{text-align:left}
+.articleContainer{width:610px;margin:30px 10px;font-size:14px; line-height:18px;}
+.articleContainer h1 { font-size:26px; line-height:28px; }
+
+.footerBanner { background-image:url('https://img.tcgplayer.com/tcg_img/mtg_page/footer_img/bkg-section_fadeup.png');background-color:#FFF;background-repeat:repeat-x; text-align: left;height:100px; }
+.socialIcons{ float: right; position: relative; top: 45px; z-index:0 !important; margin-right: 20px; }
+.fa-facebook-square { font-size: 32px; color: #606d7a; margin:0 5px; }
+.fa-twitter-square { font-size: 32px; color: #606d7a; margin:0 5px; }
+.fa-linkedin-square { font-size: 32px; color: #606d7a; margin:0 5px; }
+.footerMain { background-image:url('https://img.tcgplayer.com/tcg_img/mtg_page/footer_img/bkg-section_fadedown.png');text-align: left; background-color:#F9F9F9;background-repeat:repeat-x;padding: 30px 20px 10px;border-top: 1px solid #dcdadb;}
+.footerMain ul li { list-style-type: none: }
+.vertDivider { border-right:1px solid #DCDADB; width:5px; min-height:380px; display:inline-block; margin-right:16px;}
+.bottomEdge{ background-image:url('https://img.tcgplayer.com/tcg_img/mtg_page/footer_img/bkg-section_fadeup.png');background-color:#F9F9F9;background-repeat:repeat-x;height:20px; }
+.footerBottom { text-align:center;  padding:24px 0;}
+.footerBottom a {font-size:11px; color: #0E5B93; }
+.footerBottom a:hover { text-decoration: underline;}
+.footerBottom span { color: #0E5B93; }
+.footerBottom p { color:#595959;  font-size: 11px; line-height: 16px;}

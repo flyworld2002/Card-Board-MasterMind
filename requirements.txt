@@ -1,0 +1,8 @@
+psycopg2-binary>=2.9
+requests>=2.31
+python-dotenv>=1.0
+Pillow>=10.0
+boto3>=1.34
+browser-cookie3>=0.19
+beautifulsoup4>=4.12
+lxml>=5.0

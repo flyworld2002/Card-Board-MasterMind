@@ -1,0 +1,510 @@
+﻿.ac_results
+{
+    padding: 0px;
+    border: 1px solid black; /*background-color: white;*/
+    overflow: hidden;
+    z-index: 99999;
+}
+
+.ac_results ul
+{
+    width: 100%;
+    list-style-position: outside;
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+.ac_results li
+{
+    margin: 0px;
+    padding: 2px 5px;
+    display: block; /*      if width will be 100% horizontal scrollbar will apear   when scroll mode will be used   */ /*width: 100%;*/
+    font: menu;
+    font-size: 12px; /*     it is very important, if line-height not setted or setted   in relative units scroll will be broken in firefox  */
+    line-height: 16px;
+    overflow: hidden;
+    z-index: 1000;
+    cursor: pointer;
+}
+
+.ac_results li:hover
+{
+    background: #A2DAA8 url('../Content/images/hover_background.gif') repeat;
+}
+
+.ac_loading
+{
+    background-image: url('../Content/images/indicator.gif');
+}
+
+.ac_odd
+{
+    background: white url('../Content/images/auto-fill_background.gif') top left no-repeat; /*background-color: #eee;*/
+}
+
+.ac_even
+{
+    background: white url('../Content/images/auto-fill_background.gif') top left no-repeat;
+}
+
+.ac_over
+{
+    background: #A2DAA8 url('../Content/images/hover_background.gif') repeat;
+
+}
+
+.result_line
+{
+    text-align: left;
+    font-size: 10px;
+    line-height: 30px;
+    display: block;
+    height:30px;
+    
+}
+
+.headerGoButton {
+position:absolute;
+border:1px solid #06c;
+height:26px;
+width:40px;
+border-radius:4px;
+color:#fff;
+font-weight:700;
+font-size:14px;
+line-height:16px;
+text-align:center;
+background:url(../Content/images/header/buttonbg.png) repeat-x 0 0;
+}
+
+.headerGoButton:hover {
+cursor:hand;
+}
+
+header input,header input:focus,header input:active {
+border:none;
+outline:none;
+}
+
+.headerSearchBox {
+height:22px;
+text-indent:3px;
+position:absolute;
+width:350px;
+border:1px solid #ccc!important;
+background-position: right center;
+background-repeat: no-repeat;
+}
+
+.dropdown-arrow {
+margin-left:5px;
+margin-right:7px;
+}
+
+.default {
+font-weight:700;
+text-shadow:#fff;
+z-index:2;
+height:1.75em;
+width:auto;
+color:#666;
+line-height:1.25em;
+border:1px solid #ccc;
+background:transparent url(../Content/images/header/dropdown-bg.png) repeat-x 0 0;
+margin:0 5px 2px 2px;
+padding:5px 0 0 8px;
+}
+
+select.gameSearchDropdown {
+border:0;
+opacity:0;
+outline:0;
+z-index:15;
+width:95px;
+position:absolute;
+left:365px;
+height:30px;
+}
+
+a#products {
+border-bottom:2px dotted #ccc;
+font-size:14px;
+position:absolute;
+top:10px;
+left:12px;
+padding-bottom:1px;
+font-weight:700;
+}
+
+#products-wrapper {
+position:absolute;
+bottom:-1px;
+left:20px;
+width:123px;
+height:40px;
+background:url(../Content/images/header/productstab.png) no-repeat center bottom;
+line-height: 16px;
+}
+
+.secondary-nav {
+width:500px;
+position:absolute;
+left:200px;
+top:0;
+border:1px solid #ccc;
+border-left:2px solid #ccc;
+border-top:0;
+background:#fff;
+box-shadow:3px 6px 9px rgba(60,60,60,0.45);
+min-height:305px;
+z-index:100;
+}
+
+span.subtitle {
+display:block;
+font-size:10px;
+color:#666;
+text-transform:uppercase;
+}
+
+header #vertical-navigation .secondary-nav span.preorder {
+text-transform:uppercase;
+font-size:10px;
+color:#fc6;
+}
+
+#sitelogo {
+position:absolute;
+top:-8px;
+left:20px;
+border:0;
+}
+
+#welcome {
+position:absolute;
+top:3px;
+right:20px;
+text-align:right;
+vertical-align:top;
+z-index:5;
+}
+
+#searchBar {
+position:absolute;
+bottom:8px;
+left:160px;
+}
+
+#searchField {
+width:300px;
+height:1.75em;
+}
+
+#searchBar select {
+background:transparent;
+width:auto;
+font-size:12px;
+border:1px solid #ccc;
+height:27px;
+padding:3px;
+}
+
+#searchBar button {
+background:url(../content/images/header/buttonBG.png) repeat-x 0 0;
+border:1px solid #06c;
+height:30px;
+width:40px;
+border-radius:4px;
+color:#fff;
+font-weight:700;
+font-size:14px;
+}
+
+#searchBar button:active {
+position:relative;
+top:3px;
+left:3px;
+}
+
+#utilityNav {
+width:400px;
+list-style:none;
+position:absolute;
+top:20px;
+right:20px;
+text-align:right;
+line-height:19px;
+}
+
+#utilityNav li {
+display:inline;
+margin-bottom:5px;
+}
+
+#utilityNav li:after {
+content:" | ";
+color:#666;
+}
+
+#utilityNav li.last:after {
+content:"";
+}
+
+#cart {
+position:absolute;
+bottom:8px;
+right:58px;
+text-align:right;
+font-size:15px;
+background:url(../Content/images/header/carticon.png) no-repeat center right;
+}
+
+#cartlink {
+position:absolute;
+bottom:15px;
+right:20px;
+text-align:left;
+font-size:14px;
+font-weight:700;
+}
+
+#cart > div {
+display:block;
+height:28px;
+width:30px;
+padding-right:21px;
+margin-top:7px;
+}
+
+.cartCount {
+background-color:#06C;
+border-radius:10px 10px 10px 10px;
+color:#FFF;
+font-size:13px;
+white-space:nowrap;
+padding:1px 6px 2px;
+}
+
+header {
+font-family:Verdana, Arial, sans-serif;
+font-size:11px;
+position:relative;
+width:974px;
+height:85px;
+border-bottom:1px solid #666;
+z-index:1;
+background:url(../Content/images/header/header-bg.png) repeat-x center bottom;
+margin:0 0 0 1px;
+padding:0;
+line-height: 12px;
+z-index:5;
+}
+
+header #vertical-navigation {
+width:200px;
+min-height:311px;
+list-style:none;
+font-size:1.2em;
+border:1px solid #ccc;
+border-top:none;
+display:none;
+box-shadow:3px 6px 9px rgba(60,60,60,0.45);
+z-index:100;
+background:#fff;
+position:absolute;
+top:86px;
+left:0;
+margin:0;
+padding:12px 0 0 0;
+}
+
+header #vertical-navigation li a.mainlink {
+text-decoration:none;
+color:#666;
+margin-left:5px;
+font-family:Helvetica, Arial, sans-serif;
+font-size:13px;
+line-height:2em;
+vertical-align:middle;
+}
+
+header #vertical-navigation li {
+clear:both;
+height:2em;
+display:block;
+}
+
+#vertical-navigation li:hover {
+background:url(../content/images/header/arrow2.png) no-repeat 95% center;
+font-weight:700;
+color:#369;
+margin:0;
+padding:0;
+}
+
+#vertical-navigation ul li .secondary-nav {
+min-height:311px;
+font-weight:400;
+}
+
+#vertical-navigation ul li .secondary-nav h3 {
+padding-left:12px;
+padding-top:0;
+padding-bottom: 5px;
+margin-top:10px;
+margin-bottom: 15px;
+font-family:Arial;
+font-size:15px;
+color:#A41428;
+}
+
+header #vertical-navigation ul {
+display:none;
+list-style:none;
+float:left;
+margin:0;
+}
+
+header #vertical-navigation ul li {
+clear:none;
+width:auto;
+height:auto;
+color:#999;
+margin:0;
+padding:0;
+}
+
+.fb_iframe_widget {
+z-index:0;
+}
+
+header #vertical-navigation .secondlink {
+font-size:12px;
+color:#3b66cc;
+display:block;
+padding:5px 0 0;
+}
+
+header #vertical-navigation .smallsetlink {
+font-size:10px;
+color:#b4b4b4;
+position:relative;
+left:10px;
+padding:0 0 0 10px;
+}
+
+.list_container a {
+text-indent:15px;
+}
+
+.smallsetlink:hover {
+color:#06C;
+}
+
+.list_container a.smallsetlink.solo,.smallsetlink.solo {
+display:block;
+margin-top:3px;
+}
+
+#magic .secondary-nav {
+background:#FFF url(../content/images/bg/magic.jpg) no-repeat top right;
+}
+
+#wow .secondary-nav {
+width:340px;
+background:#FFF url(../content/images/bg/wow.jpg) no-repeat top right;
+}
+
+#cardfight .secondary-nav{
+	width:340px;
+	background: #FFFFFF url("../content/images/bg/cf.jpg") no-repeat top right;
+}
+
+#yugioh .secondary-nav {
+background:#FFF url(../content/images/bg/yugioh.jpg) no-repeat top right;
+}
+
+#heroclix .secondary-nav {
+width:600px;
+background:#FFF url(../content/images/bg/heroclix.jpg) no-repeat top right;
+}
+
+#wow .advanced_search.short_list {
+margin-top:-3px;
+}
+
+.short_list {
+clear:left;
+}
+
+#starwars .secondary-nav {
+width:215px;
+}
+
+#supplies .secondary-nav {
+width:220px;
+}
+
+#features .secondary-nav {
+width:180px;
+}
+
+#features a {
+padding-top:10px;
+}
+
+#features a.top_link {
+padding-top:0;
+}
+
+#redakai .secondary-nav {
+width:200px;
+}
+
+.advanced-search-header {
+position:absolute;
+}
+
+header #vertical-navigation li:hover ul,div.cardImage a {
+display:block;
+}
+
+a#products:hover,header a,header a:visited {
+text-decoration:none;
+}
+
+header #vertical-navigation .secondary-nav .see-all {
+font-size:10px;
+}
+
+header #vertical-navigation a.secondlink,header #vertical-navigation a:visited.secondlink {
+color:#3b66cc;
+text-decoration:none;
+}
+
+header #vertical-navigation a.smallsetlink,header #vertical-navigation a:visited.smallsetlink {
+color:#b4b4b4;
+text-decoration:none;
+}
+
+#pokemon .advanced_search.short_list,#starwars .advanced_search.short_list {
+margin-top:2px;
+}
+
+#pokemon .secondary-nav,#dnd .secondary-nav,#boardgames .secondary-nav,.SearchParameter select {
+width:170px;
+}
+
+#features .advanced_search.short_list,#supplies .advanced_search.short_list {
+margin-top:4px;
+}
+
+header #vertical-navigation a:hover.secondlink,header #vertical-navigation a:hover.smallsetlink,a.link_blue:hover,a.link_blue:hover {
+color:#00f;
+text-decoration:underline;
+}
+
+header h1, header h2, header p { margin: 0 }
+
+
