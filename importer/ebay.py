@@ -1,0 +1,384 @@
+"""
+importer/ebay.py — Import eBay active listings into staging
+
+Fetches all your active eBay variation listings via the Trading API
+(GetMyeBaySelling + GetItem) and writes each variation as a row in
+the staging table, ready for --review / --approve.
+
+Usage:
+    python main.py --ebay-import
+    python main.py --ebay-import --dry-run
+"""
+
+import os
+import re
+import sys
+import requests
+import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
+from dotenv import load_dotenv
+
+load_dotenv()
+
+from importer.ebay_auth import get_trading_headers, get_user_token, TRADING_API_URL
+from utils.ebay_parser import parse_variation_name, infer_set_name_from_title
+
+# ── Namespace used in eBay Trading API XML responses ─────────────────────────
+NS = "urn:ebay:apis:eBLBaseComponents"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# XML helpers
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _find(node, tag: str):
+    """Find first child element, handling namespace."""
+    return node.find(f"{{{NS}}}{tag}")
+
+def _findall(node, tag: str):
+    return node.findall(f"{{{NS}}}{tag}")
+
+def _text(node, tag: str, default=None):
+    el = _find(node, tag)
+    return el.text.strip() if el is not None and el.text else default
+
+def _post(call_name: str, xml_body: str) -> ET.Element:
+    """POST to Trading API and return parsed XML root."""
+    resp = requests.post(
+        TRADING_API_URL,
+        headers=get_trading_headers(call_name),
+        data=xml_body.encode("utf-8"),
+        timeout=30,
+    )
+    resp.raise_for_status()
+    root = ET.fromstring(resp.content)
+
+    # Check for API-level errors
+    ack = _text(root, "Ack", "")
+    if ack not in ("Success", "Warning"):
+        errors = _findall(root, "Errors")
+        msgs = [_text(e, "LongMessage") or _text(e, "ShortMessage") for e in errors]
+        raise RuntimeError(f"eBay API error ({call_name}): {'; '.join(filter(None, msgs))}")
+
+    return root
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 1 — Get all active listing IDs via GetMyeBaySelling
+# ══════════════════════════════════════════════════════════════════════════════
+
+def fetch_active_listing_ids() -> list[dict]:
+    """
+    Returns list of dicts: [{item_id, title, quantity, price}, ...]
+    Handles pagination automatically.
+    """
+    token    = get_user_token()
+    all_items = []
+    page      = 1
+
+    print("📦 Fetching active eBay listings...")
+
+    while True:
+        xml = f"""<?xml version="1.0" encoding="utf-8"?>
+<GetMyeBaySellingRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials>
+    <eBayAuthToken>{token}</eBayAuthToken>
+  </RequesterCredentials>
+  <ActiveList>
+    <Include>true</Include>
+    <Pagination>
+      <EntriesPerPage>200</EntriesPerPage>
+      <PageNumber>{page}</PageNumber>
+    </Pagination>
+  </ActiveList>
+  <DetailLevel>ReturnAll</DetailLevel>
+</GetMyeBaySellingRequest>"""
+
+        root        = _post("GetMyeBaySelling", xml)
+        active_list = _find(root, "ActiveList")
+
+        if active_list is None:
+            break
+
+        items_array = _find(active_list, "ItemArray")
+        if items_array is None:
+            break
+
+        items = _findall(items_array, "Item")
+        if not items:
+            break
+
+        for item in items:
+            item_id   = _text(item, "ItemID")
+            title     = _text(item, "Title", "")
+            qty       = _text(item, "Quantity", "1")
+
+            # Price: prefer selling_status current price
+            selling   = _find(item, "SellingStatus")
+            price_str = None
+            if selling is not None:
+                cp = _find(selling, "CurrentPrice")
+                if cp is not None:
+                    price_str = cp.text
+
+            if price_str is None:
+                sp = _find(item, "StartPrice")
+                price_str = sp.text if sp is not None else "0"
+
+            all_items.append({
+                "item_id":  item_id,
+                "title":    title,
+                "quantity": qty,
+                "price":    price_str,
+            })
+
+        # Check if more pages
+        pagination  = _find(active_list, "PaginationResult")
+        total_pages = int(_text(pagination, "TotalNumberOfPages", "1"))
+        print(f"  Page {page}/{total_pages} — {len(items)} listings")
+
+        if page >= total_pages:
+            break
+        page += 1
+
+    print(f"✅ Found {len(all_items)} active listings total.\n")
+    return all_items
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 2 — Get variation details for a single listing via GetItem
+# ══════════════════════════════════════════════════════════════════════════════
+
+def fetch_item_variations(item_id: str, title: str) -> list[dict]:
+    """
+    For a single listing ID, fetch all its variations.
+    Returns list of dicts, one per variation:
+    {
+        item_id, title, variation_name,
+        quantity, price,
+        card_number, set_total, card_name,
+        variant_type, card_type, set_name
+    }
+    """
+    token = get_user_token()
+
+    xml = f"""<?xml version="1.0" encoding="utf-8"?>
+<GetItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials>
+    <eBayAuthToken>{token}</eBayAuthToken>
+  </RequesterCredentials>
+  <ItemID>{item_id}</ItemID>
+  <DetailLevel>ReturnAll</DetailLevel>
+  <IncludeItemSpecifics>true</IncludeItemSpecifics>
+</GetItemRequest>"""
+
+    root  = _post("GetItem", xml)
+    item  = _find(root, "Item")
+    if item is None:
+        return []
+
+    listing_title = _text(item, "Title", title)
+    set_name      = infer_set_name_from_title(listing_title)
+
+    variations_node = _find(item, "Variations")
+    rows = []
+
+    if variations_node is not None:
+        # ── Variation listing ─────────────────────────────────────────────────
+        for var in _findall(variations_node, "Variation"):
+            # Quantity
+            qty_str = _text(var, "Quantity", "0")
+
+            # Price
+            sp        = _find(var, "StartPrice")
+            price_str = sp.text if sp is not None else "0.99"
+
+            # Variation name is in VariationSpecifics → NameValueList → Value
+            var_name = None
+            specifics = _find(var, "VariationSpecifics")
+            if specifics is not None:
+                for nvl in _findall(specifics, "NameValueList"):
+                    val_el = _find(nvl, "Value")
+                    if val_el is not None:
+                        var_name = val_el.text.strip()
+                        break
+
+            if not var_name:
+                continue
+
+            parsed = parse_variation_name(var_name, listing_title)
+
+            rows.append({
+                "item_id":        item_id,
+                "title":          listing_title,
+                "variation_name": var_name,
+                "quantity":       int(qty_str),
+                "price":          float(price_str),
+                "set_name":       set_name or "",
+                **{k: parsed[k] for k in (
+                    "card_number", "set_total", "card_name",
+                    "variant_type", "card_type", "parse_ok"
+                )},
+            })
+
+    else:
+        # ── Single (non-variation) listing — treat the whole listing as one row
+        qty_str   = _text(item, "Quantity", "1")
+        sp        = _find(item, "StartPrice")
+        price_str = sp.text if sp is not None else "0.99"
+
+        parsed = parse_variation_name(listing_title, listing_title)
+        rows.append({
+            "item_id":        item_id,
+            "title":          listing_title,
+            "variation_name": listing_title,
+            "quantity":       int(qty_str),
+            "price":          float(price_str),
+            "set_name":       set_name or "",
+            **{k: parsed[k] for k in (
+                "card_number", "set_total", "card_name",
+                "variant_type", "card_type", "parse_ok"
+            )},
+        })
+
+    return rows
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 3 — Write rows to staging table
+# ══════════════════════════════════════════════════════════════════════════════
+
+def write_to_staging(rows: list[dict], batch_id: str, dry_run: bool = False) -> int:
+    """
+    Insert parsed variation rows into the staging table.
+    Skips rows where quantity == 0.
+    Returns count of rows inserted.
+    """
+    from db.connection import db_cursor
+
+    inserted = 0
+    skipped  = 0
+
+    with db_cursor() as cur:
+        for row in rows:
+            if row["quantity"] <= 0:
+                skipped += 1
+                continue
+
+            if dry_run:
+                print(
+                    f"  [DRY RUN] {row['set_name'] or '?':<22} "
+                    f"#{row['card_number'] or '?':<5} "
+                    f"{row['card_name'] or row['variation_name']:<28} "
+                    f"{row['variant_type']:<16} "
+                    f"qty={row['quantity']}  ${row['price']:.2f}"
+                )
+                inserted += 1
+                continue
+
+            cur.execute("""
+                INSERT INTO staging (
+                    import_batch,
+                    order_number,
+                    order_date,
+                    source,
+                    card_name,
+                    set_name,
+                    card_number,
+                    condition,
+                    quantity,
+                    price,
+                    match_status,
+                    status,
+                    notes
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                )
+                ON CONFLICT DO NOTHING
+            """, (
+                batch_id,
+                row["item_id"],              # order_number = eBay item ID
+                datetime.now(timezone.utc),  # order_date
+                "ebay",                      # source
+                row["card_name"] or row["variation_name"],
+                row["set_name"] or "",
+                row["card_number"] or "",
+                "Near Mint",                 # default condition
+                row["quantity"],
+                row["price"],
+                "pending",                   # match_status — review will resolve
+                "pending",                   # workflow status
+                f"eBay listing: {row['title']} | variation: {row['variation_name']} | type: {row['card_type']}",
+            ))
+            inserted += 1
+
+    if skipped:
+        print(f"  ↳ Skipped {skipped} zero-quantity variation(s).")
+
+    return inserted
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Main entry point
+# ══════════════════════════════════════════════════════════════════════════════
+
+def import_from_ebay(dry_run: bool = False):
+    """
+    Full eBay import flow:
+    1. Fetch all active listing IDs
+    2. For each listing, fetch variation details
+    3. Parse each variation name into card fields
+    4. Write to staging (or print if dry_run)
+    """
+    batch_id = f"ebay_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    print(f"🔁 eBay import batch: {batch_id}")
+    if dry_run:
+        print("⚠️  DRY RUN — nothing will be written to the database.\n")
+
+    # ── 1. Get all active listing IDs ─────────────────────────────────────────
+    listings = fetch_active_listing_ids()
+    if not listings:
+        print("No active listings found. Make sure your eBay token is valid.")
+        return
+
+    # ── 2 & 3. Fetch + parse variations for every listing ────────────────────
+    all_rows     = []
+    parse_errors = []
+
+    for i, listing in enumerate(listings, 1):
+        item_id = listing["item_id"]
+        title   = listing["title"]
+        print(f"  [{i}/{len(listings)}] Fetching: {title[:60]}")
+
+        try:
+            rows = fetch_item_variations(item_id, title)
+            print(f"           → {len(rows)} variation(s)")
+            all_rows.extend(rows)
+
+            # Track any that failed to parse cleanly
+            for r in rows:
+                if not r.get("parse_ok"):
+                    parse_errors.append(r["variation_name"])
+
+        except Exception as e:
+            print(f"  ⚠️  Error fetching item {item_id}: {e}")
+            continue
+
+    print(f"\n📊 Total variations parsed: {len(all_rows)}")
+
+    if parse_errors:
+        print(f"⚠️  {len(parse_errors)} variation(s) had parse issues (will still be staged for manual review):")
+        for name in parse_errors[:10]:
+            print(f"   • {name}")
+        if len(parse_errors) > 10:
+            print(f"   ... and {len(parse_errors) - 10} more")
+
+    # ── 4. Write to staging ───────────────────────────────────────────────────
+    print(f"\n{'[DRY RUN] ' if dry_run else ''}Writing to staging...")
+    inserted = write_to_staging(all_rows, batch_id, dry_run=dry_run)
+
+    print(f"\n✅ Import complete: {inserted} row(s) {'would be ' if dry_run else ''}written to staging.")
+    if not dry_run:
+        print(f"\nNext steps:")
+        print(f"  python main.py --review          ← review and fix conditions/prices")
+        print(f"  python main.py --approve-all     ← push all approved rows to inventory")
