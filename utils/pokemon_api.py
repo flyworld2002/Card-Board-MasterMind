@@ -12,6 +12,8 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from functools import lru_cache
 
+# Module-level lookup cache — persists for one import run
+_ebay_lookup_cache: dict = {}
 
 def _session():
     """Requests session with automatic retry on timeout/connection errors."""
@@ -189,6 +191,11 @@ def lookup_card_for_ebay(card_name: str, card_number: str,
         "api_card_id":  external_id e.g. "sv3-153",
     }
     """
+
+    cache_key = f"{set_name}|{card_number}|{card_name}"
+    if cache_key in _ebay_lookup_cache:
+        return _ebay_lookup_cache[cache_key]
+
     from db.connection import (
         find_card_by_external_id, find_card_by_name_set,
         get_game_id, get_or_create_set, insert_card_master,
@@ -292,6 +299,7 @@ def lookup_card_for_ebay(card_name: str, card_number: str,
     except Exception as e:
         print(f"    ⚠️  Could not create variant for {card_name}: {e}")
 
+    _ebay_lookup_cache[cache_key] = result
     return result
 
 
@@ -299,26 +307,29 @@ def lookup_card_for_ebay(card_name: str, card_number: str,
 # Market price extraction from cached api_card (no extra API call)
 # ----------------------------------------------------------------
 
-def extract_market_price(api_card: dict, variant_type: str) -> float | None:
+def extract_market_price(api_card: dict, variant_type: str) -> tuple[float | None, str | None]:
     """
-    Extract market price from a cached api_card object.
-    Uses variant_type to pick the right TCGPlayer price key.
-    No API call needed — uses data already fetched during lookup.
+    Extract market price and its date from a cached api_card object.
+    Returns (price, date_str) tuple.
+    date_str format: 'YYYY/MM/DD' from TCGPlayer updatedAt field.
     """
     if not api_card:
-        return None
+        return None, None
 
-    tcg_prices = api_card.get("tcgplayer", {}).get("prices", {})
+    tcgplayer  = api_card.get("tcgplayer", {})
+    tcg_prices = tcgplayer.get("prices", {})
+    price_date = tcgplayer.get("updatedAt")    # ← e.g. "2026/06/03"
+
     if not tcg_prices:
-        return None
+        return None, None
 
     PRICE_KEYS = {
-        "Reverse Holo":       ["reverseHolofoil", "holofoil", "normal"],
-        "Holo":               ["holofoil", "normal"],
-        "Cosmos Holo":        ["holofoil", "normal"],
-        "Master Ball Pattern":["holofoil", "normal"],
-        "Normal":             ["normal", "holofoil", "reverseHolofoil"],
-        "promo":              ["holofoil", "normal"],
+        "Reverse Holo":        ["reverseHolofoil", "holofoil", "normal"],
+        "Holo":                ["holofoil", "normal"],
+        "Cosmos Holo":         ["holofoil", "normal"],
+        "Master Ball Pattern": ["holofoil", "normal"],
+        "Normal":              ["normal", "holofoil", "reverseHolofoil"],
+        "promo":               ["holofoil", "normal"],
     }
     keys = PRICE_KEYS.get(variant_type, ["normal", "holofoil", "reverseHolofoil"])
 
@@ -326,8 +337,9 @@ def extract_market_price(api_card: dict, variant_type: str) -> float | None:
         if key in tcg_prices:
             market = tcg_prices[key].get("market") or tcg_prices[key].get("mid")
             if market:
-                return float(market)
-    return None
+                return float(market), price_date
+
+    return None, None
 
 
 # ----------------------------------------------------------------
@@ -470,6 +482,8 @@ def _api_search(q: str, page_size: int = 20) -> list[dict]:
         headers=_headers(),
         timeout=30
     )
+    if resp.status_code == 404:
+        return []
     resp.raise_for_status()
     return resp.json().get("data", [])
 

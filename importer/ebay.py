@@ -222,7 +222,7 @@ def import_single_item(item_id: str, dry_run: bool = False, no_api: bool = False
             status = "⚠️ "
 
         # Extract market price from cached api_card — no extra API call
-        market_price = extract_market_price(lookup.get("_api_card"), variant_type)
+        market_price, market_date = extract_market_price(lookup.get("_api_card"), variant_type)
         market_str   = f"${market_price:.2f}" if market_price else "—"
 
         price_diff = ""
@@ -374,29 +374,63 @@ def write_to_staging(rows: list[dict], batch_id: str, dry_run: bool = False) -> 
     Insert parsed variation rows into the staging table.
     Auto-matches each card via Pokemon TCG API and populates card_id.
     Skips rows where quantity == 0.
+    Skips entire import if all variations already approved in staging.
+    Only inserts missing variations if some are already there.
     Returns count of rows inserted.
     """
     from db.connection import db_cursor
     from utils.pokemon_api import lookup_card_for_ebay
 
-    inserted = 0
-    skipped  = 0
-    matched  = 0
+    inserted  = 0
+    skipped   = 0
+    matched   = 0
     unmatched = 0
 
+    # ── Check existing staging rows for this eBay item ────────────────────────
+    if not dry_run:
+        item_id = rows[0]["item_id"] if rows else None
+        if item_id:
+            with db_cursor() as cur:
+                cur.execute("""
+                    SELECT card_number, status
+                    FROM staging
+                    WHERE order_number = %s AND source = 'ebay'
+                """, (item_id,))
+                existing = cur.fetchall()
+
+            existing_approved = set(r["card_number"] for r in existing if r["status"] == "approved")
+            existing_any      = set(r["card_number"] for r in existing)
+            incoming          = set(str(row.get("card_number", "")) for row in rows if row["quantity"] > 0)
+
+            # All variations already approved → skip entirely
+            if incoming and incoming.issubset(existing_approved):
+                print(f"  ✅ All {len(existing_approved)} variations already approved — skipping import.")
+                return 0
+
+            # Some already exist → only insert missing ones
+            if existing_any:
+                missing = incoming - existing_any
+                if missing:
+                    print(f"  ℹ️  Found {len(existing_any)} existing rows, inserting {len(missing)} missing variation(s).")
+                    rows = [r for r in rows if str(r.get("card_number", "")) in missing]
+                else:
+                    print(f"  ✅ All variations already in staging — skipping import.")
+                    return 0
+
+    # ── Process rows ──────────────────────────────────────────────────────────
     for row in rows:
         if row["quantity"] <= 0:
             skipped += 1
             continue
 
         # ── Auto-match via Pokemon TCG API ────────────────────────────────────
-        card_id    = None
-        variant_id = None
+        card_id      = None
+        variant_id   = None
         match_status = "not_found"
 
-        card_name  = row.get("card_name") or row.get("variation_name", "")
-        card_number = row.get("card_number", "")
-        set_name   = row.get("set_override") or row.get("set_name", "")
+        card_name    = row.get("card_name") or row.get("variation_name", "")
+        card_number  = row.get("card_number", "")
+        set_name     = row.get("set_override") or row.get("set_name", "")
         variant_type = row.get("variant_type", "Normal")
 
         if not dry_run and card_name and set_name:
@@ -413,6 +447,13 @@ def write_to_staging(rows: list[dict], batch_id: str, dry_run: bool = False) -> 
                 match_status = "matched"
                 matched += 1
                 print(f"    ✅ Matched → {lookup['card_name']} [{lookup['source']}]")
+                # Extract market price and date from cached api_card — no extra API call
+                from utils.pokemon_api import extract_market_price
+                market_price, market_date = extract_market_price(
+                    lookup.get("_api_card"), variant_type
+                )
+                row["market_price"]      = market_price
+                row["market_price_date"] = market_date
             else:
                 match_status = "not_found"
                 unmatched += 1
@@ -445,9 +486,11 @@ def write_to_staging(rows: list[dict], batch_id: str, dry_run: bool = False) -> 
                     card_id,
                     match_status,
                     status,
-                    notes
+                    notes,
+                    market_price,
+                    market_price_date
                 ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                 )
                 ON CONFLICT DO NOTHING
             """, (
@@ -465,6 +508,8 @@ def write_to_staging(rows: list[dict], batch_id: str, dry_run: bool = False) -> 
                 match_status,
                 "approved" if card_id else "pending",
                 f"eBay: {row['title'][:80]} | var: {row['variation_name']} | type: {row['card_type']}",
+                row.get("market_price"),
+                row.get("market_price_date"),
             ))
         inserted += 1
 
@@ -474,8 +519,7 @@ def write_to_staging(rows: list[dict], batch_id: str, dry_run: bool = False) -> 
         print(f"\n  📊 Matched: {matched} | Needs review: {unmatched}")
 
     return inserted
-
-
+    
 # ══════════════════════════════════════════════════════════════════════════════
 # Main entry point
 # ══════════════════════════════════════════════════════════════════════════════

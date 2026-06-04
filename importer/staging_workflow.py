@@ -263,6 +263,10 @@ def approve_staging():
         cur.execute("""
             SELECT DISTINCT import_batch FROM staging
             WHERE status = 'approved'
+            AND import_batch NOT IN (
+                SELECT DISTINCT import_batch FROM staging
+                WHERE status = 'processed'
+            )
             ORDER BY import_batch DESC
         """)
         approved_batches = [r["import_batch"] for r in cur.fetchall()]
@@ -294,7 +298,9 @@ def approve_staging():
 
 
 def _push_batch(batch_id: str):
-    """Push one batch of approved staging rows to inventory."""
+    """Push one batch of approved staging rows to inventory.
+    Uses a single DB connection for the entire batch — much faster.
+    """
     rows = approve_batch(batch_id)
     if not rows:
         print(f"No approved rows in {batch_id}.")
@@ -308,77 +314,158 @@ def _push_batch(batch_id: str):
         key = row["order_number"] or batch_id
         orders.setdefault(key, []).append(row)
 
+    SPECIAL_PATTERNS = {
+        "Cosmos Holo", "Master Ball Pattern", "Poke Ball Pattern",
+        "Cracked Ice Holo", "Galaxy Holo"
+    }
+
     pushed = 0
-    for order_num, order_rows in orders.items():
-        total_cost  = sum(float(r["price"]) * int(r["quantity"]) for r in order_rows)
-        order_date  = order_rows[0]["order_date"] or datetime.now(timezone.utc)
 
-        purchase_id = insert_purchase(
-            source        = order_rows[0].get("source", "tcgplayer"),
-            purchase_type = "lot" if len(order_rows) > 1 else "single",
-            reference_id  = order_num,
-            total_cost    = total_cost,
-            card_count    = sum(int(r["quantity"]) for r in order_rows),
-            purchased_at  = order_date,
-        )
+    # ── Single connection for the entire batch ────────────────────────────────
+    from db.connection import get_connection
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
 
-        for row in order_rows:
-            list_price = row.get("override_price") or row.get("calculated_price")
-            # Get or create card variant
-            from db.connection import get_or_create_variant
-            SPECIAL_PATTERNS = {
-                "Cosmos Holo", "Master Ball Pattern", "Poke Ball Pattern",
-                "Cracked Ice Holo", "Galaxy Holo"
-            }
-            foil_type    = row.get("foil_type")
-            foil_pattern = row.get("foil_pattern")
-            variant_type = foil_pattern or foil_type or "Non-Holo"
-            finish       = foil_type or "Non-Holo"
-            is_special   = variant_type in SPECIAL_PATTERNS
-            variant_id = get_or_create_variant(
-                card_id      = str(row["card_id"]),
-                variant_type = variant_type,
-                finish       = finish,
-                is_special   = is_special,
-            )
-            insert_inventory(
-                card_id     = str(row["card_id"]),
-                purchase_id = purchase_id,
-                condition   = row["condition"],
-                quantity    = int(row["quantity"]),
-                cost_basis  = float(row["price"]),
-                asking_price= float(list_price) if list_price else None,
-                acquired_at = order_date,
-                variant_id  = variant_id,
-            )
+        for order_num, order_rows in orders.items():
+            order_date = order_rows[0]["order_date"] or datetime.now(timezone.utc)
+            is_ebay    = order_rows[0].get("source") == "ebay"
 
-            # Fetch and store market price from PokemonTCG API
-            try:
-                from utils.pokemon_api import get_market_price_from_api
-                from db.connection import upsert_market_price
-                market = get_market_price_from_api(
-                    str(row["card_id"]), row["condition"]
-                )
+            # ── Create purchase record ────────────────────────────────────────
+            total_cost = sum(float(r["price"]) * int(r["quantity"]) for r in order_rows)
+            cur.execute("""
+                INSERT INTO purchases
+                    (source, purchase_type, reference_id, total_cost,
+                     card_count, notes, purchased_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """, (
+                order_rows[0].get("source", "tcgplayer"),
+                "lot" if len(order_rows) > 1 else "single",
+                order_num,
+                total_cost,
+                sum(int(r["quantity"]) for r in order_rows),
+                None,
+                order_date,
+            ))
+            purchase_id = str(cur.fetchone()["id"])
+
+            # ── Insert each card ──────────────────────────────────────────────
+            for row in order_rows:
+                list_price   = row.get("override_price") or row.get("calculated_price")
+                foil_type    = row.get("foil_type")
+                foil_pattern = row.get("foil_pattern")
+                variant_type = foil_pattern or foil_type or "Non-Holo"
+                finish       = foil_type or "Non-Holo"
+                is_special   = variant_type in SPECIAL_PATTERNS
+
+                # Cost vs asking price depends on source
+                if is_ebay:
+                    cost   = 0.0
+                    asking = float(row["price"])
+                else:
+                    cost   = float(row["price"])
+                    asking = float(list_price) if list_price else None
+
+                # ── Get or create card_variant ────────────────────────────────
+                cur.execute("""
+                    SELECT id FROM card_variants
+                    WHERE card_id = %s AND variant_type = %s AND finish = %s
+                """, (str(row["card_id"]), variant_type, finish))
+                v_row = cur.fetchone()
+                if v_row:
+                    variant_id = str(v_row["id"])
+                else:
+                    cur.execute("""
+                        INSERT INTO card_variants
+                            (card_id, variant_type, finish, is_special)
+                        VALUES (%s, %s, %s, %s)
+                        ON CONFLICT (card_id, variant_type, finish)
+                        DO UPDATE SET is_special = EXCLUDED.is_special
+                        RETURNING id
+                    """, (str(row["card_id"]), variant_type, finish, is_special))
+                    variant_id = str(cur.fetchone()["id"])
+
+                # ── Insert inventory row ──────────────────────────────────────
+                cur.execute("""
+                    INSERT INTO inventory
+                        (card_id, purchase_id, condition, is_graded, quantity,
+                         cost_basis, asking_price, notes, acquired_at, variant_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    str(row["card_id"]),
+                    purchase_id,
+                    row["condition"],
+                    False,
+                    int(row["quantity"]),
+                    cost,
+                    asking,
+                    None,
+                    order_date,
+                    variant_id,
+                ))
+
+                # ── Upsert market price if available ──────────────────────────
+                market      = row.get("market_price")
+                market_date = row.get("market_price_date")
+
+                if not market and not is_ebay:
+                    # TCGPlayer: fetch from API as fallback (best effort)
+                    try:
+                        from utils.pokemon_api import get_market_price_from_api
+                        market = get_market_price_from_api(
+                            str(row["card_id"]), row["condition"]
+                        )
+                    except Exception:
+                        pass
+
                 if market:
-                    upsert_market_price(variant_id, row["condition"], market)
-            except Exception:
-                pass  # Market price fetch is best-effort
-            print(f"  ✓ {row['quantity']}x {row['card_name']} "
-                  f"[{row['condition']}] cost ${float(row['price']):.2f}"
-                  + (f" → list ${float(list_price):.2f}" if list_price else ""))
-            pushed += 1
+                    cur.execute("""
+                        INSERT INTO market_prices
+                            (variant_id, condition, market_price, source, updated_at)
+                        VALUES (%s, %s, %s, %s,
+                            COALESCE(TO_DATE(%s, 'YYYY/MM/DD'), NOW()))
+                        ON CONFLICT (variant_id, condition)
+                        DO UPDATE SET
+                            market_price = EXCLUDED.market_price,
+                            source       = EXCLUDED.source,
+                            updated_at   = EXCLUDED.updated_at
+                        WHERE market_prices.updated_at < EXCLUDED.updated_at
+                    """, (
+                        variant_id, row["condition"],
+                        float(market), "pokemontcg",
+                        str(market_date) if market_date else None,
+                    ))
 
-    # Mark batch rows as processed in staging
-    from db.connection import db_cursor
-    with db_cursor() as cur:
+                # ── Print progress ────────────────────────────────────────────
+                if is_ebay:
+                    print(f"  ✓ {row['quantity']}x {row['card_name']} "
+                          f"[{row['condition']}] asking ${asking:.2f}"
+                          + (f" | market ${float(market):.2f}" if market else ""))
+                else:
+                    print(f"  ✓ {row['quantity']}x {row['card_name']} "
+                          f"[{row['condition']}] cost ${cost:.2f}"
+                          + (f" → list ${asking:.2f}" if asking else ""))
+                pushed += 1
+
+        # ── Mark batch as processed ───────────────────────────────────────────
         cur.execute("""
-            UPDATE staging SET updated_at = NOW()
+            UPDATE staging
+            SET status = 'processed', updated_at = NOW()
             WHERE import_batch = %s AND status = 'approved'
         """, (batch_id,))
 
+        conn.commit()
+
+    except Exception as e:
+        conn.rollback()
+        print(f"\n❌ Error pushing batch {batch_id}: {e}")
+        raise
+    finally:
+        conn.close()
+
     print(f"\n✓ {pushed} card(s) pushed to inventory.")
     print("Run  python3 main.py --stock  to see your inventory.\n")
-
 
 # ----------------------------------------------------------------
 # Helpers
@@ -411,6 +498,10 @@ def approve_all_staging():
         cur.execute("""
             SELECT DISTINCT import_batch FROM staging
             WHERE status = 'approved'
+            AND import_batch NOT IN (
+                SELECT DISTINCT import_batch FROM staging
+                WHERE status = 'processed'
+            )
             ORDER BY import_batch DESC
         """)
         batches = [r["import_batch"] for r in cur.fetchall()]
