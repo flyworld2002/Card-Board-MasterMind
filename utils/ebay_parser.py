@@ -156,6 +156,8 @@ def parse_variation_name(variation_name: str, listing_title: str = "") -> dict:
         r"\bCosmos\b",
         r"\bMaster\s+Ball\b",
         r"\bPoke\s+Ball\b",
+        r"\bPromo\b",        # ← strips "Promo" from card names
+        r"\s+R$",            # ← strips trailing " R" rarity indicator
     ]
     for sp in STRIP_PATTERNS:
         clean_name = re.sub(sp, "", clean_name, flags=re.IGNORECASE)
