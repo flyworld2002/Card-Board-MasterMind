@@ -161,7 +161,7 @@ def parse_variation_name(variation_name: str, listing_title: str = "") -> dict:
         clean_name = re.sub(sp, "", clean_name, flags=re.IGNORECASE)
 
     # Clean up leftover spaces and punctuation
-    clean_name = re.sub(r"\s{2,}", " ", clean_name).strip(" -–,R")
+    clean_name = re.sub(r"\s{2,}", " ", clean_name).strip(" -–,")
 
     result["card_name"]    = clean_name or remainder
     result["variant_type"] = found_variant or "Normal"
