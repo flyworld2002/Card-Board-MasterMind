@@ -192,14 +192,27 @@ def infer_set_name_from_title(title: str) -> str | None:
         return None
 
     KNOWN_SETS = [
-        "Obsidian Flames", "Paldea Evolved", "Scarlet & Violet Base",
-        "Paradox Rift", "Temporal Forces", "Twilight Masquerade",
-        "Shrouded Fable", "Stellar Crown", "Surging Sparks",
-        "Prismatic Evolutions", "Journey Together", "Destined Rivals",
-        "151", "Crown Zenith", "Silver Tempest", "Lost Origin",
-        "Astral Radiance", "Brilliant Stars", "Fusion Strike",
-        "Evolving Skies", "Chilling Reign", "Battle Styles",
-        "Shining Fates", "Vivid Voltage",
+        # Scarlet & Violet
+        "Obsidian Flames", "Paldea Evolved", "Paradox Rift",
+        "Temporal Forces", "Twilight Masquerade", "Shrouded Fable",
+        "Stellar Crown", "Surging Sparks", "Prismatic Evolutions",
+        "Journey Together", "Destined Rivals", "Paldean Fates",
+        "Black Bolt", "White Flare", "151",
+        "Scarlet & Violet", "Scarlet&Violet",
+
+        # Sword & Shield
+        "Champion's Path", "Chilling Reign", "Battle Styles",
+        "Shining Fates", "Vivid Voltage", "Darkness Ablaze",
+        "Evolving Skies", "Fusion Strike", "Brilliant Stars",
+        "Astral Radiance", "Lost Origin", "Silver Tempest",
+        "Crown Zenith", "Sword & Shield", "Sword&Shield",
+
+        # Mega Evolution
+        "Mega Evolution", "Phantasmal Flames", "Ascended Heroes",
+        "Perfect Order", "Chaos Rising",
+
+        # Other
+        "Pokemon GO", "Pokémon GO", "Pokemon X GO",
     ]
 
     title_lower = title.lower()

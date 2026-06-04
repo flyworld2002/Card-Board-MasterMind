@@ -29,6 +29,7 @@ TCGPLAYER_TO_ID = {
 
     # ── Scarlet & Violet (SV prefix) ────────────────────────────
     "Scarlet & Violet":          "sv1",
+    "Scarlet&Violet":            "sv1",
     "Scarlet & Violet Base Set": "sv1",
     "Paldea Evolved":            "sv2",
     "Obsidian Flames":           "sv3",
@@ -55,6 +56,8 @@ TCGPLAYER_TO_ID = {
 
     # ── Sword & Shield (SWSH prefix) ────────────────────────────
     "Sword & Shield":            "swsh1",
+    "Sword&Shield":              "swsh1",
+    "Sword & Shield Base Set":   "swsh1",
     "Rebel Clash":               "swsh2",
     "Darkness Ablaze":           "swsh3",
     "Champion's Path":           "swsh35",
@@ -75,6 +78,11 @@ TCGPLAYER_TO_ID = {
     "SWSH Black Star Promos":    "swshp",
     "Sword & Shield Promo Cards": "swshp",
     "Sword & Shield Black Star Promos": "swshp",
+    "Pokemon GO":                "pgo",
+    "Pokémon GO":                "pgo",
+    "Pokemon X GO":              "pgo",
+    "McDonald's 2023":           "mcd23",
+    "McDonald's Collection 2023": "mcd23",
 
     # ── Sun & Moon (SM prefix) ──────────────────────────────────
     "Sun & Moon":                "sm1",
