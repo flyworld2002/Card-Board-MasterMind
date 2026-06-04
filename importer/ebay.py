@@ -146,6 +146,127 @@ def fetch_active_listing_ids() -> list[dict]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  Import Single Item
+# ══════════════════════════════════════════════════════════════════════════════
+
+def import_single_item(item_id: str, dry_run: bool = False, no_api: bool = False):
+    """
+    Import a single eBay listing by item ID.
+    With --dry-run, calls the Pokemon TCG API to preview matches
+    but writes nothing to the DB.
+    With --no-api, skips API calls entirely — just shows parsed eBay data instantly.
+
+    Usage:
+        python3 main.py --ebay-item 334985403072
+        python3 main.py --ebay-item 334985403072 --dry-run
+        python3 main.py --ebay-item 334985403072 --dry-run --no-api
+    """
+    from utils.pokemon_api import lookup_card_for_ebay, extract_market_price
+
+    batch_id = f"ebay_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    print(f"🔁 Single item import — item ID: {item_id}")
+    if no_api:
+        print("⚡ NO-API mode — showing parsed eBay data only, no API calls.\n")
+    elif dry_run:
+        print("⚠️  DRY RUN — API will be called but nothing written to DB.\n")
+
+    print(f"  Fetching variations for item {item_id}...")
+    try:
+        rows = fetch_item_variations(item_id, f"eBay item {item_id}")
+    except Exception as e:
+        print(f"❌ Error fetching item {item_id}: {e}")
+        return
+
+    if not rows:
+        print("No variations found for this item.")
+        return
+
+    print(f"  Found {len(rows)} variation(s). Starting{'...' if no_api else ' API matching...'}\n")
+
+    matched   = 0
+    unmatched = 0
+
+    for i, r in enumerate(rows, 1):
+        card_name    = r.get("card_name") or r.get("variation_name", "")
+        card_number  = r.get("card_number", "")
+        set_name     = r.get("set_override") or r.get("set_name", "")
+        variant_type = r.get("variant_type", "Normal")
+
+        if r["quantity"] <= 0:
+            print(f"  ⏭  [{i}/{len(rows)}] Skipped (qty=0): {card_name}\n")
+            continue
+
+        # ── No-API mode: just show parsed data instantly ──────────────────────
+        if no_api:
+            print(
+                f"  📋 [{i}/{len(rows)}]\n"
+                f"       eBay:      #{card_number} {card_name} | {variant_type} | qty={r['quantity']} | ${r['price']:.2f}\n"
+                f"       Set:       {set_name}\n"
+                f"       card_type: {r['card_type']}\n"
+            )
+            continue
+
+        # ── API mode: look up card and get market price ───────────────────────
+        lookup = lookup_card_for_ebay(
+            card_name    = card_name,
+            card_number  = card_number,
+            set_name     = set_name,
+            variant_type = variant_type,
+        )
+
+        if lookup["matched"]:
+            matched += 1
+            status = "✅"
+        else:
+            unmatched += 1
+            status = "⚠️ "
+
+        # Extract market price from cached api_card — no extra API call
+        market_price = extract_market_price(lookup.get("_api_card"), variant_type)
+        market_str   = f"${market_price:.2f}" if market_price else "—"
+
+        price_diff = ""
+        if market_price:
+            diff       = r['price'] - market_price
+            arrow      = "▲" if diff >= 0 else "▼"
+            price_diff = f" ({arrow} ${abs(diff):.2f} vs market)"
+
+        print(
+            f"  {status} [{i}/{len(rows)}]\n"
+            f"       eBay:      #{card_number} {card_name} | {variant_type} | qty={r['quantity']} | ${r['price']:.2f}{price_diff}\n"
+            f"       API Match: {lookup['card_name'] or '—'} | "
+            f"ID: {lookup['api_card_id'] or '—'} | "
+            f"Set: {lookup['set_name'] or '—'} | "
+            f"Rarity: {lookup['rarity'] or '—'}\n"
+            f"       Market $:  {market_str}\n"
+            f"       Image:     {lookup['image_url'] or '—'}\n"
+            f"       card_type: {r['card_type']} | "
+            f"card_id: {lookup['card_id'] or 'NOT CREATED (dry run)'}\n"
+        )
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+    print(f"{'─'*60}")
+    if no_api:
+        print(f"📊 Total: {len(rows)} variation(s) parsed.")
+        print(f"\n⚡ Run without --no-api to match against Pokemon TCG API.")
+        return
+
+    print(f"📊 Total: {len(rows)} | ✅ Matched: {matched} | ⚠️  Unmatched: {unmatched}")
+
+    if dry_run:
+        print(f"\n⚠️  DRY RUN complete — nothing written to DB.")
+        print(f"    Run without --dry-run to import for real.")
+        return
+
+    # ── Real import — write to staging ────────────────────────────────────────
+    print(f"\nWriting to staging...")
+    inserted = write_to_staging(rows, batch_id, dry_run=False)
+    print(f"\n✅ Done: {inserted} row(s) written to staging.")
+    print(f"\nNext steps:")
+    print(f"  python3 main.py --review      ← fix unmatched cards")
+    print(f"  python3 main.py --approve-all ← push to inventory")
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Step 2 — Get variation details for a single listing via GetItem
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -217,7 +338,7 @@ def fetch_item_variations(item_id: str, title: str) -> list[dict]:
                 "set_name":       set_name or "",
                 **{k: parsed[k] for k in (
                     "card_number", "set_total", "card_name",
-                    "variant_type", "card_type", "parse_ok"
+                    "variant_type", "card_type", "parse_ok", "set_override"
                 )},
             })
 
@@ -251,31 +372,64 @@ def fetch_item_variations(item_id: str, title: str) -> list[dict]:
 def write_to_staging(rows: list[dict], batch_id: str, dry_run: bool = False) -> int:
     """
     Insert parsed variation rows into the staging table.
+    Auto-matches each card via Pokemon TCG API and populates card_id.
     Skips rows where quantity == 0.
     Returns count of rows inserted.
     """
     from db.connection import db_cursor
+    from utils.pokemon_api import lookup_card_for_ebay
 
     inserted = 0
     skipped  = 0
+    matched  = 0
+    unmatched = 0
 
-    with db_cursor() as cur:
-        for row in rows:
-            if row["quantity"] <= 0:
-                skipped += 1
-                continue
+    for row in rows:
+        if row["quantity"] <= 0:
+            skipped += 1
+            continue
 
-            if dry_run:
-                print(
-                    f"  [DRY RUN] {row['set_name'] or '?':<22} "
-                    f"#{row['card_number'] or '?':<5} "
-                    f"{row['card_name'] or row['variation_name']:<28} "
-                    f"{row['variant_type']:<16} "
-                    f"qty={row['quantity']}  ${row['price']:.2f}"
-                )
-                inserted += 1
-                continue
+        # ── Auto-match via Pokemon TCG API ────────────────────────────────────
+        card_id    = None
+        variant_id = None
+        match_status = "not_found"
 
+        card_name  = row.get("card_name") or row.get("variation_name", "")
+        card_number = row.get("card_number", "")
+        set_name   = row.get("set_override") or row.get("set_name", "")
+        variant_type = row.get("variant_type", "Normal")
+
+        if not dry_run and card_name and set_name:
+            print(f"    🔍 Matching: {card_name} #{card_number} ({set_name})")
+            lookup = lookup_card_for_ebay(
+                card_name    = card_name,
+                card_number  = card_number,
+                set_name     = set_name,
+                variant_type = variant_type,
+            )
+            if lookup["matched"]:
+                card_id      = lookup["card_id"]
+                variant_id   = lookup["variant_id"]
+                match_status = "matched"
+                matched += 1
+                print(f"    ✅ Matched → {lookup['card_name']} [{lookup['source']}]")
+            else:
+                match_status = "not_found"
+                unmatched += 1
+                print(f"    ⚠️  No match found")
+
+        if dry_run:
+            print(
+                f"  [DRY RUN] {row['set_name'] or '?':<22} "
+                f"#{row['card_number'] or '?':<5} "
+                f"{card_name:<28} "
+                f"{variant_type:<16} "
+                f"qty={row['quantity']}  ${row['price']:.2f}"
+            )
+            inserted += 1
+            continue
+
+        with db_cursor() as cur:
             cur.execute("""
                 INSERT INTO staging (
                     import_batch,
@@ -288,32 +442,36 @@ def write_to_staging(rows: list[dict], batch_id: str, dry_run: bool = False) -> 
                     condition,
                     quantity,
                     price,
+                    card_id,
                     match_status,
                     status,
                     notes
                 ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                 )
                 ON CONFLICT DO NOTHING
             """, (
                 batch_id,
-                row["item_id"],              # order_number = eBay item ID
-                datetime.now(timezone.utc),  # order_date
-                "ebay",                      # source
-                row["card_name"] or row["variation_name"],
-                row["set_name"] or "",
-                row["card_number"] or "",
-                "Near Mint",                 # default condition
+                row["item_id"],
+                datetime.now(timezone.utc),
+                "ebay",
+                card_name,
+                set_name,
+                row.get("card_number", ""),
+                "Near Mint",
                 row["quantity"],
                 row["price"],
-                "pending",                   # match_status — review will resolve
-                "pending",                   # workflow status
-                f"eBay listing: {row['title']} | variation: {row['variation_name']} | type: {row['card_type']}",
+                card_id,
+                match_status,
+                "approved" if card_id else "pending",
+                f"eBay: {row['title'][:80]} | var: {row['variation_name']} | type: {row['card_type']}",
             ))
-            inserted += 1
+        inserted += 1
 
     if skipped:
-        print(f"  ↳ Skipped {skipped} zero-quantity variation(s).")
+        print(f"\n  ↳ Skipped {skipped} zero-quantity variation(s).")
+    if not dry_run:
+        print(f"\n  📊 Matched: {matched} | Needs review: {unmatched}")
 
     return inserted
 

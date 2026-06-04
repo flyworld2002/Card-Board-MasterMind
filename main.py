@@ -140,6 +140,10 @@ def cmd_ebay_import(args):
     from importer.ebay import import_from_ebay
     import_from_ebay(dry_run=args.dry_run)
 
+def cmd_ebay_item(args):
+    from importer.ebay import import_single_item
+    import_single_item(args.ebay_item, dry_run=args.dry_run, no_api=getattr(args, 'no_api', False))
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -176,10 +180,14 @@ def main():
         help="Import active eBay listings → staging (use --dry-run to preview)")
     group.add_argument("--ebay-verify", action="store_true",
         help="Verify eBay API credentials without importing anything")
+    group.add_argument("--ebay-item", metavar="ITEM_ID",
+        help="Import a single eBay listing by item ID → staging")
 
     # ── Shared optional flags ─────────────────────────────────────────────────
     parser.add_argument("--dry-run", action="store_true",
         help="Parse only, no DB writes")
+    parser.add_argument("--no-api", action="store_true",
+        help="Skip API calls during dry run — just show parsed eBay data")
     parser.add_argument("--order", metavar="ORDER_NUM",
         help="Only process this specific order number")
     parser.add_argument("--number", metavar="CARD_NUM",
@@ -215,6 +223,8 @@ def main():
         cmd_ebay_import(args)
     elif args.ebay_verify:
         cmd_ebay_verify(args)
+    elif args.ebay_item:
+        cmd_ebay_item(args)    
 
 if __name__ == "__main__":
     main()

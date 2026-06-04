@@ -6,7 +6,7 @@ Set POKEMONTCG_API_KEY in .env for higher limits.
 """
 
 import os
-import time
+import re
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -18,7 +18,7 @@ def _session():
     s = requests.Session()
     retry = Retry(
         total=3,
-        backoff_factor=2,        # wait 2s, 4s, 8s between retries
+        backoff_factor=2,
         status_forcelist=[429, 500, 502, 503, 504],
     )
     s.mount("https://", HTTPAdapter(max_retries=retry))
@@ -41,7 +41,7 @@ def get_set_by_name(name: str) -> dict | None:
     """Find a set by name. Returns first match or None."""
     resp = _session().get(
         f"{BASE_URL}/sets",
-        params={"q": f'name:"{search_name}"'},
+        params={"q": f'name:"{name}"'},          # FIX: was referencing undefined search_name
         headers=_headers(),
         timeout=30
     )
@@ -52,7 +52,7 @@ def get_set_by_name(name: str) -> dict | None:
 
 @lru_cache(maxsize=256)
 def get_set_by_code(code: str) -> dict | None:
-    """Find a set by its code (e.g. 'base1', 'sv1')."""
+    """Find a set by its code (e.g. 'base1', 'sv3')."""
     resp = _session().get(
         f"{BASE_URL}/sets/{code}",
         headers=_headers(),
@@ -139,11 +139,11 @@ def search_cards(name: str, set_name: str = None, set_code: str = None,
             filtered = [c for c in results if c["set"]["id"] == api_set_id]
             if filtered:
                 return filtered
-            continue  # Don't return wrong set
+            continue
         if len(results) == 1:
             return results
 
-    # Pass 3: name + set ID (no number — take lowest numbered = base card)
+    # Pass 3: name + set ID (no number)
     if api_set_id:
         results = _api_search(f'name:"{search_name}" set.id:{api_set_id}')
         if results:
@@ -153,7 +153,7 @@ def search_cards(name: str, set_name: str = None, set_code: str = None,
                     return [filtered[0]]
             return [_sort_by_number(results)[0]]
 
-    # Pass 4: name only — must match set ID
+    # Pass 4: name only
     results = _api_search(f'name:"{search_name}"')
     if results and api_set_id:
         filtered = [c for c in results if c["set"]["id"] == api_set_id]
@@ -167,72 +167,220 @@ def search_cards(name: str, set_name: str = None, set_code: str = None,
     return []
 
 
-def _normalize_name(name: str) -> str:
-    """Normalize card name for comparison - handle special chars."""
-    return (name.lower()
-            .replace("♀", " f").replace("♂", " m")
-            .replace("-", " ").strip())
+# ----------------------------------------------------------------
+# eBay import: auto-match a parsed variation to card_master
+# ----------------------------------------------------------------
 
-
-def _sort_by_number(cards: list) -> list:
-    """Sort cards by number numerically (handles non-numeric like 'SWSH001')."""
-    def num_key(c):
-        n = c.get("number", "9999")
-        # Extract leading digits for sorting
-        import re
-        m = re.match(r'(\d+)', str(n))
-        return int(m.group(1)) if m else 9999
-    return sorted(cards, key=num_key)
-
-
-def _filter_by_variant(results: list, variant: str) -> list:
+def lookup_card_for_ebay(card_name: str, card_number: str,
+                         set_name: str, variant_type: str) -> dict:
     """
-    Filter API results by variant string.
-    Handles variants like "Master Ball Pattern", "Reverse Holo", "1st Edition" etc.
-    The API stores these in subtypes or the card name itself.
+    Given a parsed eBay variation, find or create the matching card_master row.
+
+    Returns:
+    {
+        "card_id":      UUID string (or None if not found),
+        "variant_id":   UUID string (or None),
+        "matched":      True/False,
+        "source":       "db_exact" | "db_fuzzy" | "api" | "not_found",
+        "card_name":    canonical name from API/DB,
+        "set_name":     canonical set name,
+        "rarity":       rarity string,
+        "image_url":    card image URL,
+        "api_card_id":  external_id e.g. "sv3-153",
+    }
     """
-    variant_lower = variant.lower()
-
-    # Check subtypes, name, and set name for variant keywords
-    filtered = []
-    for c in results:
-        subtypes = " ".join(c.get("subtypes", [])).lower()
-        card_name_lower = c.get("name", "").lower()
-        # Master Ball Pattern cards typically have it in their name
-        if variant_lower in card_name_lower:
-            filtered.append(c)
-        elif variant_lower in subtypes:
-            filtered.append(c)
-        # Check if variant keywords appear in set name (e.g. promos)
-        elif variant_lower in c.get("set", {}).get("name", "").lower():
-            filtered.append(c)
-
-    return filtered
-
-
-def _api_search(q: str, page_size: int = 20) -> list[dict]:
-    """Raw API search helper."""
-    resp = _session().get(
-        f"{BASE_URL}/cards",
-        params={"q": q, "pageSize": page_size},
-        headers=_headers(),
-        timeout=30
+    from db.connection import (
+        find_card_by_external_id, find_card_by_name_set,
+        get_game_id, get_or_create_set, insert_card_master,
+        insert_card_attributes, get_or_create_variant, db_cursor,
     )
-    resp.raise_for_status()
-    return resp.json().get("data", [])
+    from utils.set_name_map import get_set_id
 
+    result = {
+        "card_id":    None,
+        "variant_id": None,
+        "matched":    False,
+        "source":     "not_found",
+        "card_name":  card_name,
+        "set_name":   set_name,
+        "rarity":     None,
+        "image_url":  None,
+        "api_card_id": None,
+        "_api_card":  None,    # full card data — avoids extra API call for market price
+    }
 
-def get_card_by_id(card_id: str) -> dict | None:
-    """Fetch a specific card by its API ID (e.g. 'base1-4')."""
-    resp = _session().get(
-        f"{BASE_URL}/cards/{card_id}",
-        headers=_headers(),
-        timeout=30
+    # ── Step 1: Search the Pokemon TCG API ───────────────────────────────────
+    api_results = search_cards(
+        name=card_name,
+        set_name=set_name,
+        card_number=card_number,
     )
-    if resp.status_code == 404:
+
+    if not api_results:
+        print(f"    ⚠️  Not found in Pokemon TCG API: {card_name} #{card_number} ({set_name})")
+        return result
+
+    api_card = api_results[0]
+    external_id = api_card["id"]
+    result["api_card_id"] = external_id
+    result["card_name"]   = api_card["name"]
+    result["set_name"]    = api_card["set"]["name"]
+    result["rarity"]      = api_card.get("rarity")
+    result["image_url"]   = api_card.get("images", {}).get("large")
+    result["_api_card"]   = api_card    # cache full card — no extra call needed for market price
+
+    # ── Step 2: Check if card already exists in card_master ──────────────────
+    existing = find_card_by_external_id(external_id)
+    if existing:
+        card_id = str(existing["id"])
+        result["card_id"] = card_id
+        result["matched"] = True
+        result["source"]  = "db_exact"
+    else:
+        # ── Step 3: Create card_master row from API data ──────────────────────
+        try:
+            game_id     = get_game_id("Pokemon")
+            fields      = parse_card_master_fields(api_card)
+            attr_fields = parse_card_attribute_fields(api_card)
+
+            set_id = get_or_create_set(
+                game_id      = game_id,
+                name         = fields["set_name"],
+                set_code     = fields["set_code"],
+                series       = fields.get("series"),
+                release_year = fields.get("release_year"),
+                total_cards  = fields.get("total_cards"),
+            )
+
+            card_id = insert_card_master(
+                set_id           = set_id,
+                name             = fields["name"],
+                card_number      = fields["card_number"],
+                rarity           = fields.get("rarity"),
+                variant          = fields.get("variant"),
+                finish           = fields.get("finish"),
+                is_promo         = fields.get("is_promo", False),
+                is_first_edition = fields.get("is_first_edition", False),
+                image_url        = fields.get("image_url"),
+                external_id      = fields["external_id"],
+            )
+            insert_card_attributes(card_id, **attr_fields)
+
+            result["card_id"] = card_id
+            result["matched"] = True
+            result["source"]  = "api"
+
+        except Exception as e:
+            print(f"    ❌ Error creating card_master for {card_name}: {e}")
+            return result
+
+    # ── Step 4: Get or create card_variant ───────────────────────────────────
+    try:
+        SPECIAL_PATTERNS = {
+            "Reverse Holo", "Cosmos Holo", "Master Ball Pattern",
+            "Poke Ball Pattern", "Cracked Ice Holo", "Galaxy Holo"
+        }
+        is_special   = variant_type in SPECIAL_PATTERNS
+        finish       = variant_type if variant_type != "Normal" else "Non-Holo"
+        variant_id   = get_or_create_variant(
+            card_id      = result["card_id"],
+            variant_type = variant_type if variant_type != "Normal" else "Non-Holo",
+            finish       = finish,
+            is_special   = is_special,
+        )
+        result["variant_id"] = variant_id
+    except Exception as e:
+        print(f"    ⚠️  Could not create variant for {card_name}: {e}")
+
+    return result
+
+
+# ----------------------------------------------------------------
+# Market price extraction from cached api_card (no extra API call)
+# ----------------------------------------------------------------
+
+def extract_market_price(api_card: dict, variant_type: str) -> float | None:
+    """
+    Extract market price from a cached api_card object.
+    Uses variant_type to pick the right TCGPlayer price key.
+    No API call needed — uses data already fetched during lookup.
+    """
+    if not api_card:
         return None
-    resp.raise_for_status()
-    return resp.json().get("data")
+
+    tcg_prices = api_card.get("tcgplayer", {}).get("prices", {})
+    if not tcg_prices:
+        return None
+
+    PRICE_KEYS = {
+        "Reverse Holo":       ["reverseHolofoil", "holofoil", "normal"],
+        "Holo":               ["holofoil", "normal"],
+        "Cosmos Holo":        ["holofoil", "normal"],
+        "Master Ball Pattern":["holofoil", "normal"],
+        "Normal":             ["normal", "holofoil", "reverseHolofoil"],
+        "promo":              ["holofoil", "normal"],
+    }
+    keys = PRICE_KEYS.get(variant_type, ["normal", "holofoil", "reverseHolofoil"])
+
+    for key in keys:
+        if key in tcg_prices:
+            market = tcg_prices[key].get("market") or tcg_prices[key].get("mid")
+            if market:
+                return float(market)
+    return None
+
+
+# ----------------------------------------------------------------
+# Market price lookup (used by staging_workflow on approve)
+# ----------------------------------------------------------------
+
+def get_market_price_from_api(card_id: str, condition: str) -> float | None:
+    """
+    Fetch current market price for a card from the Pokemon TCG API.
+    Looks up by external_id stored in card_master, reads TCGPlayer prices.
+
+    Condition mapping:
+        Near Mint         → normal
+        Lightly Played    → 1stEditionNormal (closest available)
+        Moderately Played → reverseHolofoil (proxy)
+        Heavily Played    → (no direct map — returns None)
+    """
+    from db.connection import db_cursor
+
+    # Get external_id for this card_id
+    with db_cursor() as cur:
+        cur.execute("SELECT external_id FROM card_master WHERE id = %s", (card_id,))
+        row = cur.fetchone()
+        if not row or not row["external_id"]:
+            return None
+        external_id = row["external_id"]
+
+    # Fetch card from API
+    api_card = get_card_by_id(external_id)
+    if not api_card:
+        return None
+
+    # Pull TCGPlayer prices
+    tcgplayer = api_card.get("tcgplayer", {})
+    prices    = tcgplayer.get("prices", {})
+
+    # Condition → price key mapping
+    CONDITION_MAP = {
+        "Near Mint":          ["normal", "holofoil", "reverseHolofoil", "1stEditionNormal"],
+        "Lightly Played":     ["normal", "holofoil", "reverseHolofoil"],
+        "Moderately Played":  ["normal", "holofoil"],
+        "Heavily Played":     ["normal"],
+        "Damaged":            ["normal"],
+    }
+
+    price_keys = CONDITION_MAP.get(condition, ["normal"])
+    for key in price_keys:
+        if key in prices:
+            market = prices[key].get("market") or prices[key].get("mid")
+            if market:
+                return float(market)
+
+    return None
 
 
 # ----------------------------------------------------------------
@@ -255,7 +403,6 @@ def parse_card_master_fields(api_card: dict) -> dict:
         "is_promo":         "Promo" in (api_card.get("rarity") or ""),
         "is_first_edition": "1st Edition" in subtypes,
         "image_url":        api_card.get("images", {}).get("large"),
-        # set info
         "set_name":         api_card["set"]["name"],
         "set_code":         api_card["set"]["id"],
         "series":           api_card["set"].get("series"),
@@ -266,10 +413,10 @@ def parse_card_master_fields(api_card: dict) -> dict:
 
 def parse_card_attribute_fields(api_card: dict) -> dict:
     """Extract card_attributes fields from a PokemonTCG API card object."""
-    types      = api_card.get("types", [])
-    weaknesses = api_card.get("weaknesses", [])
-    resistances= api_card.get("resistances", [])
-    hp_str     = api_card.get("hp")
+    types       = api_card.get("types", [])
+    weaknesses  = api_card.get("weaknesses", [])
+    resistances = api_card.get("resistances", [])
+    hp_str      = api_card.get("hp")
 
     return {
         "card_type":    api_card.get("supertype"),
@@ -286,6 +433,59 @@ def parse_card_attribute_fields(api_card: dict) -> dict:
 # ----------------------------------------------------------------
 # Internal helpers
 # ----------------------------------------------------------------
+
+def _normalize_name(name: str) -> str:
+    return (name.lower()
+            .replace("♀", " f").replace("♂", " m")
+            .replace("-", " ").strip())
+
+
+def _sort_by_number(cards: list) -> list:
+    def num_key(c):
+        n = c.get("number", "9999")
+        m = re.match(r'(\d+)', str(n))
+        return int(m.group(1)) if m else 9999
+    return sorted(cards, key=num_key)
+
+
+def _filter_by_variant(results: list, variant: str) -> list:
+    variant_lower = variant.lower()
+    filtered = []
+    for c in results:
+        subtypes        = " ".join(c.get("subtypes", [])).lower()
+        card_name_lower = c.get("name", "").lower()
+        if variant_lower in card_name_lower:
+            filtered.append(c)
+        elif variant_lower in subtypes:
+            filtered.append(c)
+        elif variant_lower in c.get("set", {}).get("name", "").lower():
+            filtered.append(c)
+    return filtered
+
+
+def _api_search(q: str, page_size: int = 20) -> list[dict]:
+    resp = _session().get(
+        f"{BASE_URL}/cards",
+        params={"q": q, "pageSize": page_size},
+        headers=_headers(),
+        timeout=30
+    )
+    resp.raise_for_status()
+    return resp.json().get("data", [])
+
+
+def get_card_by_id(card_id: str) -> dict | None:
+    """Fetch a specific card by its API ID (e.g. 'sv3-4')."""
+    resp = _session().get(
+        f"{BASE_URL}/cards/{card_id}",
+        headers=_headers(),
+        timeout=30
+    )
+    if resp.status_code == 404:
+        return None
+    resp.raise_for_status()
+    return resp.json().get("data")
+
 
 def _detect_variant(api_card: dict) -> str | None:
     subtypes = api_card.get("subtypes", [])
