@@ -15,6 +15,27 @@ from functools import lru_cache
 # Module-level lookup cache — persists for one import run
 _ebay_lookup_cache: dict = {}
 
+def rarity_to_card_type(rarity: str) -> str:
+    """Map Pokemon TCG API rarity to our card_type classifier."""
+    if not rarity:
+        return "common"
+    r = rarity.lower()
+    if any(x in r for x in ("special illustration", "hyper", "ace spec")):
+        return "ultra_rare"
+    if any(x in r for x in ("illustration rare", "secret")):
+        return "ultra_rare"
+    if any(x in r for x in ("double rare", "ultra rare")):
+        return "holo"
+    if "rare holo" in r or "rare" in r:
+        return "holo"
+    if "promo" in r:
+        return "promo"
+    return "common"
+
+
+def _session():
+    """Requests session with automatic retry on timeout/connection errors."""
+
 def _session():
     """Requests session with automatic retry on timeout/connection errors."""
     s = requests.Session()

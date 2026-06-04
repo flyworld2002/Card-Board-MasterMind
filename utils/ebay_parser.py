@@ -64,13 +64,17 @@ PROMO_PATTERNS = [
 
 
 # ── Card-type classifier ──────────────────────────────────────────────────────
-def classify_card_type(card_number: int, set_total: int, variant_type: str) -> str:
+def classify_card_type(card_number: int, set_total: int, variant_type: str, card_name: str = "") -> str:
     if card_number > set_total:
         return "ultra_rare"
     vt = (variant_type or "").lower()
     if "reverse" in vt:
         return "reverse_holo"
     if "holo" in vt or "cosmos" in vt:
+        return "holo"
+    # ex, V, VMAX, VSTAR, GX are holofoil by definition
+    name_lower = (card_name or "").lower()
+    if any(name_lower.endswith(s) for s in (" ex", " v", " vmax", " vstar", " gx", " gx tag team")):
         return "holo"
     return "common"
 
@@ -173,7 +177,7 @@ def parse_variation_name(variation_name: str, listing_title: str = "") -> dict:
         card_num_int  = int(card_num_str)
         set_total_int = int(set_total_str)
         result["card_type"] = classify_card_type(
-            card_num_int, set_total_int, result["variant_type"]
+            card_num_int, set_total_int, result["variant_type"], result["card_name"]
         )
     except ValueError:
         pass

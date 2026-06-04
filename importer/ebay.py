@@ -379,7 +379,7 @@ def write_to_staging(rows: list[dict], batch_id: str, dry_run: bool = False) -> 
     Returns count of rows inserted.
     """
     from db.connection import db_cursor
-    from utils.pokemon_api import lookup_card_for_ebay
+    from utils.pokemon_api import lookup_card_for_ebay, rarity_to_card_type
 
     inserted  = 0
     skipped   = 0
@@ -454,6 +454,8 @@ def write_to_staging(rows: list[dict], batch_id: str, dry_run: bool = False) -> 
                 )
                 row["market_price"]      = market_price
                 row["market_price_date"] = market_date
+                row["api_rarity"]        = lookup.get("rarity")
+                row["card_type"]         = rarity_to_card_type(lookup.get("rarity"))
             else:
                 match_status = "not_found"
                 unmatched += 1
@@ -488,9 +490,10 @@ def write_to_staging(rows: list[dict], batch_id: str, dry_run: bool = False) -> 
                     status,
                     notes,
                     market_price,
-                    market_price_date
+                    market_price_date,
+                    api_rarity
                 ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                 )
                 ON CONFLICT DO NOTHING
             """, (
@@ -510,6 +513,7 @@ def write_to_staging(rows: list[dict], batch_id: str, dry_run: bool = False) -> 
                 f"eBay: {row['title'][:80]} | var: {row['variation_name']} | type: {row['card_type']}",
                 row.get("market_price"),
                 row.get("market_price_date"),
+                row.get("api_rarity"),
             ))
         inserted += 1
 
