@@ -16,3 +16,5 @@ env/
 *.log
 __pycache__/
 *.pyc
+*.csv
+ebay_export_*.csv
