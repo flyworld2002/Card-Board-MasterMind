@@ -104,6 +104,8 @@ def parse_variation_name(variation_name: str, listing_title: str = "") -> dict:
         "variant_type": "Normal",
         "card_type":    "common",
         "set_override": None,
+        "source_type":  None,        # e.g. 'deck_exclusive', 'promo', 'gift_set'
+        "product_name": None,        # e.g. 'Paradox Rift Trainer Kit'
         "parse_ok":     False,
     }
 
@@ -146,6 +148,11 @@ def parse_variation_name(variation_name: str, listing_title: str = "") -> dict:
     clean_name    = remainder
     found_variant = None
 
+    # ── Detect source type before stripping ──────────────────────────────────
+    if re.search(r'\(Deck\s+Exclusive\)', clean_name, re.IGNORECASE):
+        result["source_type"] = "deck_exclusive"
+        clean_name = re.sub(r'\s*\(Deck\s+Exclusive\)', '', clean_name, flags=re.IGNORECASE).strip()
+
     for pattern, variant_label in VARIANT_PATTERNS:
         if re.search(pattern, clean_name, re.IGNORECASE):
             found_variant = variant_label
@@ -162,7 +169,6 @@ def parse_variation_name(variation_name: str, listing_title: str = "") -> dict:
         r"\bPoke\s+Ball\b",
         r"\bPromo\b",        # ← strips "Promo" from card names
         r"\s+R$",            # ← strips trailing " R" rarity indicator
-        r"\s*\(Deck\s+Exclusive\)",   # strips "(Deck Exclusive)" suffix
     ]
     for sp in STRIP_PATTERNS:
         clean_name = re.sub(sp, "", clean_name, flags=re.IGNORECASE)

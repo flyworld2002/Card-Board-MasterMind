@@ -338,7 +338,8 @@ def fetch_item_variations(item_id: str, title: str) -> list[dict]:
                 "set_name":       set_name or "",
                 **{k: parsed[k] for k in (
                     "card_number", "set_total", "card_name",
-                    "variant_type", "card_type", "parse_ok", "set_override"
+                    "variant_type", "card_type", "parse_ok", "set_override",
+                    "source_type"
                 )},
             })
 
@@ -491,9 +492,10 @@ def write_to_staging(rows: list[dict], batch_id: str, dry_run: bool = False) -> 
                     notes,
                     market_price,
                     market_price_date,
-                    api_rarity
+                    api_rarity,
+                    source_type   
                 ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                 )
                 ON CONFLICT DO NOTHING
             """, (
@@ -514,6 +516,7 @@ def write_to_staging(rows: list[dict], batch_id: str, dry_run: bool = False) -> 
                 row.get("market_price"),
                 row.get("market_price_date"),
                 row.get("api_rarity"),
+                row.get("source_type"),  
             ))
         inserted += 1
 
@@ -588,3 +591,172 @@ def import_from_ebay(dry_run: bool = False):
         print(f"\nNext steps:")
         print(f"  python main.py --review          ← review and fix conditions/prices")
         print(f"  python main.py --approve-all     ← push all approved rows to inventory")
+
+  
+# ══════════════════════════════════════════════════════════════════════════════
+# Export listing to csv
+# ══════════════════════════════════════════════════════════════════════════════
+
+def export_listings_to_csv(no_api: bool = False, item_id: str = None):
+    """
+    Export all active eBay listings to a CSV file for review.
+    
+    NO DB WRITES — this is a read-only operation.
+    
+    Two modes:
+    
+    1. Default (with API):
+       python3 main.py --ebay-export
+       - Fetches all active eBay listings
+       - Parses every variation name into card fields
+       - Calls Pokemon TCG API to match each card
+       - Exports full results including API match, rarity, market price
+       - Use this to verify API matching before real import
+    
+    2. No API mode:
+       python3 main.py --ebay-export --no-api
+       - Fetches all active eBay listings
+       - Parses every variation name into card fields
+       - NO API calls — instant
+       - Use this to check parsing and set name inference across all listings
+       - Good first step to spot set name issues before API matching
+    
+    Output file: ebay_export_YYYYMMDD_HHMMSS.csv
+    Location: same directory as main.py
+    
+    CSV columns (no-api mode):
+        item_id, listing_title, variation_name, card_number, card_name,
+        variant_type, card_type, set_name, set_override, qty, price
+    
+    CSV columns (api mode, adds):
+        api_card_id, api_name, api_set, api_rarity, market_price,
+        matched, match_source
+    """
+    import csv
+    from datetime import datetime
+    from utils.pokemon_api import lookup_card_for_ebay, extract_market_price
+
+    timestamp   = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_file = f"ebay_export_{timestamp}.csv"
+
+    mode_label = "no-api" if no_api else "with API matching"
+    print(f"📦 eBay Export — {mode_label}")
+    print(f"📄 Output file: {output_file}\n")
+
+    # ── Step 1: Fetch all active listing IDs ─────────────────────────────────
+    listings = fetch_active_listing_ids()
+    if not listings:
+        print("No active listings found.")
+        return
+
+    # Filter to single listing if item_id specified
+    if item_id:
+        listings = [l for l in listings if l["item_id"] == item_id]
+        if not listings:
+            print(f"❌ Item ID {item_id} not found in active listings.")
+            return
+
+    # ── Step 2: Fetch variations for every listing ───────────────────────────
+    all_rows  = []
+    for i, listing in enumerate(listings, 1):
+        item_id = listing["item_id"]
+        title   = listing["title"]
+        print(f"  [{i}/{len(listings)}] Fetching: {title[:60]}")
+        try:
+            rows = fetch_item_variations(item_id, title)
+            print(f"           → {len(rows)} variation(s)")
+            all_rows.extend(rows)
+        except Exception as e:
+            print(f"  ⚠️  Error fetching item {item_id}: {e}")
+            continue
+
+    print(f"\n📊 Total variations fetched: {len(all_rows)}")
+
+    # ── Step 3: Write CSV ─────────────────────────────────────────────────────
+    # Define columns based on mode
+    base_columns = [
+        "item_id", "listing_title", "variation_name",
+        "card_number", "card_name", "variant_type", "card_type",
+        "set_name", "set_override", "qty", "price",
+    ]
+    api_columns = [
+        "api_card_id", "api_name", "api_set", "api_rarity",
+        "market_price", "matched", "match_source",
+    ]
+    columns = base_columns + ([] if no_api else api_columns)
+
+    matched   = 0
+    unmatched = 0
+
+    with open(output_file, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=columns)
+        writer.writeheader()
+
+        for i, row in enumerate(all_rows, 1):
+            card_name    = row.get("card_name") or row.get("variation_name", "")
+            card_number  = row.get("card_number", "")
+            set_name     = row.get("set_override") or row.get("set_name", "")
+            variant_type = row.get("variant_type", "Normal")
+
+            # ── Base fields ───────────────────────────────────────────────────
+            csv_row = {
+                "item_id":        row["item_id"],
+                "listing_title":  row["title"][:80],
+                "variation_name": row["variation_name"],
+                "card_number":    card_number,
+                "card_name":      card_name,
+                "variant_type":   variant_type,
+                "card_type":      row.get("card_type", ""),
+                "set_name":       row.get("set_name", ""),
+                "set_override":   row.get("set_override", ""),
+                "qty":            row["quantity"],
+                "price":          row["price"],
+            }
+
+            # ── API fields ────────────────────────────────────────────────────
+            if not no_api:
+                if row["quantity"] <= 0:
+                    csv_row.update({
+                        "api_card_id":   "",
+                        "api_name":      "",
+                        "api_set":       "",
+                        "api_rarity":    "",
+                        "market_price":  "",
+                        "matched":       "skipped (qty=0)",
+                        "match_source":  "",
+                    })
+                else:
+                    print(f"  [{i}/{len(all_rows)}] 🔍 {set_name:<25} #{card_number:<5} {card_name}")
+                    lookup = lookup_card_for_ebay(
+                        card_name    = card_name,
+                        card_number  = card_number,
+                        set_name     = set_name,
+                        variant_type = variant_type,
+                    )
+                    market_price, _ = extract_market_price(
+                        lookup.get("_api_card"), variant_type
+                    )
+                    if lookup["matched"]:
+                        matched += 1
+                    else:
+                        unmatched += 1
+
+                    csv_row.update({
+                        "api_card_id":  lookup.get("api_card_id", ""),
+                        "api_name":     lookup.get("card_name", ""),
+                        "api_set":      lookup.get("set_name", ""),
+                        "api_rarity":   lookup.get("rarity", ""),
+                        "market_price": f"{market_price:.2f}" if market_price else "",
+                        "matched":      "✅" if lookup["matched"] else "⚠️ not found",
+                        "match_source": lookup.get("source", ""),
+                    })
+
+            writer.writerow(csv_row)
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+    print(f"\n{'─'*60}")
+    print(f"✅ Export complete: {len(all_rows)} variations → {output_file}")
+    if not no_api:
+        print(f"📊 Matched: {matched} | Unmatched: {unmatched}")
+    print(f"\nOpen the CSV in Excel or Google Sheets to review.")
+    print(f"Fix any set name issues in utils/set_name_map.py before importing.")

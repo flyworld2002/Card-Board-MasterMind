@@ -405,6 +405,19 @@ def _push_batch(batch_id: str):
                     variant_id,
                 ))
 
+                # ── Store source type if present (e.g. deck_exclusive) ────────
+                if row.get("source_type"):
+                    cur.execute("""
+                        INSERT INTO card_variant_sources
+                            (variant_id, source_type, product_name)
+                        VALUES (%s, %s, %s)
+                        ON CONFLICT (variant_id, source_type, product_name) DO NOTHING
+                    """, (
+                        variant_id,
+                        row["source_type"],
+                        row.get("product_name"),
+                    ))
+
                 # ── Upsert market price if available ──────────────────────────
                 market      = row.get("market_price")
                 market_date = row.get("market_price_date")
@@ -610,6 +623,20 @@ def _push_batch_by_order(order_number: str):
             finish=finish,
             is_special=is_special,
         )
+
+        # Store source type if present (e.g. deck_exclusive)
+        if row.get("source_type"):
+            cur.execute("""
+                INSERT INTO card_variant_sources
+                    (variant_id, source_type, product_name)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (variant_id, source_type, product_name) DO NOTHING
+            """, (
+                variant_id,
+                row["source_type"],
+                row.get("product_name"),
+            ))
+
         insert_inventory(
             card_id     = str(row["card_id"]),
             purchase_id = purchase_id,

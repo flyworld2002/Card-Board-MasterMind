@@ -144,6 +144,12 @@ def cmd_ebay_item(args):
     from importer.ebay import import_single_item
     import_single_item(args.ebay_item, dry_run=args.dry_run, no_api=getattr(args, 'no_api', False))
 
+def cmd_ebay_export(args):
+    from importer.ebay import export_listings_to_csv
+    export_listings_to_csv(
+        no_api=getattr(args, 'no_api', False),
+        item_id=getattr(args, 'export_item', None)
+    )
 
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -182,6 +188,13 @@ def main():
         help="Verify eBay API credentials without importing anything")
     group.add_argument("--ebay-item", metavar="ITEM_ID",
         help="Import a single eBay listing by item ID → staging")
+    group.add_argument("--ebay-export", action="store_true",
+    help=(
+        "Export all active eBay listings to CSV for review. "
+        "No DB writes. "
+        "Default: calls Pokemon TCG API to match cards. "
+        "Use --no-api for instant export without API calls."
+    ))
 
     # ── Shared optional flags ─────────────────────────────────────────────────
     parser.add_argument("--dry-run", action="store_true",
@@ -190,6 +203,8 @@ def main():
         help="Skip API calls during dry run — just show parsed eBay data")
     parser.add_argument("--order", metavar="ORDER_NUM",
         help="Only process this specific order number")
+    parser.add_argument("--export-item", metavar="ITEM_ID",
+        help="Export a single eBay listing by item ID (use with --ebay-export)")
     parser.add_argument("--number", metavar="CARD_NUM",
         help="Card number for --fix-variant")
     parser.add_argument("--variant", metavar="VARIANT",
@@ -225,6 +240,7 @@ def main():
         cmd_ebay_verify(args)
     elif args.ebay_item:
         cmd_ebay_item(args)    
-
+    elif args.ebay_export:
+        cmd_ebay_export(args)
 if __name__ == "__main__":
     main()
