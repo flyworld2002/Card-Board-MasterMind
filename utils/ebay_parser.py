@@ -25,6 +25,7 @@ VARIANT_PATTERNS = [
     (r"\bRH\b",                   "Reverse Holo"),
     (r"\bReverse\s+Holo\b",       "Reverse Holo"),
     (r"\bReverse\b",              "Reverse Holo"),
+    (r"\bReverse\s+H\b",          "Reverse Holo"),   # truncated "Reverse H"
     (r"\bCosmos\s+Holo\b",        "Cosmos Holo"),
     (r"\bMaster\s+Ball\b",        "Master Ball Pattern"),
     (r"\bPoke\s+Ball\b",          "Poke Ball Pattern"),
@@ -160,15 +161,15 @@ def parse_variation_name(variation_name: str, listing_title: str = "") -> dict:
 
     # Strip ALL variant-related words in one pass regardless of order
     STRIP_PATTERNS = [
-        r"\bReverse\s+Holo\b",
-        r"\bReverse\b",
-        r"\bHolo\b",
-        r"\bRH\b",
-        r"\bCosmos\b",
-        r"\bMaster\s+Ball\b",
-        r"\bPoke\s+Ball\b",
-        r"\bPromo\b",        # ← strips "Promo" from card names
-        r"\s+R$",            # ← strips trailing " R" rarity indicator
+        r"\bReverse\s+H\w*\b",     # "Reverse H", "Reverse Hol", "Reverse Holo", etc.
+        r"\bReverse\b",            # standalone "Reverse"
+        r"\bHolo\b",               # standalone "Holo"
+        r"\bRH\b",                 # abbreviation "RH"
+        r"\bCosmos\b",             # "Cosmos" (Cosmos Holo)
+        r"\bMaster\s+Ball\b",      # "Master Ball"
+        r"\bPoke\s+Ball\b",        # "Poke Ball"
+        r"\bPromo\b",              # "Promo"
+        r"\s+R$",                  # trailing rarity indicator "R"
     ]
     for sp in STRIP_PATTERNS:
         clean_name = re.sub(sp, "", clean_name, flags=re.IGNORECASE)
