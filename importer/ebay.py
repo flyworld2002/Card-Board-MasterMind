@@ -726,7 +726,7 @@ def export_listings_to_csv(no_api: bool = False, item_id: str = None):
                         "match_source":  "",
                     })
                 else:
-                    print(f"  [{i}/{len(all_rows)}] 🔍 {set_name:<25} #{card_number:<5} {card_name}")
+                    print(f"  [{i}/{len(all_rows)}] 🔍 {(set_name or '?'):<25} #{(card_number or '?'):<5} {card_name}")
                     lookup = lookup_card_for_ebay(
                         card_name    = card_name,
                         card_number  = card_number,

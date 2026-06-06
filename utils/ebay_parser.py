@@ -170,6 +170,7 @@ def parse_variation_name(variation_name: str, listing_title: str = "") -> dict:
         r"\bPoke\s+Ball\b",        # "Poke Ball"
         r"\bPromo\b",              # "Promo"
         r"\s+R$",                  # trailing rarity indicator "R"
+        r"\s*\[.*?\]",    # strips anything in brackets e.g. [Ghetsis], [Paldea]
     ]
     for sp in STRIP_PATTERNS:
         clean_name = re.sub(sp, "", clean_name, flags=re.IGNORECASE)
