@@ -27,9 +27,12 @@ VARIANT_PATTERNS = [
     (r"\bReverse\b",              "Reverse Holo"),
     (r"\bReverse\s+H\b",          "Reverse Holo"),   # truncated "Reverse H"
     (r"\bCosmos\s+Holo\b",        "Cosmos Holo"),
+    (r"\bCosmo\b",                "Cosmos Holo"),   # short form of Cosmos Holo
     (r"\bMaster\s+Ball\b",        "Master Ball Pattern"),
     (r"\bPoke\s+Ball\b",          "Poke Ball Pattern"),
     (r"\bHolo\b",                 "Holo"),
+    (r"\bCosmo\s+Holo\b",         "Cosmos Holo"),   
+    (r"\bCosmo\b",                "Cosmos Holo"),   
 ]
 
 # ── Promo set patterns ────────────────────────────────────────────────────────
@@ -145,14 +148,20 @@ def parse_variation_name(variation_name: str, listing_title: str = "") -> dict:
     result["card_number"] = card_num_str
     result["set_total"]   = set_total_str
 
-# ── Step 2: Strip ALL variant tokens from remainder ──────────────────────
+    # ── Step 2: Strip ALL variant tokens from remainder ──────────────────────
     clean_name    = remainder
     found_variant = None
 
     # ── Detect source type before stripping ──────────────────────────────────
-    if re.search(r'\(Deck\s+Exclusive\)', clean_name, re.IGNORECASE):
+    if re.search(r'\(?Deck\s+Exclusive\)?', clean_name, re.IGNORECASE):
         result["source_type"] = "deck_exclusive"
-        clean_name = re.sub(r'\s*\(Deck\s+Exclusive\)', '', clean_name, flags=re.IGNORECASE).strip()
+        clean_name = re.sub(r'\s*\(?Deck\s+Exclusive\)?', '', clean_name, flags=re.IGNORECASE).strip()
+    elif re.search(r'\(?Product\s+Exclusive\)?', clean_name, re.IGNORECASE):
+        result["source_type"] = "product_exclusive"
+        clean_name = re.sub(r'\s*\(?Product\s+Exclusive\)?', '', clean_name, flags=re.IGNORECASE).strip()
+    elif re.search(r'\bStamp\b', clean_name, re.IGNORECASE):
+        result["source_type"] = "stamp_promo"
+        clean_name = re.sub(r'\s*\bStamp\b', '', clean_name, flags=re.IGNORECASE).strip()
 
     for pattern, variant_label in VARIANT_PATTERNS:
         if re.search(pattern, clean_name, re.IGNORECASE):
@@ -166,6 +175,8 @@ def parse_variation_name(variation_name: str, listing_title: str = "") -> dict:
         r"\bHolo\b",               # standalone "Holo"
         r"\bRH\b",                 # abbreviation "RH"
         r"\bCosmos\b",             # "Cosmos" (Cosmos Holo)
+        r"\bCosmo\b",
+        r"\bStamp\b",              # Stamp promo indicator
         r"\bMaster\s+Ball\b",      # "Master Ball"
         r"\bPoke\s+Ball\b",        # "Poke Ball"
         r"\bPromo\b",              # "Promo"

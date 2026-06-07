@@ -238,8 +238,27 @@ def lookup_card_for_ebay(card_name: str, card_number: str,
     }
 
     # ── Step 1: Search the Pokemon TCG API ───────────────────────────────────
+    # Strip variant suffixes from card name before API lookup
+    clean_name = re.sub(
+        r'\s+(Reverse\s+Holo|Holo|RH|Promo|Black\s+Star\s+Promo)$',
+        '', card_name, flags=re.IGNORECASE
+    ).strip()
+
+    # Name corrections — accent-stripped or common misspellings
+    NAME_CORRECTIONS = {
+        "flabebe":   "Flabébé",
+        "flabébé":   "Flabébé",
+        "nidoran f": "Nidoran ♀",
+        "nidoran m": "Nidoran ♂",
+        "poke vital a":  "Poké Vital A",
+        "poke vital b":  "Poké Vital B",
+        "poke vital":    "Poké Vital",
+    }
+    if clean_name.lower() in NAME_CORRECTIONS:
+        clean_name = NAME_CORRECTIONS[clean_name.lower()]
+
     api_results = search_cards(
-        name=card_name,
+        name=clean_name,
         set_name=set_name,
         card_number=card_number,
     )
