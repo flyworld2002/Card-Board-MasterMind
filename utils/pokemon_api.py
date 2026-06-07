@@ -93,6 +93,7 @@ def get_set_by_code(code: str) -> dict | None:
 
 def search_cards(name: str, set_name: str = None, set_code: str = None,
                  card_number: str = None, variant: str = None) -> list[dict]:
+
     """Search using set IDs for precise matching."""
     from utils.set_name_map import get_set_id
 
@@ -215,7 +216,10 @@ def lookup_card_for_ebay(card_name: str, card_number: str,
 
     cache_key = f"{set_name}|{card_number}|{card_name}"
     if cache_key in _ebay_lookup_cache:
-        return _ebay_lookup_cache[cache_key]
+        cached = _ebay_lookup_cache[cache_key]
+        if not cached["matched"]:
+            print(f"    ⚠️  CACHE HIT not_found: {cache_key}")
+        return cached
 
     from db.connection import (
         find_card_by_external_id, find_card_by_name_set,
@@ -238,6 +242,10 @@ def lookup_card_for_ebay(card_name: str, card_number: str,
     }
 
     # ── Step 1: Search the Pokemon TCG API ───────────────────────────────────
+
+    # Normalize curly apostrophes to straight apostrophes
+    card_name  = card_name.replace('\u2019', "'").replace('\u2018', "'")
+
     # Strip variant suffixes from card name before API lookup
     clean_name = re.sub(
         r'\s+(Reverse\s+Holo|Holo|RH|Promo|Black\s+Star\s+Promo)$',
@@ -263,6 +271,8 @@ def lookup_card_for_ebay(card_name: str, card_number: str,
         "fighting energy":   "Basic Fighting Energy",
         "dark energy":       "Basic Darkness Energy",
         "metal energy":      "Basic Metal Energy",
+        "professor's research (sada)":  "Professor's Research",
+        "professor's research (turo)":  "Professor's Research",
     }
     if clean_name.lower() in NAME_CORRECTIONS:
         clean_name = NAME_CORRECTIONS[clean_name.lower()]

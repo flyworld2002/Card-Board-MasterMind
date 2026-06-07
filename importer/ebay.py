@@ -181,7 +181,17 @@ def import_single_item(item_id: str, dry_run: bool = False, no_api: bool = False
         print("No variations found for this item.")
         return
 
-    print(f"  Found {len(rows)} variation(s). Starting{'...' if no_api else ' API matching...'}\n")
+    print(f"  Found {len(rows)} variation(s).")
+
+    # Real import — skip display loop, go straight to staging
+    if not dry_run and not no_api:
+        print(f"  Writing to staging...\n")
+        inserted = write_to_staging(rows, batch_id, dry_run=False)
+        print(f"\n✅ Done: {inserted} row(s) written to staging.")
+        print(f"\nNext steps:")
+        print(f"  python3 main.py --review      ← fix unmatched cards")
+        print(f"  python3 main.py --approve-all ← push to inventory")
+        return
 
     matched   = 0
     unmatched = 0
@@ -399,9 +409,9 @@ def write_to_staging(rows: list[dict], batch_id: str, dry_run: bool = False) -> 
                 """, (item_id,))
                 existing = cur.fetchall()
 
-            existing_approved = set(r["card_number"] for r in existing if r["status"] == "approved")
-            existing_any      = set(r["card_number"] for r in existing)
-            incoming          = set(str(row.get("card_number", "")) for row in rows if row["quantity"] > 0)
+            existing_approved = set((r["card_number"], r.get("source_type") or "") for r in existing if r["status"] == "approved")
+            existing_any      = set((r["card_number"], r.get("source_type") or "") for r in existing)
+            incoming          = set((str(row.get("card_number", "")), row.get("source_type") or "") for row in rows if row["quantity"] > 0)
 
             # All variations already approved → skip entirely
             if incoming and incoming.issubset(existing_approved):
@@ -413,7 +423,9 @@ def write_to_staging(rows: list[dict], batch_id: str, dry_run: bool = False) -> 
                 missing = incoming - existing_any
                 if missing:
                     print(f"  ℹ️  Found {len(existing_any)} existing rows, inserting {len(missing)} missing variation(s).")
-                    rows = [r for r in rows if str(r.get("card_number", "")) in missing]
+                    rows = [r for r in rows if (str(r.get("card_number", "")), r.get("source_type") or "") in missing]
+                    for r in rows:
+                        print(f"    Missing: #{r.get('card_number')} {r.get('card_name')} source={r.get('source_type')}")
                 else:
                     print(f"  ✅ All variations already in staging — skipping import.")
                     return 0

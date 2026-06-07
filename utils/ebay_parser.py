@@ -178,7 +178,10 @@ def parse_variation_name(variation_name: str, listing_title: str = "") -> dict:
     elif re.search(r'\(?\s*Metal\s+Card\s*(?:Promo)?\s*\)?', clean_name, re.IGNORECASE):
         result["variant_type"] = "Metal Card"
         clean_name = re.sub(r'\s*\(?\s*Metal\s+Card\s*(?:Promo)?\s*\)?', '', clean_name, flags=re.IGNORECASE).strip()
-        
+    elif re.search(r'\bExclusive\b', clean_name, re.IGNORECASE):
+        result["source_type"] = "product_exclusive"
+        clean_name = re.sub(r'\s*\bExclusive\b', '', clean_name, flags=re.IGNORECASE).strip()
+
     for pattern, variant_label in VARIANT_PATTERNS:
         if re.search(pattern, clean_name, re.IGNORECASE):
             found_variant = variant_label
@@ -198,6 +201,7 @@ def parse_variation_name(variation_name: str, listing_title: str = "") -> dict:
         r"\bPromo\b",              # "Promo"
         r"\s+R$",                  # trailing rarity indicator "R"
         r"\s*\[.*?\]",    # strips anything in brackets e.g. [Ghetsis], [Paldea]
+        r"\s*\([^)]*\)\s*$",    # strips trailing (content) e.g. (Sada), (Turo)
     ]
     for sp in STRIP_PATTERNS:
         clean_name = re.sub(sp, "", clean_name, flags=re.IGNORECASE)
