@@ -32,7 +32,6 @@ VARIANT_PATTERNS = [
     (r"\bPoke\s+Ball\b",          "Poke Ball Pattern"),
     (r"\bHolo\b",                 "Holo"),
     (r"\bCosmo\s+Holo\b",         "Cosmos Holo"),   
-    (r"\bCosmo\b",                "Cosmos Holo"),   
 ]
 
 # ── Promo set patterns ────────────────────────────────────────────────────────
@@ -63,6 +62,10 @@ PROMO_PATTERNS = [
     (
         re.compile(r'^BW0*(\d+)\s+(.+)$', re.IGNORECASE),
         "BW Black Star Promos",
+    ),
+    (
+        re.compile(r'^SVE\s*0*(\d+)\s+(.+?)$', re.IGNORECASE),
+        "Scarlet & Violet Energies",
     ),
 ]
 
@@ -124,11 +127,21 @@ def parse_variation_name(variation_name: str, listing_title: str = "") -> dict:
             # Strip any trailing promo label from card name
             card_name = re.sub(r'\s+Black\s+Star\s+Promo$', '', card_name, flags=re.IGNORECASE).strip()
             card_name = re.sub(r'\s+Promo$', '', card_name, flags=re.IGNORECASE).strip()
+
+            # Detect variant BEFORE stripping Cosmo
+            promo_variant = "Normal"
+            if re.search(r'\bCosmo\s+Holo\b|\bCosmos\s+Holo\b|\bCosmo\b', card_name, re.IGNORECASE):
+                promo_variant = "Cosmos Holo"
+
+            # Now strip Cosmo from name
+            card_name = re.sub(r'\s+Cosmo\s+Holo$', '', card_name, flags=re.IGNORECASE).strip()
+            card_name = re.sub(r'\s+Cosmo$', '', card_name, flags=re.IGNORECASE).strip()
+
             result.update({
                 "card_number":  card_num,
                 "set_total":    None,
                 "card_name":    card_name,
-                "variant_type": "Normal",
+                "variant_type": promo_variant,
                 "card_type":    "promo",
                 "set_override": promo_set,
                 "parse_ok":     True,
@@ -162,7 +175,10 @@ def parse_variation_name(variation_name: str, listing_title: str = "") -> dict:
     elif re.search(r'\bStamp\b', clean_name, re.IGNORECASE):
         result["source_type"] = "stamp_promo"
         clean_name = re.sub(r'\s*\bStamp\b', '', clean_name, flags=re.IGNORECASE).strip()
-
+    elif re.search(r'\(?\s*Metal\s+Card\s*(?:Promo)?\s*\)?', clean_name, re.IGNORECASE):
+        result["variant_type"] = "Metal Card"
+        clean_name = re.sub(r'\s*\(?\s*Metal\s+Card\s*(?:Promo)?\s*\)?', '', clean_name, flags=re.IGNORECASE).strip()
+        
     for pattern, variant_label in VARIANT_PATTERNS:
         if re.search(pattern, clean_name, re.IGNORECASE):
             found_variant = variant_label
@@ -189,8 +205,10 @@ def parse_variation_name(variation_name: str, listing_title: str = "") -> dict:
     # Clean up leftover spaces and punctuation
     clean_name = re.sub(r"\s{2,}", " ", clean_name).strip(" -–,")
 
-    result["card_name"]    = clean_name or remainder
-    result["variant_type"] = found_variant or "Normal"
+    result["card_name"] = clean_name or remainder
+    # Only set variant_type if not already set (e.g. Metal Card)
+    if result["variant_type"] == "Normal":
+        result["variant_type"] = found_variant or "Normal"
 
     # ── Step 3: Classify card type ────────────────────────────────────────────
     try:

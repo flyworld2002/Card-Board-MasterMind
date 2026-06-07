@@ -246,13 +246,23 @@ def lookup_card_for_ebay(card_name: str, card_number: str,
 
     # Name corrections — accent-stripped or common misspellings
     NAME_CORRECTIONS = {
-        "flabebe":   "Flabébé",
-        "flabébé":   "Flabébé",
-        "nidoran f": "Nidoran ♀",
-        "nidoran m": "Nidoran ♂",
-        "poke vital a":  "Poké Vital A",
-        "poke vital b":  "Poké Vital B",
-        "poke vital":    "Poké Vital",
+        "flabebe":           "Flabébé",
+        "flabébé":           "Flabébé",
+        "nidoran f":         "Nidoran ♀",
+        "nidoran m":         "Nidoran ♂",
+        "poke vital a":      "Poké Vital A",
+        "poke vital b":      "Poké Vital B",
+        "poke vital":        "Poké Vital",
+        "billy and o'nare":  "Billy & O'Nare",
+        # SVE energy name corrections
+        "leaf energy":       "Basic Grass Energy",
+        "fire energy":       "Basic Fire Energy",
+        "water energy":      "Basic Water Energy",
+        "lightning energy":  "Basic Lightning Energy",
+        "psychic energy":    "Basic Psychic Energy",
+        "fighting energy":   "Basic Fighting Energy",
+        "dark energy":       "Basic Darkness Energy",
+        "metal energy":      "Basic Metal Energy",
     }
     if clean_name.lower() in NAME_CORRECTIONS:
         clean_name = NAME_CORRECTIONS[clean_name.lower()]
