@@ -165,6 +165,11 @@ def parse_variation_name(variation_name: str, listing_title: str = "") -> dict:
     clean_name    = remainder
     found_variant = None
 
+    # ── Detect Shiny variant ──────────────────────────────────────────────────
+    if re.search(r'\bShiny\b', clean_name, re.IGNORECASE):
+        result["foil_pattern"] = "Shiny"
+        clean_name = re.sub(r'\s+Shiny\b', '', clean_name, flags=re.IGNORECASE).strip()
+
     # ── Detect stamp type FIRST (before removing source markers) ──────────────
     if re.search(r'\b1st\s+Edition\b|\b1st\s+Ed\b', clean_name, re.IGNORECASE):
         result["stamp_type"] = "1st_edition"
