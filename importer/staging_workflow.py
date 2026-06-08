@@ -368,22 +368,29 @@ def _push_batch(batch_id: str):
                     asking = float(list_price) if list_price else None
 
                 # ── Get or create card_variant ────────────────────────────────
+                source_type = row.get("source_type")  # e.g. "deck_exclusive"
+                stamp_type = row.get("stamp_type")    # e.g. "1st_edition"
+
                 cur.execute("""
                     SELECT id FROM card_variants
-                    WHERE card_id = %s AND variant_type = %s AND finish = %s
-                """, (str(row["card_id"]), variant_type, finish))
+                    WHERE card_id = %s
+                      AND variant_type = %s
+                      AND finish = %s
+                      AND (source_type IS NOT DISTINCT FROM %s)
+                      AND (stamp_type IS NOT DISTINCT FROM %s)
+                """, (str(row["card_id"]), variant_type, finish, source_type, stamp_type))
                 v_row = cur.fetchone()
                 if v_row:
                     variant_id = str(v_row["id"])
                 else:
                     cur.execute("""
                         INSERT INTO card_variants
-                            (card_id, variant_type, finish, is_special)
-                        VALUES (%s, %s, %s, %s)
-                        ON CONFLICT (card_id, variant_type, finish)
+                            (card_id, variant_type, finish, is_special, source_type, stamp_type)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (card_id, variant_type, finish, source_type, stamp_type)
                         DO UPDATE SET is_special = EXCLUDED.is_special
                         RETURNING id
-                    """, (str(row["card_id"]), variant_type, finish, is_special))
+                    """, (str(row["card_id"]), variant_type, finish, is_special, source_type, stamp_type))
                     variant_id = str(cur.fetchone()["id"])
 
                 # ── Insert inventory row ──────────────────────────────────────

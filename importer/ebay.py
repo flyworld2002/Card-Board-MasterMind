@@ -505,9 +505,12 @@ def write_to_staging(rows: list[dict], batch_id: str, dry_run: bool = False) -> 
                     market_price,
                     market_price_date,
                     api_rarity,
-                    source_type   
+                    foil_type,          
+                    foil_pattern,       
+                    source_type,
+                    stamp_type          
                 ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                 )
                 ON CONFLICT DO NOTHING
             """, (
@@ -528,7 +531,10 @@ def write_to_staging(rows: list[dict], batch_id: str, dry_run: bool = False) -> 
                 row.get("market_price"),
                 row.get("market_price_date"),
                 row.get("api_rarity"),
+                row.get("variant_type"),  
+                None,                     
                 row.get("source_type"),  
+                row.get("stamp_type"),
             ))
         inserted += 1
 

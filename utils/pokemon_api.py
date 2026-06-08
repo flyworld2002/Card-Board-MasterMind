@@ -354,6 +354,8 @@ def lookup_card_for_ebay(card_name: str, card_number: str,
             variant_type = variant_type if variant_type != "Normal" else "Non-Holo",
             finish       = finish,
             is_special   = is_special,
+            source_type  = result.get("source_type"),
+            stamp_type   = result.get("stamp_type"),
         )
         result["variant_id"] = variant_id
     except Exception as e:

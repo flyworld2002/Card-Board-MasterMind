@@ -192,7 +192,8 @@ def apply_import_correction(item: dict, corrections: list[dict]) -> dict:
 # ----------------------------------------------------------------
 
 def get_or_create_variant(card_id: str, variant_type: str = None,
-                          finish: str = None, is_special: bool = False) -> str:
+                          finish: str = None, is_special: bool = False,
+                          source_type: str = None, stamp_type: str = None) -> str:
     """Get existing or create new card_variant. Returns variant UUID."""
     variant_type = variant_type or "Non-Holo"
     finish       = finish or "Non-Holo"
@@ -200,17 +201,19 @@ def get_or_create_variant(card_id: str, variant_type: str = None,
         cur.execute("""
             SELECT id FROM card_variants
             WHERE card_id = %s AND variant_type = %s AND finish = %s
-        """, (card_id, variant_type, finish))
+              AND (source_type IS NOT DISTINCT FROM %s)
+              AND (stamp_type IS NOT DISTINCT FROM %s)
+        """, (card_id, variant_type, finish, source_type, stamp_type))
         row = cur.fetchone()
         if row:
             return str(row["id"])
         cur.execute("""
-            INSERT INTO card_variants (card_id, variant_type, finish, is_special)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (card_id, variant_type, finish) DO UPDATE
+            INSERT INTO card_variants (card_id, variant_type, finish, is_special, source_type, stamp_type)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (card_id, variant_type, finish, source_type, stamp_type) DO UPDATE
                 SET is_special = EXCLUDED.is_special
             RETURNING id
-        """, (card_id, variant_type, finish, is_special))
+        """, (card_id, variant_type, finish, is_special, source_type, stamp_type))
         return str(cur.fetchone()["id"])
 
 

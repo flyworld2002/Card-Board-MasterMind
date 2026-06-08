@@ -165,7 +165,21 @@ def parse_variation_name(variation_name: str, listing_title: str = "") -> dict:
     clean_name    = remainder
     found_variant = None
 
-    # ── Detect source type before stripping ──────────────────────────────────
+    # ── Detect stamp type FIRST (before removing source markers) ──────────────
+    if re.search(r'\b1st\s+Edition\b|\b1st\s+Ed\b', clean_name, re.IGNORECASE):
+        result["stamp_type"] = "1st_edition"
+        clean_name = re.sub(r'\s*\b1st\s+Edition\b|\s*\b1st\s+Ed\b', '', clean_name, flags=re.IGNORECASE).strip()
+    elif re.search(r'Pokemon\s+Center|Pokémon\s+Center', clean_name, re.IGNORECASE):
+        result["stamp_type"] = "pokemon_center"
+        clean_name = re.sub(r'\s*Pokemon\s+Center|\s*Pokémon\s+Center', '', clean_name, flags=re.IGNORECASE).strip()
+    elif re.search(r'\bPrerelease\b', clean_name, re.IGNORECASE):
+        result["stamp_type"] = "prerelease"
+        clean_name = re.sub(r'\s*\bPrerelease\b', '', clean_name, flags=re.IGNORECASE).strip()
+    elif re.search(r'\bBox\s+Topper\b', clean_name, re.IGNORECASE):
+        result["stamp_type"] = "box_topper"
+        clean_name = re.sub(r'\s*\bBox\s+Topper\b', '', clean_name, flags=re.IGNORECASE).strip()
+
+    # ── Detect source type ────────────────────────────────────────────────────
     if re.search(r'\(?Deck\s+Exclusive\)?', clean_name, re.IGNORECASE):
         result["source_type"] = "deck_exclusive"
         clean_name = re.sub(r'\s*\(?Deck\s+Exclusive\)?', '', clean_name, flags=re.IGNORECASE).strip()
@@ -181,7 +195,6 @@ def parse_variation_name(variation_name: str, listing_title: str = "") -> dict:
     elif re.search(r'\bExclusive\b', clean_name, re.IGNORECASE):
         result["source_type"] = "product_exclusive"
         clean_name = re.sub(r'\s*\bExclusive\b', '', clean_name, flags=re.IGNORECASE).strip()
-
     for pattern, variant_label in VARIANT_PATTERNS:
         if re.search(pattern, clean_name, re.IGNORECASE):
             found_variant = variant_label
