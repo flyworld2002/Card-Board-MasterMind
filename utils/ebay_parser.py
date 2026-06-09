@@ -67,8 +67,15 @@ PROMO_PATTERNS = [
         re.compile(r'^SVE\s*0*(\d+)\s+(.+?)$', re.IGNORECASE),
         "Scarlet & Violet Energies",
     ),
+    (
+        re.compile(r'^MEE\s*0*(\d+)\s+(.+?)$', re.IGNORECASE),
+        "Mega Evolution Energies",
+    ),
+    (
+        re.compile(r'^MEP\s*0*(\d+)\s+(.+?)$', re.IGNORECASE),
+        "Mega Evolution Black Star Promos",
+    ),
 ]
-
 
 # ── Card-type classifier ──────────────────────────────────────────────────────
 def classify_card_type(card_number: int, set_total: int, variant_type: str, card_name: str = "") -> str:
@@ -111,8 +118,10 @@ def parse_variation_name(variation_name: str, listing_title: str = "") -> dict:
         "variant_type": "Normal",
         "card_type":    "common",
         "set_override": None,
-        "source_type":  None,        # e.g. 'deck_exclusive', 'promo', 'gift_set'
-        "product_name": None,        # e.g. 'Paradox Rift Trainer Kit'
+        "source_type":  None,
+        "stamp_type":   None,        # ← ADD
+        "foil_pattern": None,        # ← ADD
+        "product_name": None,
         "parse_ok":     False,
     }
 
@@ -180,8 +189,13 @@ def parse_variation_name(variation_name: str, listing_title: str = "") -> dict:
     elif re.search(r'\bPrerelease\b', clean_name, re.IGNORECASE):
         result["stamp_type"] = "prerelease"
         clean_name = re.sub(r'\s*\bPrerelease\b', '', clean_name, flags=re.IGNORECASE).strip()
-    elif re.search(r'\bBox\s+Topper\b', clean_name, re.IGNORECASE):
-        result["stamp_type"] = "box_topper"
+    elif re.search(r'\bMega\s+Evolution\s+Stamp\b', clean_name, re.IGNORECASE):       # ← ADD
+        result["stamp_type"] = "mega_evolution"                                        # ← ADD
+        clean_name = re.sub(r'\s*\bMega\s+Evolution\s+Stamp\b', '', clean_name, flags=re.IGNORECASE).strip()  # ← ADD
+
+# ── Detect Box Topper independently (can combine with other stamps) ───────
+    if re.search(r'\bBox\s+Topper\b', clean_name, re.IGNORECASE):
+        result["source_type"] = "box_topper"
         clean_name = re.sub(r'\s*\bBox\s+Topper\b', '', clean_name, flags=re.IGNORECASE).strip()
 
     # ── Detect source type ────────────────────────────────────────────────────
