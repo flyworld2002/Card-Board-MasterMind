@@ -538,16 +538,30 @@ def _filter_by_variant(results: list, variant: str) -> list:
 
 
 def _api_search(q: str, page_size: int = 20) -> list[dict]:
-    resp = _session().get(
-        f"{BASE_URL}/cards",
-        params={"q": q, "pageSize": page_size},
-        headers=_headers(),
-        timeout=30
-    )
-    if resp.status_code == 404:
-        return []
-    resp.raise_for_status()
-    return resp.json().get("data", [])
+    import time
+    max_retries = 3
+    retry_delay = 5  # seconds between retries
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            resp = _session().get(
+                f"{BASE_URL}/cards",
+                params={"q": q, "pageSize": page_size},
+                headers=_headers(),
+                timeout=30
+            )
+            if resp.status_code == 404:
+                return []
+            resp.raise_for_status()
+            return resp.json().get("data", [])
+
+        except Exception as e:
+            if attempt < max_retries:
+                print(f"    ⏳ API timeout (attempt {attempt}/{max_retries}), retrying in {retry_delay}s...")
+                time.sleep(retry_delay)
+            else:
+                print(f"    ❌ API failed after {max_retries} attempts: {e}")
+                raise
 
 
 def get_card_by_id(card_id: str) -> dict | None:
