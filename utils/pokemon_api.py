@@ -261,6 +261,7 @@ def lookup_card_for_ebay(card_name: str, card_number: str,
         "poke vital a":      "Poké Vital A",
         "poke vital b":      "Poké Vital B",
         "poke vital":        "Poké Vital",
+        "pokegear 3.0":      "Pokégear 3.0",
         "billy and o'nare":  "Billy & O'Nare",
         # SVE energy name corrections
         "leaf energy":       "Basic Grass Energy",
