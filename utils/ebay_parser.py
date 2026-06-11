@@ -193,19 +193,26 @@ def parse_variation_name(variation_name: str, listing_title: str = "") -> dict:
         clean_name = re.sub(r'\bReverse\s+Holo\b|\bReverse\b|\bRH\b', '', clean_name, flags=re.IGNORECASE).strip()
         clean_name = re.sub(r"\s{2,}", " ", clean_name).strip()
 
-    # ── Detect Ball-pattern Reverse Holo variants ──────────────────────────────
-    BALL_PATTERN_TYPES = ["Friend Ball", "Love Ball", "Quick Ball", "Dusk Ball", "Team Rocket", "Poke Ball"]
+    # ── Detect Ball-pattern Reverse Holo variants (both orderings) ────────────
+    BALL_PATTERN_TYPES = ["Friend Ball", "Love Ball", "Quick Ball", "Dusk Ball", "Team Rocket", "Poke Ball", "Pokeball", "Master Ball"]
+    BALL_TYPE_NORMALIZE = {"pokeball": "Poke Ball"}
+
+    ball_alt = '|'.join(re.escape(b) for b in BALL_PATTERN_TYPES)
     ball_pattern_re = re.compile(
-        r'\bRH\s+(' + '|'.join(re.escape(b) for b in BALL_PATTERN_TYPES) + r')\b.*$',
+        r'(?:\bRH\s+(' + ball_alt + r')\b|\b(' + ball_alt + r')\s+RH\b).*$',
         re.IGNORECASE
     )
     ball_match = ball_pattern_re.search(clean_name)
     if ball_match:
-        matched_ball = ball_match.group(1)
-        for b in BALL_PATTERN_TYPES:
-            if b.lower() == matched_ball.lower():
-                matched_ball = b
-                break
+        matched_ball = ball_match.group(1) or ball_match.group(2)
+        normalized = BALL_TYPE_NORMALIZE.get(matched_ball.lower())
+        if normalized:
+            matched_ball = normalized
+        else:
+            for b in BALL_PATTERN_TYPES:
+                if b.lower() == matched_ball.lower():
+                    matched_ball = b
+                    break
         result["foil_pattern"] = matched_ball
         result["variant_type"] = "Reverse Holo"
         clean_name = ball_pattern_re.sub('', clean_name).strip()
