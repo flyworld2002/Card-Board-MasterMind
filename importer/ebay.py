@@ -349,7 +349,7 @@ def fetch_item_variations(item_id: str, title: str) -> list[dict]:
                 **{k: parsed[k] for k in (
                     "card_number", "set_total", "card_name",
                     "variant_type", "card_type", "parse_ok", "set_override",
-                    "source_type"
+                    "source_type", "stamp_type", "foil_pattern"
                 )},
             })
 
@@ -532,7 +532,7 @@ def write_to_staging(rows: list[dict], batch_id: str, dry_run: bool = False) -> 
                 row.get("market_price_date"),
                 row.get("api_rarity"),
                 row.get("variant_type"),  
-                None,                     
+                row.get("foil_pattern"), 
                 row.get("source_type"),  
                 row.get("stamp_type"),
             ))
@@ -744,7 +744,21 @@ def export_listings_to_csv(no_api: bool = False, item_id: str = None):
                         "match_source":  "",
                     })
                 else:
-                    print(f"  [{i}/{len(all_rows)}] 🔍 {(set_name or '?'):<25} #{(card_number or '?'):<5} {card_name}")
+                    # --- Print in Prompt when exporting 
+                    foil_pattern = row.get("foil_pattern")
+                    source_type  = row.get("source_type")
+                    stamp_type   = row.get("stamp_type")
+
+                    variant_str = variant_type
+                    if foil_pattern:
+                        variant_str += f" + {foil_pattern}"
+                    if source_type:
+                        variant_str += f" | src:{source_type}"
+                    if stamp_type:
+                        variant_str += f" | stamp:{stamp_type}"
+
+                    print(f"  [{i}/{len(all_rows)}] 🔍 {(set_name or '?'):<25} #{(card_number or '?'):<5} {card_name:<28} | {variant_str}")
+
                     lookup = lookup_card_for_ebay(
                         card_name    = card_name,
                         card_number  = card_number,

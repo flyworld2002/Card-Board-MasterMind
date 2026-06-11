@@ -179,6 +179,26 @@ def parse_variation_name(variation_name: str, listing_title: str = "") -> dict:
         result["foil_pattern"] = "Shiny"
         clean_name = re.sub(r'\s+Shiny\b', '', clean_name, flags=re.IGNORECASE).strip()
 
+    # ── Detect Ball-pattern Reverse Holo variants ──────────────────────────────
+    BALL_PATTERN_TYPES = ["Friend Ball", "Love Ball", "Quick Ball", "Dusk Ball", "Team Rocket", "Poke Ball"]
+    ball_pattern_re = re.compile(
+        r'\bRH\s+(' + '|'.join(re.escape(b) for b in BALL_PATTERN_TYPES) + r')\b.*$',
+        re.IGNORECASE
+    )
+    ball_match = ball_pattern_re.search(clean_name)
+    if ball_match:
+        matched_ball = ball_match.group(1)
+        for b in BALL_PATTERN_TYPES:
+            if b.lower() == matched_ball.lower():
+                matched_ball = b
+                break
+        result["foil_pattern"] = matched_ball
+        result["variant_type"] = "Reverse Holo"
+        clean_name = ball_pattern_re.sub('', clean_name).strip()
+
+    # ── Strip trailing "Energy" after RH/Reverse Holo (e.g. "Pikachu RH Energy") ──
+    clean_name = re.sub(r'\b(RH|Reverse(?:\s+Holo)?)\s+Energy\b', r'\1', clean_name, flags=re.IGNORECASE)       
+
     # ── Detect stamp type FIRST (before removing source markers) ──────────────
     if re.search(r'\b1st\s+Edition\b|\b1st\s+Ed\b', clean_name, re.IGNORECASE):
         result["stamp_type"] = "1st_edition"
