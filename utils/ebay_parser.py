@@ -281,8 +281,9 @@ def parse_variation_name(variation_name: str, listing_title: str = "") -> dict:
         r"\bPoke\s+Ball\b",        # "Poke Ball"
         r"\bPromo\b",              # "Promo"
         r"\s+R$",                  # trailing rarity indicator "R"
-        r"\s*\[.*?\]",    # strips anything in brackets e.g. [Ghetsis], [Paldea]
-        r"\s*\([^)]*\)\s*$",    # strips trailing (content) e.g. (Sada), (Turo)
+        r"\s*\[.*?\]",             # strips anything in brackets e.g. [Ghetsis], [Paldea]
+        r"\s*\[[^\]]*$",           # ← ADD: dangling unclosed bracket (truncated, e.g. "[Sycamore")
+        r"\s*\([^)]*\)\s*$",       # strips trailing (content) e.g. (Sada), (Turo)
     ]
     for sp in STRIP_PATTERNS:
         clean_name = re.sub(sp, "", clean_name, flags=re.IGNORECASE)
