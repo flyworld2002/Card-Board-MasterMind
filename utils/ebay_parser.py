@@ -147,6 +147,11 @@ def parse_variation_name(variation_name: str, listing_title: str = "") -> dict:
             card_name = re.sub(r'\s+Cosmo\s+Holo$', '', card_name, flags=re.IGNORECASE).strip()
             card_name = re.sub(r'\s+Cosmo$', '', card_name, flags=re.IGNORECASE).strip()
 
+            # Detect plain Holo suffix (e.g. "Basic Grass Energy Holo")
+            if promo_variant == "Normal" and re.search(r'\bHolo$', card_name, re.IGNORECASE):
+                promo_variant = "Holo"
+                card_name = re.sub(r'\s+Holo$', '', card_name, flags=re.IGNORECASE).strip()
+
             result.update({
                 "card_number":  card_num,
                 "set_total":    None,
@@ -229,7 +234,7 @@ def parse_variation_name(variation_name: str, listing_title: str = "") -> dict:
         result["stamp_type"] = "prismatic_evolution"
         result["source_type"] = "stamp_promo"
         clean_name = re.sub(r'\s*\bPrismatic\s+Evolutions?\s+Stamp\b', '', clean_name, flags=re.IGNORECASE).strip()
-        
+
     # ── Detect Box Topper independently (can combine with other stamps) ───────
     if re.search(r'\bBox\s+Topper\b', clean_name, re.IGNORECASE):
         result["source_type"] = "box_topper"
