@@ -134,6 +134,7 @@ def parse_variation_name(variation_name: str, listing_title: str = "") -> dict:
             card_num  = m.group(1).lstrip("0") or "0"
             card_name = m.group(2).strip()
             # Strip any trailing promo label from card name
+            card_name = re.sub(r'\s*\(Black\s+Star\s+Promo\)$', '', card_name, flags=re.IGNORECASE).strip()
             card_name = re.sub(r'\s+Black\s+Star\s+Promo$', '', card_name, flags=re.IGNORECASE).strip()
             card_name = re.sub(r'\s+Promo$', '', card_name, flags=re.IGNORECASE).strip()
 
@@ -224,7 +225,11 @@ def parse_variation_name(variation_name: str, listing_title: str = "") -> dict:
         result["stamp_type"] = "pokemon_day"
         result["source_type"] = "stamp_promo"
         clean_name = re.sub(r'\s*Pok[eé]mon\s+Day\s*\d*', '', clean_name, flags=re.IGNORECASE).strip()
-
+    elif re.search(r'\bPrismatic\s+Evolutions?\s+Stamp\b', clean_name, re.IGNORECASE):
+        result["stamp_type"] = "prismatic_evolution"
+        result["source_type"] = "stamp_promo"
+        clean_name = re.sub(r'\s*\bPrismatic\s+Evolutions?\s+Stamp\b', '', clean_name, flags=re.IGNORECASE).strip()
+        
     # ── Detect Box Topper independently (can combine with other stamps) ───────
     if re.search(r'\bBox\s+Topper\b', clean_name, re.IGNORECASE):
         result["source_type"] = "box_topper"
