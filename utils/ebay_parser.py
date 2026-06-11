@@ -179,6 +179,14 @@ def parse_variation_name(variation_name: str, listing_title: str = "") -> dict:
         result["foil_pattern"] = "Shiny"
         clean_name = re.sub(r'\s+Shiny\b', '', clean_name, flags=re.IGNORECASE).strip()
 
+    # ── Detect Reverse Cosmos Holo combo ───────────────────────────────────────
+    if re.search(r'\bCosmos?\b', clean_name, re.IGNORECASE) and re.search(r'\bReverse\b|\bRH\b', clean_name, re.IGNORECASE):
+        result["foil_pattern"] = "Cosmos Holo"
+        result["variant_type"] = "Reverse Holo"
+        clean_name = re.sub(r'\bCosmos?\s+Holo\b|\bCosmos?\b', '', clean_name, flags=re.IGNORECASE).strip()
+        clean_name = re.sub(r'\bReverse\s+Holo\b|\bReverse\b|\bRH\b', '', clean_name, flags=re.IGNORECASE).strip()
+        clean_name = re.sub(r"\s{2,}", " ", clean_name).strip()
+
     # ── Detect Ball-pattern Reverse Holo variants ──────────────────────────────
     BALL_PATTERN_TYPES = ["Friend Ball", "Love Ball", "Quick Ball", "Dusk Ball", "Team Rocket", "Poke Ball"]
     ball_pattern_re = re.compile(
@@ -209,11 +217,15 @@ def parse_variation_name(variation_name: str, listing_title: str = "") -> dict:
     elif re.search(r'\bPrerelease\b', clean_name, re.IGNORECASE):
         result["stamp_type"] = "prerelease"
         clean_name = re.sub(r'\s*\bPrerelease\b', '', clean_name, flags=re.IGNORECASE).strip()
-    elif re.search(r'\bMega\s+Evolution\s+Stamp\b', clean_name, re.IGNORECASE):       # ← ADD
-        result["stamp_type"] = "mega_evolution"                                        # ← ADD
-        clean_name = re.sub(r'\s*\bMega\s+Evolution\s+Stamp\b', '', clean_name, flags=re.IGNORECASE).strip()  # ← ADD
+    elif re.search(r'\bMega\s+Evolution\s+Stamp\b', clean_name, re.IGNORECASE):
+        result["stamp_type"] = "mega_evolution"
+        clean_name = re.sub(r'\s*\bMega\s+Evolution\s+Stamp\b', '', clean_name, flags=re.IGNORECASE).strip()
+    elif re.search(r'Pokemon\s+Day|Pok[eé]mon\s+Day', clean_name, re.IGNORECASE):
+        result["stamp_type"] = "pokemon_day"
+        result["source_type"] = "stamp_promo"
+        clean_name = re.sub(r'\s*Pok[eé]mon\s+Day\s*\d*', '', clean_name, flags=re.IGNORECASE).strip()
 
-# ── Detect Box Topper independently (can combine with other stamps) ───────
+    # ── Detect Box Topper independently (can combine with other stamps) ───────
     if re.search(r'\bBox\s+Topper\b', clean_name, re.IGNORECASE):
         result["source_type"] = "box_topper"
         clean_name = re.sub(r'\s*\bBox\s+Topper\b', '', clean_name, flags=re.IGNORECASE).strip()
