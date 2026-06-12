@@ -246,6 +246,9 @@ def lookup_card_for_ebay(card_name: str, card_number: str,
     # Normalize curly apostrophes to straight apostrophes
     card_name  = card_name.replace('\u2019', "'").replace('\u2018', "'")
 
+    # Normalize "Poke" -> "Poké" (eBay strips accents; e.g. "Poke Kid" -> "Poké Kid")
+    card_name  = re.sub(r'\bPoke\b', 'Poké', card_name, flags=re.IGNORECASE)
+    
     # Strip variant suffixes from card name before API lookup
     clean_name = re.sub(
         r'\s+(Reverse\s+Holo|Holo|RH|Promo|Black\s+Star\s+Promo)$',
@@ -262,6 +265,7 @@ def lookup_card_for_ebay(card_name: str, card_number: str,
         "poke vital b":      "Poké Vital B",
         "poke vital":        "Poké Vital",
         "pokegear 3.0":      "Pokégear 3.0",
+        "pokestop":          "PokéStop",
         "billy and o'nare":  "Billy & O'Nare",
         # SVE energy name corrections
         "leaf energy":       "Basic Grass Energy",
