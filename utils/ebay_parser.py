@@ -152,6 +152,11 @@ def parse_variation_name(variation_name: str, listing_title: str = "") -> dict:
                 promo_variant = "Holo"
                 card_name = re.sub(r'\s+Holo$', '', card_name, flags=re.IGNORECASE).strip()
 
+            # Detect Pokemon Center Stamp suffix
+            if re.search(r'Pok[eé]mon\s+Center\s+Stamp$', card_name, re.IGNORECASE):
+                result["stamp_type"] = "pokemon_center"
+                card_name = re.sub(r'\s*Pok[eé]mon\s+Center\s+Stamp$', '', card_name, flags=re.IGNORECASE).strip()
+                    
             result.update({
                 "card_number":  card_num,
                 "set_total":    None,
@@ -224,9 +229,9 @@ def parse_variation_name(variation_name: str, listing_title: str = "") -> dict:
     if re.search(r'\b1st\s+Edition\b|\b1st\s+Ed\b', clean_name, re.IGNORECASE):
         result["stamp_type"] = "1st_edition"
         clean_name = re.sub(r'\s*\b1st\s+Edition\b|\s*\b1st\s+Ed\b', '', clean_name, flags=re.IGNORECASE).strip()
-    elif re.search(r'Pokemon\s+Center|Pokémon\s+Center', clean_name, re.IGNORECASE):
+    elif re.search(r'Pok[eé]mon\s+Center\s+Stamp', clean_name, re.IGNORECASE):
         result["stamp_type"] = "pokemon_center"
-        clean_name = re.sub(r'\s*Pokemon\s+Center|\s*Pokémon\s+Center', '', clean_name, flags=re.IGNORECASE).strip()
+        clean_name = re.sub(r'\s*Pok[eé]mon\s+Center\s+Stamp', '', clean_name, flags=re.IGNORECASE).strip()
     elif re.search(r'\bPrerelease\b', clean_name, re.IGNORECASE):
         result["stamp_type"] = "prerelease"
         clean_name = re.sub(r'\s*\bPrerelease\b', '', clean_name, flags=re.IGNORECASE).strip()
