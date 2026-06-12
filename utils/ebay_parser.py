@@ -156,7 +156,7 @@ def parse_variation_name(variation_name: str, listing_title: str = "") -> dict:
             if re.search(r'Pok[eé]mon\s+Center\s+Stamp$', card_name, re.IGNORECASE):
                 result["stamp_type"] = "pokemon_center"
                 card_name = re.sub(r'\s*Pok[eé]mon\s+Center\s+Stamp$', '', card_name, flags=re.IGNORECASE).strip()
-                    
+
             result.update({
                 "card_number":  card_num,
                 "set_total":    None,
@@ -180,6 +180,25 @@ def parse_variation_name(variation_name: str, listing_title: str = "") -> dict:
 
     result["card_number"] = card_num_str
     result["set_total"]   = set_total_str
+
+
+    # ── Special-case: "Poke Ball"/"Master Ball" Trainer item cards (the card NAME is the ball type) ──
+    BALL_ITEM_NAMES = ["Poke Ball", "Master Ball"]
+    for ball_card in BALL_ITEM_NAMES:
+        if re.match(r'^' + re.escape(ball_card) + r'\b', remainder, re.IGNORECASE):
+            rest = remainder[len(ball_card):].strip()
+            result["card_name"] = ball_card
+            result["variant_type"] = "Reverse Holo" if re.search(r'\bRH\b|\bReverse\b', rest, re.IGNORECASE) else "Normal"
+            try:
+                card_num_int  = int(card_num_str)
+                set_total_int = int(set_total_str)
+                result["card_type"] = classify_card_type(
+                    card_num_int, set_total_int, result["variant_type"], result["card_name"]
+                )
+            except ValueError:
+                pass
+            result["parse_ok"] = True
+            return result
 
     # ── Step 2: Strip ALL variant tokens from remainder ──────────────────────
     clean_name    = remainder
