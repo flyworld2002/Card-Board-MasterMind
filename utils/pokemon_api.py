@@ -147,6 +147,30 @@ def search_cards(name: str, set_name: str = None, set_code: str = None,
         if stripped != clean_number:
             numbers_to_try.append(stripped)
 
+    # Promo sets store numbers with a set prefix (e.g. SVP053, SWSH001).
+    # The parser strips the prefix and gives us just "53" — also try the
+    # prefixed format so the API search can find it.
+    PROMO_PREFIXES = {
+        "svp":   "SVP",
+        "swshp": "SWSH",
+        "smp":   "SM",
+        "xyp":   "XY",
+        "bwp":   "BW",
+        "hsp":   "HS",
+        "dpp":   "DP",
+        "basep": "WBP",
+    }
+    if api_set_id and api_set_id in PROMO_PREFIXES and clean_number:
+        prefix = PROMO_PREFIXES[api_set_id]
+        try:
+            padded   = prefix + str(int(clean_number)).zfill(3)  # e.g. SVP053
+            unpadded = prefix + str(int(clean_number))            # e.g. SVP53
+            for n in (padded, unpadded):
+                if n not in numbers_to_try:
+                    numbers_to_try.append(n)
+        except ValueError:
+            pass
+
     # Pass 1: name + number + set ID (most precise)
     for num in numbers_to_try:
         if api_set_id:
@@ -196,7 +220,14 @@ def search_cards(name: str, set_name: str = None, set_code: str = None,
 # ----------------------------------------------------------------
 
 def lookup_card_for_ebay(card_name: str, card_number: str,
-                         set_name: str, variant_type: str) -> dict:
+                         set_name: str,
+                         foil_type: str = None,
+                         foil_pattern: str = None,
+                         texture: str = None,
+                         material: str = None,
+                         size: str = None,
+                         stamp_type: str = None,
+                         source_type: str = None) -> dict:
     """
     Given a parsed eBay variation, find or create the matching card_master row.
 
@@ -214,7 +245,13 @@ def lookup_card_for_ebay(card_name: str, card_number: str,
     }
     """
 
-    cache_key = f"{set_name}|{card_number}|{card_name}"
+    # Cache key must include the variant axes — otherwise different variants
+    # of the same card (e.g. holo vs reverse_holo) would collide and return
+    # the wrong variant_id.
+    axes_key = "|".join(str(x) for x in
+                        (foil_type, foil_pattern, texture, material, size,
+                         stamp_type, source_type))
+    cache_key = f"{set_name}|{card_number}|{card_name}|{axes_key}"
     if cache_key in _ebay_lookup_cache:
         cached = _ebay_lookup_cache[cache_key]
         if not cached["matched"]:
@@ -346,21 +383,17 @@ def lookup_card_for_ebay(card_name: str, card_number: str,
             print(f"    ❌ Error creating card_master for {card_name}: {e}")
             return result
 
-    # ── Step 4: Get or create card_variant ───────────────────────────────────
+    # ── Step 4: Get or create card_variant (seven-axis model) ────────────────
     try:
-        SPECIAL_PATTERNS = {
-            "Reverse Holo", "Cosmos Holo", "Master Ball Pattern",
-            "Poke Ball Pattern", "Cracked Ice Holo", "Galaxy Holo"
-        }
-        is_special   = variant_type in SPECIAL_PATTERNS
-        finish       = variant_type if variant_type != "Normal" else "Non-Holo"
-        variant_id   = get_or_create_variant(
+        variant_id = get_or_create_variant(
             card_id      = result["card_id"],
-            variant_type = variant_type if variant_type != "Normal" else "Non-Holo",
-            finish       = finish,
-            is_special   = is_special,
-            source_type  = result.get("source_type"),
-            stamp_type   = result.get("stamp_type"),
+            foil_type    = foil_type,
+            foil_pattern = foil_pattern,
+            texture      = texture,
+            material     = material,
+            size         = size,
+            stamp_type   = stamp_type,
+            source_type  = source_type,
         )
         result["variant_id"] = variant_id
     except Exception as e:
@@ -374,31 +407,31 @@ def lookup_card_for_ebay(card_name: str, card_number: str,
 # Market price extraction from cached api_card (no extra API call)
 # ----------------------------------------------------------------
 
-def extract_market_price(api_card: dict, variant_type: str) -> tuple[float | None, str | None]:
+def extract_market_price(api_card: dict, foil_type: str = None) -> tuple[float | None, str | None]:
     """
     Extract market price and its date from a cached api_card object.
-    Returns (price, date_str) tuple.
-    date_str format: 'YYYY/MM/DD' from TCGPlayer updatedAt field.
+    Returns (price, date_str) tuple. date_str format: 'YYYY/MM/DD'.
+
+    foil_type is the seven-axis code ('non_holo' | 'holo' | 'reverse_holo' |
+    None). It selects which TCGPlayer price key to prefer.
     """
     if not api_card:
         return None, None
 
     tcgplayer  = api_card.get("tcgplayer", {})
     tcg_prices = tcgplayer.get("prices", {})
-    price_date = tcgplayer.get("updatedAt")    # ← e.g. "2026/06/03"
+    price_date = tcgplayer.get("updatedAt")    # e.g. "2026/06/03"
 
     if not tcg_prices:
         return None, None
 
     PRICE_KEYS = {
-        "Reverse Holo":        ["reverseHolofoil", "holofoil", "normal"],
-        "Holo":                ["holofoil", "normal"],
-        "Cosmos Holo":         ["holofoil", "normal"],
-        "Master Ball Pattern": ["holofoil", "normal"],
-        "Normal":              ["normal", "holofoil", "reverseHolofoil"],
-        "promo":               ["holofoil", "normal"],
+        "reverse_holo": ["reverseHolofoil", "holofoil", "normal"],
+        "holo":         ["holofoil", "normal"],
+        "non_holo":     ["normal", "holofoil", "reverseHolofoil"],
     }
-    keys = PRICE_KEYS.get(variant_type, ["normal", "holofoil", "reverseHolofoil"])
+    keys = PRICE_KEYS.get(foil_type or "non_holo",
+                          ["normal", "holofoil", "reverseHolofoil"])
 
     for key in keys:
         if key in tcg_prices:

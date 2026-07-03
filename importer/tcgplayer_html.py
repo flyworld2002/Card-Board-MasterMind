@@ -42,6 +42,8 @@ CONDITION_MAP = {
 FINISH_LABELS = {
     "holo",
     "holofoil",
+    "non-holo",
+    "normal",
 }
 
 # Special foil patterns — kept as foil_pattern
@@ -57,9 +59,9 @@ FOIL_PATTERNS = {
 def _extract_foil_type(condition_raw: str):
     lower = condition_raw.lower()
     if "reverse holofoil" in lower:
-        return "Reverse Holo"
+        return "reverse holo"
     if "holofoil" in lower:
-        return "Holo"
+        return "holo"
     return None
 
 
@@ -80,9 +82,9 @@ def _extract_foil_fields(variant_raw, foil_type):
     if v_lower in FOIL_PATTERNS:
         return foil_type, variant_raw
     if v_lower in ("reverse holo", "reverse holofoil"):
-        return "Reverse Holo", None
+        return "reverse Holo", None
     if v_lower in FINISH_LABELS:
-        return foil_type or "Holo", None
+        return foil_type or "holo", None
     return foil_type, variant_raw
 
 
@@ -165,7 +167,7 @@ def _parse_items(text: str) -> list[dict]:
         else:
             item_variant = None
 
-        num_match = re.search(r'\s*-\s*(\d+[A-Za-z]?(?:/\d+[A-Za-z]*)?)\s*$', raw_line)
+        num_match = re.search(r'\s*-\s*([A-Za-z]{0,4}\d+[A-Za-z]?(?:/\d+[A-Za-z]*)?)[\s]*$', raw_line)
         if num_match:
             card_number = num_match.group(1).split("/")[0].strip()
             raw_line    = raw_line[:num_match.start()].strip()
@@ -290,38 +292,23 @@ def _process_file(html_file: Path, batch_id: str, game_id: str,
     staged = matched = ambiguous = not_found = 0
 
     for order_num in order_numbers:
-        # Q2: Check for existing staging rows for this order
+        # Card-level dedup: fetch all existing staging rows for this order
+        existing_cards = {}  # key: (card_name, set_name, condition) -> status
         if not dry_run:
             from db.connection import db_cursor
             with db_cursor() as cur:
                 cur.execute("""
-                    SELECT status, COUNT(*) as cnt
+                    SELECT card_name, set_name, condition, status
                     FROM staging
                     WHERE order_number = %s
-                    GROUP BY status
                 """, (order_num,))
-                existing = {r["status"]: r["cnt"] for r in cur.fetchall()}
-
-            if existing:
-                has_approved = "approved" in existing
-                has_pending  = "pending" in existing
-
-                if has_approved:
-                    _print(verbose,
-                        f"  [{order_num}] SKIPPED — already approved "
-                        f"({existing.get('approved',0)} rows in inventory)")
-                    continue
-
-                if has_pending:
-                    # Delete pending rows and re-import fresh
-                    with db_cursor() as cur:
-                        cur.execute("""
-                            DELETE FROM staging
-                            WHERE order_number = %s AND status = 'pending'
-                        """, (order_num,))
-                    _print(verbose,
-                        f"  [{order_num}] Replacing {existing.get('pending',0)} "
-                        f"pending rows...")
+                for r in cur.fetchall():
+                    key = (r["card_name"], r["set_name"] or "", r["condition"])
+                    # Keep the "best" status: processed > approved > pending
+                    prev = existing_cards.get(key)
+                    rank = {"processed": 2, "approved": 1, "pending": 0}
+                    if prev is None or rank.get(r["status"], -1) > rank.get(prev, -1):
+                        existing_cards[key] = r["status"]
 
         order_text = _extract_order_section(text, order_num)
         order_date = _extract_date(order_text)
@@ -330,6 +317,30 @@ def _process_file(html_file: Path, batch_id: str, game_id: str,
         _print(verbose, f"\n  [{order_num}] {order_date.strftime('%Y-%m-%d')} — {len(items)} item(s)")
 
         for item in items:
+            card_key = (item["card_name"], item.get("set_name", ""), item["condition"])
+
+            if not dry_run and card_key in existing_cards:
+                card_status = existing_cards[card_key]
+                if card_status in ("approved", "processed"):
+                    _print(verbose,
+                        f"  ~ Qty:{item['quantity']:<3} Name:{item['card_name']:<28} "
+                        f"SKIPPED — already {card_status}")
+                    staged += 1
+                    matched += 1
+                    continue
+                elif card_status == "pending":
+                    # Delete stale pending row and reimport
+                    with db_cursor() as cur:
+                        cur.execute("""
+                            DELETE FROM staging
+                            WHERE order_number = %s
+                              AND card_name = %s
+                              AND COALESCE(set_name, '') = %s
+                              AND condition = %s
+                              AND status = 'pending'
+                        """, (order_num, item["card_name"],
+                              item.get("set_name", ""), item["condition"]))
+
             card_id, status, options = _resolve_card(item, game_id, dry_run)
 
             if not dry_run:
@@ -403,6 +414,17 @@ def _process_file(html_file: Path, batch_id: str, game_id: str,
             else:
                 not_found += 1
 
+            # Auto-approve all matched rows for this order
+            if not dry_run:
+                with db_cursor() as cur:
+                    cur.execute("""
+                        UPDATE staging
+                        SET status = 'approved', updated_at = NOW()
+                        WHERE order_number = %s
+                          AND match_status = 'matched'
+                          AND status = 'pending'
+                    """, (order_num,))
+
     return {"staged": staged, "matched": matched,
             "ambiguous": ambiguous, "not_found": not_found}
 
@@ -437,9 +459,9 @@ def _resolve_card(item: dict, game_id: str, dry_run: bool) -> tuple:
     foil_pattern = item.get("foil_pattern") if isinstance(item, dict) else None
 
     # Determine best price key based on variant
-    if foil_type == "Reverse Holo":
+    if foil_type == "reverse holo":
         price_key_order = ["reverseHolofoil", "holofoil", "normal"]
-    elif foil_pattern in ("Cosmos Holo", "Master Ball Pattern", "Poke Ball Pattern"):
+    elif foil_pattern in ("cosmos holo", "master ball pattern", "poke ball pattern"):
         price_key_order = ["holofoil", "reverseHolofoil", "normal"]
     else:
         price_key_order = ["holofoil", "normal", "reverseHolofoil", "1stEditionHolofoil"]

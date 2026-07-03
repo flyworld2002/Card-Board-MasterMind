@@ -17,20 +17,31 @@ def insert_staging_row(batch_id: str, order_number: str, order_date,
                        quantity: int, price: float, source: str = "tcgplayer",
                        card_id: str = None, match_status: str = "pending",
                        match_options: list = None, foil_type: str = None,
-                       foil_pattern: str = None) -> str:
+                       foil_pattern: str = None, texture: str = None,
+                       material: str = None, size: str = None,
+                       stamp_type: str = None, source_type: str = None,
+                       is_shiny: bool = False,
+                       variation_name: str = None,
+                       listing_price: float = None) -> str:
     """Insert one card into staging. Returns the staging row UUID."""
     import json
     with db_cursor() as cur:
         cur.execute("""
             INSERT INTO staging
                 (import_batch, order_number, order_date, source,
-                 card_name, set_name, condition, foil_type, foil_pattern,
+                 card_name, set_name, condition,
+                 foil_type, foil_pattern, texture, material, size,
+                 stamp_type, source_type, is_shiny, variation_name,
+                 listing_price,
                  quantity, price, card_id, match_status, match_options)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             RETURNING id
         """, (
             batch_id, order_number, order_date, source,
-            card_name, set_name, condition, foil_type, foil_pattern,
+            card_name, set_name, condition,
+            foil_type, foil_pattern, texture, material, size,
+            stamp_type, source_type, is_shiny, variation_name,
+            listing_price,
             quantity, price, card_id, match_status,
             json.dumps(match_options) if match_options else None
         ))

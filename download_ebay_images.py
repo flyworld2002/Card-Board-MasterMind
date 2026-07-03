@@ -250,7 +250,10 @@ def download_images_for_cards(item_id: str, card_numbers: list[str],
         # Parse variation name
         parsed       = parse_variation_name(spec_value)
         card_name    = parsed.get("card_name") or spec_value
-        variant_type = parsed.get("variant_type", "Normal")
+        # Build a filename-friendly variant string from the seven axes
+        _axis_vals = [parsed.get(k) for k in
+                      ("foil_type", "foil_pattern", "texture", "material", "size")]
+        variant_type = "_".join(v for v in _axis_vals if v) or "non_holo"
         source_type  = parsed.get("source_type")
 
         # DB lookup — use set_override for promos (e.g. SVP cards in SV listings)

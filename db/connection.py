@@ -89,13 +89,15 @@ def find_card_by_external_id(external_id: str) -> dict | None:
 
 
 def find_card_by_name_set(name: str, set_id: str, variant: str = None) -> list[dict]:
+    # NOTE: card_master no longer has a `variant` column (variants live in
+    # card_variants under the seven-axis model). The `variant` parameter is
+    # accepted for backward-compatibility but ignored.
     with db_cursor() as cur:
         cur.execute("""
             SELECT * FROM card_master
             WHERE set_id = %s
               AND LOWER(name) = LOWER(%s)
-              AND (variant = %s OR (%s IS NULL AND variant IS NULL))
-        """, (set_id, name, variant, variant))
+        """, (set_id, name))
         return cur.fetchall()
 
 
@@ -191,29 +193,53 @@ def apply_import_correction(item: dict, corrections: list[dict]) -> dict:
 # card_variants
 # ----------------------------------------------------------------
 
-def get_or_create_variant(card_id: str, variant_type: str = None,
-                          finish: str = None, is_special: bool = False,
-                          source_type: str = None, stamp_type: str = None) -> str:
-    """Get existing or create new card_variant. Returns variant UUID."""
-    variant_type = variant_type or "Non-Holo"
-    finish       = finish or "Non-Holo"
+def get_or_create_variant(card_id: str,
+                          foil_type: str = None,
+                          foil_pattern: str = None,
+                          texture: str = None,
+                          material: str = None,
+                          size: str = None,
+                          stamp_type: str = None,
+                          source_type: str = None) -> str:
+    """
+    Get existing or create new card_variant using the seven-axis model.
+    All axes are nullable lookup codes (NULL = standard/none).
+
+    Identity is the generated variant_key (a null-safe concatenation of all
+    seven axes). The DB enforces uniqueness on (card_id, variant_key); we match
+    on the axes directly with NULL-safe IS NOT DISTINCT FROM, and rely on
+    ON CONFLICT for the race-safe insert.
+
+    Returns variant UUID.
+    """
     with db_cursor() as cur:
         cur.execute("""
             SELECT id FROM card_variants
-            WHERE card_id = %s AND variant_type = %s AND finish = %s
-              AND (source_type IS NOT DISTINCT FROM %s)
-              AND (stamp_type IS NOT DISTINCT FROM %s)
-        """, (card_id, variant_type, finish, source_type, stamp_type))
+            WHERE card_id = %s
+              AND foil_type    IS NOT DISTINCT FROM %s
+              AND foil_pattern IS NOT DISTINCT FROM %s
+              AND texture      IS NOT DISTINCT FROM %s
+              AND material     IS NOT DISTINCT FROM %s
+              AND size         IS NOT DISTINCT FROM %s
+              AND stamp_type   IS NOT DISTINCT FROM %s
+              AND source_type  IS NOT DISTINCT FROM %s
+        """, (card_id, foil_type, foil_pattern, texture,
+              material, size, stamp_type, source_type))
         row = cur.fetchone()
         if row:
             return str(row["id"])
+
+        # variant_key is GENERATED; unique constraint is (card_id, variant_key).
         cur.execute("""
-            INSERT INTO card_variants (card_id, variant_type, finish, is_special, source_type, stamp_type)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            ON CONFLICT (card_id, variant_type, finish, source_type, stamp_type) DO UPDATE
-                SET is_special = EXCLUDED.is_special
+            INSERT INTO card_variants
+                (card_id, foil_type, foil_pattern, texture,
+                 material, size, stamp_type, source_type)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (card_id, variant_key) DO UPDATE
+                SET card_id = EXCLUDED.card_id
             RETURNING id
-        """, (card_id, variant_type, finish, is_special, source_type, stamp_type))
+        """, (card_id, foil_type, foil_pattern, texture,
+              material, size, stamp_type, source_type))
         return str(cur.fetchone()["id"])
 
 
@@ -279,9 +305,14 @@ def get_stock_summary(card_id: str = None) -> list[dict]:
                     THEN cm.card_number || '/' || cs.base_set_number
                     ELSE cm.card_number
                 END                  AS display_number,
-                cv.variant_type,
-                cv.finish            AS foil_finish,
-                cv.is_special,
+                cv.foil_type,
+                cv.foil_pattern,
+                cv.texture,
+                cv.material,
+                cv.size,
+                cv.stamp_type        AS variant_stamp_type,
+                cv.source_type       AS variant_source_type,
+                cv.variant_key,
                 i.condition,
                 SUM(i.quantity - i.quantity_sold)                AS qty_available,
                 ROUND(SUM(i.cost_basis * i.quantity) /
@@ -302,8 +333,9 @@ def get_stock_summary(card_id: str = None) -> list[dict]:
             query += " AND i.card_id = %s"
             params.append(card_id)
         query += """ GROUP BY cm.name, cs.name, cm.card_number, cs.base_set_number,
-                              cm.is_promo, cv.variant_type, cv.finish, cv.is_special,
-                              i.condition
+                              cm.is_promo, cv.foil_type, cv.foil_pattern, cv.texture,
+                              cv.material, cv.size, cv.stamp_type, cv.source_type,
+                              cv.variant_key, i.condition
                      ORDER BY cm.name"""
         cur.execute(query, params)
         return cur.fetchall()

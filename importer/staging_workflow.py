@@ -314,11 +314,6 @@ def _push_batch(batch_id: str):
         key = row["order_number"] or batch_id
         orders.setdefault(key, []).append(row)
 
-    SPECIAL_PATTERNS = {
-        "Cosmos Holo", "Master Ball Pattern", "Poke Ball Pattern",
-        "Cracked Ice Holo", "Galaxy Holo"
-    }
-
     pushed = 0
 
     # ── Single connection for the entire batch ────────────────────────────────
@@ -352,12 +347,16 @@ def _push_batch(batch_id: str):
 
             # ── Insert each card ──────────────────────────────────────────────
             for row in order_rows:
-                list_price   = row.get("override_price") or row.get("calculated_price")
+                list_price = row.get("override_price") or row.get("calculated_price")
+
+                # Seven-axis variant fields (lookup codes; NULL = standard)
                 foil_type    = row.get("foil_type")
                 foil_pattern = row.get("foil_pattern")
-                variant_type = foil_pattern or foil_type or "Non-Holo"
-                finish       = foil_type or "Non-Holo"
-                is_special   = variant_type in SPECIAL_PATTERNS
+                texture      = row.get("texture")
+                material     = row.get("material")
+                size         = row.get("size")
+                source_type  = row.get("source_type")
+                stamp_type   = row.get("stamp_type")
 
                 # Cost vs asking price depends on source
                 if is_ebay:
@@ -367,30 +366,33 @@ def _push_batch(batch_id: str):
                     cost   = float(row["price"])
                     asking = float(list_price) if list_price else None
 
-                # ── Get or create card_variant ────────────────────────────────
-                source_type = row.get("source_type")  # e.g. "deck_exclusive"
-                stamp_type = row.get("stamp_type")    # e.g. "1st_edition"
-
+                # ── Get or create card_variant (seven-axis, NULL-safe match) ──
                 cur.execute("""
                     SELECT id FROM card_variants
                     WHERE card_id = %s
-                      AND variant_type = %s
-                      AND finish = %s
-                      AND (source_type IS NOT DISTINCT FROM %s)
-                      AND (stamp_type IS NOT DISTINCT FROM %s)
-                """, (str(row["card_id"]), variant_type, finish, source_type, stamp_type))
+                      AND foil_type    IS NOT DISTINCT FROM %s
+                      AND foil_pattern IS NOT DISTINCT FROM %s
+                      AND texture      IS NOT DISTINCT FROM %s
+                      AND material     IS NOT DISTINCT FROM %s
+                      AND size         IS NOT DISTINCT FROM %s
+                      AND stamp_type   IS NOT DISTINCT FROM %s
+                      AND source_type  IS NOT DISTINCT FROM %s
+                """, (str(row["card_id"]), foil_type, foil_pattern, texture,
+                      material, size, stamp_type, source_type))
                 v_row = cur.fetchone()
                 if v_row:
                     variant_id = str(v_row["id"])
                 else:
                     cur.execute("""
                         INSERT INTO card_variants
-                            (card_id, variant_type, finish, is_special, source_type, stamp_type)
-                        VALUES (%s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (card_id, variant_type, finish, source_type, stamp_type)
-                        DO UPDATE SET is_special = EXCLUDED.is_special
+                            (card_id, foil_type, foil_pattern, texture,
+                             material, size, stamp_type, source_type)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (card_id, variant_key)
+                        DO UPDATE SET card_id = EXCLUDED.card_id
                         RETURNING id
-                    """, (str(row["card_id"]), variant_type, finish, is_special, source_type, stamp_type))
+                    """, (str(row["card_id"]), foil_type, foil_pattern, texture,
+                          material, size, stamp_type, source_type))
                     variant_id = str(cur.fetchone()["id"])
 
                 # ── Insert inventory row ──────────────────────────────────────
@@ -613,22 +615,18 @@ def _push_batch_by_order(order_number: str):
     else:
         purchase_id = str(existing["id"])
 
-    SPECIAL_PATTERNS = {"Cosmos Holo", "Master Ball Pattern", "Poke Ball Pattern",
-                        "Cracked Ice Holo", "Galaxy Holo"}
-
     for row in rows:
         list_price = row.get("override_price") or row.get("calculated_price")
-        foil_type    = row.get("foil_type")
-        foil_pattern = row.get("foil_pattern")
-        variant_type = foil_pattern or foil_type or "Non-Holo"
-        finish       = foil_type or "Non-Holo"
-        is_special   = variant_type in SPECIAL_PATTERNS
 
         variant_id = get_or_create_variant(
-            card_id=str(row["card_id"]),
-            variant_type=variant_type,
-            finish=finish,
-            is_special=is_special,
+            card_id      = str(row["card_id"]),
+            foil_type    = row.get("foil_type"),
+            foil_pattern = row.get("foil_pattern"),
+            texture      = row.get("texture"),
+            material     = row.get("material"),
+            size         = row.get("size"),
+            stamp_type   = row.get("stamp_type"),
+            source_type  = row.get("source_type"),
         )
 
         # Store source type if present (e.g. deck_exclusive)

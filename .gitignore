@@ -19,3 +19,6 @@ __pycache__/
 *.csv
 ebay_export_*.csv
 images/
+.DS_Store
+__pycache__/
+*.pyc

@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from importer.ebay_auth import get_trading_headers, get_user_token, TRADING_API_URL
+from importer.ebay_auth import get_trading_headers, get_user_token, get_account_name, TRADING_API_URL
 from utils.ebay_parser import parse_variation_name, infer_set_name_from_title
 
 # ── Namespace used in eBay Trading API XML responses ─────────────────────────
@@ -42,11 +42,11 @@ def _text(node, tag: str, default=None):
     el = _find(node, tag)
     return el.text.strip() if el is not None and el.text else default
 
-def _post(call_name: str, xml_body: str) -> ET.Element:
+def _post(call_name: str, xml_body: str, account_num: int = 1) -> ET.Element:
     """POST to Trading API and return parsed XML root."""
     resp = requests.post(
         TRADING_API_URL,
-        headers=get_trading_headers(call_name),
+        headers=get_trading_headers(call_name, account_num=account_num),
         data=xml_body.encode("utf-8"),
         timeout=30,
     )
@@ -67,12 +67,12 @@ def _post(call_name: str, xml_body: str) -> ET.Element:
 # Step 1 — Get all active listing IDs via GetMyeBaySelling
 # ══════════════════════════════════════════════════════════════════════════════
 
-def fetch_active_listing_ids() -> list[dict]:
+def fetch_active_listing_ids(account_num: int = 1) -> list[dict]:
     """
     Returns list of dicts: [{item_id, title, quantity, price}, ...]
     Handles pagination automatically.
     """
-    token    = get_user_token()
+    token    = get_user_token(account_num)
     all_items = []
     page      = 1
 
@@ -94,7 +94,7 @@ def fetch_active_listing_ids() -> list[dict]:
   <DetailLevel>ReturnAll</DetailLevel>
 </GetMyeBaySellingRequest>"""
 
-        root        = _post("GetMyeBaySelling", xml)
+        root        = _post("GetMyeBaySelling", xml, account_num=account_num)
         active_list = _find(root, "ActiveList")
 
         if active_list is None:
@@ -149,7 +149,7 @@ def fetch_active_listing_ids() -> list[dict]:
 #  Import Single Item
 # ══════════════════════════════════════════════════════════════════════════════
 
-def import_single_item(item_id: str, dry_run: bool = False, no_api: bool = False):
+def import_single_item(item_id: str, dry_run: bool = False, no_api: bool = False, account_num: int = 1):
     """
     Import a single eBay listing by item ID.
     With --dry-run, calls the Pokemon TCG API to preview matches
@@ -172,7 +172,7 @@ def import_single_item(item_id: str, dry_run: bool = False, no_api: bool = False
 
     print(f"  Fetching variations for item {item_id}...")
     try:
-        rows = fetch_item_variations(item_id, f"eBay item {item_id}")
+        rows = fetch_item_variations(item_id, f"eBay item {item_id}", account_num=account_num)
     except Exception as e:
         print(f"❌ Error fetching item {item_id}: {e}")
         return
@@ -186,7 +186,7 @@ def import_single_item(item_id: str, dry_run: bool = False, no_api: bool = False
     # Real import — skip display loop, go straight to staging
     if not dry_run and not no_api:
         print(f"  Writing to staging...\n")
-        inserted = write_to_staging(rows, batch_id, dry_run=False)
+        inserted = write_to_staging(rows, batch_id, dry_run=False, account=get_account_name(account_num))
         print(f"\n✅ Done: {inserted} row(s) written to staging.")
         print(f"\nNext steps:")
         print(f"  python3 main.py --review      ← fix unmatched cards")
@@ -200,7 +200,22 @@ def import_single_item(item_id: str, dry_run: bool = False, no_api: bool = False
         card_name    = r.get("card_name") or r.get("variation_name", "")
         card_number  = r.get("card_number", "")
         set_name     = r.get("set_override") or r.get("set_name", "")
-        variant_type = r.get("variant_type", "Normal")
+
+        # ── Compatibility shim: new parser emits foil_type, old code uses variant_type ──
+        # Map new seven-axis fields → old variant_type/card_type for display + API lookup
+        if "variant_type" not in r or r.get("variant_type") is None:
+            foil_type    = r.get("foil_type", "non_holo") or "non_holo"
+            foil_pattern = r.get("foil_pattern") or ""
+            if foil_type == "reverse_holo":
+                variant_type = f"Reverse Holo {foil_pattern}".strip() if foil_pattern else "Reverse Holo"
+            elif foil_type == "holo":
+                variant_type = "Holo"
+            else:
+                variant_type = "Normal"
+            r["variant_type"] = variant_type
+            r["card_type"]    = r.get("card_type", "common")
+        else:
+            variant_type = r.get("variant_type", "Normal")
 
         if r["quantity"] <= 0:
             print(f"  ⏭  [{i}/{len(rows)}] Skipped (qty=0): {card_name}\n")
@@ -212,17 +227,26 @@ def import_single_item(item_id: str, dry_run: bool = False, no_api: bool = False
                 f"  📋 [{i}/{len(rows)}]\n"
                 f"       eBay:      #{card_number} {card_name} | {variant_type} | qty={r['quantity']} | ${r['price']:.2f}\n"
                 f"       Set:       {set_name}\n"
-                f"       card_type: {r['card_type']}\n"
+                f"       card_type: {r.get('card_type', 'common')}\n"
             )
             continue
 
         # ── API mode: look up card and get market price ───────────────────────
         lookup = lookup_card_for_ebay(
-            card_name    = card_name,
-            card_number  = card_number,
-            set_name     = set_name,
-            variant_type = variant_type,
+            card_name   = card_name,
+            card_number = card_number,
+            set_name    = set_name,
         )
+
+        # Infer foil_type from rarity if parser didn't set it
+        HOLO_RARITIES = {
+            'Rare Holo', 'Rare Holo V', 'Rare Holo VMAX', 'Rare Holo VSTAR',
+            'Double Rare', 'Ultra Rare', 'Illustration Rare',
+            'Special Illustration Rare', 'Hyper Rare', 'ACE SPEC Rare',
+            'Rare Holo EX', 'Rare Holo GX', 'Rare Holo LV.X',
+        }
+        if lookup.get("rarity") in HOLO_RARITIES and r.get("foil_type") in (None, "non_holo"):
+            r["foil_type"] = "holo"
 
         if lookup["matched"]:
             matched += 1
@@ -232,7 +256,7 @@ def import_single_item(item_id: str, dry_run: bool = False, no_api: bool = False
             status = "⚠️ "
 
         # Extract market price from cached api_card — no extra API call
-        market_price, market_date = extract_market_price(lookup.get("_api_card"), variant_type)
+        market_price, market_date = extract_market_price(lookup.get("_api_card"), r.get("foil_type"))
         market_str   = f"${market_price:.2f}" if market_price else "—"
 
         price_diff = ""
@@ -243,14 +267,14 @@ def import_single_item(item_id: str, dry_run: bool = False, no_api: bool = False
 
         print(
             f"  {status} [{i}/{len(rows)}]\n"
-            f"       eBay:      #{card_number} {card_name} | {variant_type} | qty={r['quantity']} | ${r['price']:.2f}{price_diff}\n"
+            f"       eBay:      #{card_number} {card_name} | {r.get('foil_type') or ''} | qty={r['quantity']} | ${r['price']:.2f}{price_diff}\n"
             f"       API Match: {lookup['card_name'] or '—'} | "
             f"ID: {lookup['api_card_id'] or '—'} | "
             f"Set: {lookup['set_name'] or '—'} | "
             f"Rarity: {lookup['rarity'] or '—'}\n"
             f"       Market $:  {market_str}\n"
             f"       Image:     {lookup['image_url'] or '—'}\n"
-            f"       card_type: {r['card_type']} | "
+            f"       card_type: {r.get('card_type', 'common')} | "
             f"card_id: {lookup['card_id'] or 'NOT CREATED (dry run)'}\n"
         )
 
@@ -270,7 +294,7 @@ def import_single_item(item_id: str, dry_run: bool = False, no_api: bool = False
 
     # ── Real import — write to staging ────────────────────────────────────────
     print(f"\nWriting to staging...")
-    inserted = write_to_staging(rows, batch_id, dry_run=False)
+    inserted = write_to_staging(rows, batch_id, dry_run=False, account=get_account_name(account_num))
     print(f"\n✅ Done: {inserted} row(s) written to staging.")
     print(f"\nNext steps:")
     print(f"  python3 main.py --review      ← fix unmatched cards")
@@ -280,7 +304,7 @@ def import_single_item(item_id: str, dry_run: bool = False, no_api: bool = False
 # Step 2 — Get variation details for a single listing via GetItem
 # ══════════════════════════════════════════════════════════════════════════════
 
-def fetch_item_variations(item_id: str, title: str) -> list[dict]:
+def fetch_item_variations(item_id: str, title: str, account_num: int = 1) -> list[dict]:
     """
     For a single listing ID, fetch all its variations.
     Returns list of dicts, one per variation:
@@ -291,7 +315,7 @@ def fetch_item_variations(item_id: str, title: str) -> list[dict]:
         variant_type, card_type, set_name
     }
     """
-    token = get_user_token()
+    token = get_user_token(account_num)
 
     xml = f"""<?xml version="1.0" encoding="utf-8"?>
 <GetItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
@@ -303,7 +327,7 @@ def fetch_item_variations(item_id: str, title: str) -> list[dict]:
   <IncludeItemSpecifics>true</IncludeItemSpecifics>
 </GetItemRequest>"""
 
-    root  = _post("GetItem", xml)
+    root  = _post("GetItem", xml, account_num=account_num)
     item  = _find(root, "Item")
     if item is None:
         return []
@@ -317,8 +341,11 @@ def fetch_item_variations(item_id: str, title: str) -> list[dict]:
     if variations_node is not None:
         # ── Variation listing ─────────────────────────────────────────────────
         for var in _findall(variations_node, "Variation"):
-            # Quantity
-            qty_str = _text(var, "Quantity", "0")
+            # Quantity — use remaining (total - sold), not total listed
+            qty_total  = int(_text(var, "Quantity", "0"))
+            selling_s  = _find(var, "SellingStatus")
+            qty_sold   = int(_text(selling_s, "QuantitySold", "0")) if selling_s is not None else 0
+            qty_str    = str(max(0, qty_total - qty_sold))
 
             # Price
             sp        = _find(var, "StartPrice")
@@ -348,9 +375,15 @@ def fetch_item_variations(item_id: str, title: str) -> list[dict]:
                 "set_name":       set_name or "",
                 **{k: parsed[k] for k in (
                     "card_number", "set_total", "card_name",
-                    "variant_type", "card_type", "parse_ok", "set_override",
+                    "parse_ok", "set_override",
                     "source_type", "stamp_type", "foil_pattern"
                 )},
+                "variant_type":  parsed.get("variant_type", ""),
+                "card_type":     parsed.get("card_type", "common"),
+                "foil_type":     parsed.get("foil_type"),
+                "texture":       parsed.get("texture"),
+                "material":      parsed.get("material"),
+                "size":          parsed.get("size"),
             })
 
     else:
@@ -368,9 +401,18 @@ def fetch_item_variations(item_id: str, title: str) -> list[dict]:
             "price":          float(price_str),
             "set_name":       set_name or "",
             **{k: parsed[k] for k in (
-                "card_number", "set_total", "card_name",
-                "variant_type", "card_type", "parse_ok"
+                "card_number", "set_total", "card_name", "parse_ok"
             )},
+            "variant_type":  parsed.get("variant_type", ""),
+            "card_type":     parsed.get("card_type", "common"),
+            "foil_type":     parsed.get("foil_type"),
+            "foil_pattern":  parsed.get("foil_pattern"),
+            "source_type":   parsed.get("source_type"),
+            "stamp_type":    parsed.get("stamp_type"),
+            "set_override":  parsed.get("set_override"),
+            "texture":       parsed.get("texture"),
+            "material":      parsed.get("material"),
+            "size":          parsed.get("size"),
         })
 
     return rows
@@ -380,7 +422,7 @@ def fetch_item_variations(item_id: str, title: str) -> list[dict]:
 # Step 3 — Write rows to staging table
 # ══════════════════════════════════════════════════════════════════════════════
 
-def write_to_staging(rows: list[dict], batch_id: str, dry_run: bool = False) -> int:
+def write_to_staging(rows: list[dict], batch_id: str, dry_run: bool = False, account: str = "unknown") -> int:
     """
     Insert parsed variation rows into the staging table.
     Auto-matches each card via Pokemon TCG API and populates card_id.
@@ -388,6 +430,10 @@ def write_to_staging(rows: list[dict], batch_id: str, dry_run: bool = False) -> 
     Skips entire import if all variations already approved in staging.
     Only inserts missing variations if some are already there.
     Returns count of rows inserted.
+
+    NOTE: rows may span multiple eBay listings (item_ids) when called from
+    import_from_ebay's full-batch import. Dedup must be checked per-listing,
+    not once against the whole combined batch.
     """
     from db.connection import db_cursor
     from utils.pokemon_api import lookup_card_for_ebay, rarity_to_card_type
@@ -397,38 +443,82 @@ def write_to_staging(rows: list[dict], batch_id: str, dry_run: bool = False) -> 
     matched   = 0
     unmatched = 0
 
-    # ── Check existing staging rows for this eBay item ────────────────────────
-    if not dry_run:
-        item_id = rows[0]["item_id"] if rows else None
-        if item_id:
+    def _dedup_key(r):
+        # Use eBay's own raw variation_name as the dedup key. This is set
+        # directly from parsed eBay data BEFORE card matching / rarity-based
+        # foil inference runs, so it can't drift between what the pre-check
+        # sees and what actually gets written to the DB. Keying on derived
+        # fields like foil_type is unsafe — inference can change foil_type
+        # from non_holo to holo AFTER this check would have run, causing the
+        # same variation to look "new" on every subsequent import.
+        return r.get("variation_name") or r.get("title") or str(r.get("card_number", ""))
+
+    # ── Check existing staging rows per-listing (grouped by item_id) ──────────
+    if not dry_run and rows:
+        from itertools import groupby
+        rows_sorted = sorted(rows, key=lambda r: r.get("item_id") or "")
+        filtered_rows = []
+
+        for item_id, group_iter in groupby(rows_sorted, key=lambda r: r.get("item_id") or ""):
+            group = list(group_iter)
+            if not item_id:
+                filtered_rows.extend(group)
+                continue
+
+            # Collapse duplicates WITHIN this fetch itself — eBay's GetItem
+            # response can return the same variation_name twice for a listing
+            # (e.g. a variation matrix that renders to the same display title
+            # for two different SKUs). Without this, two identical-key rows
+            # in one fetch both pass the "missing" filter and both get
+            # inserted, every run, regardless of what's already in the DB.
+            seen_in_batch = {}
+            batch_dupes = []
+            for r in group:
+                key = _dedup_key(r)
+                if key in seen_in_batch:
+                    batch_dupes.append((key, r))
+                else:
+                    seen_in_batch[key] = r
+            if batch_dupes:
+                print(f"  ⚠️  [{item_id}] {len(batch_dupes)} duplicate variation(s) in this fetch — collapsing to one each:")
+                for key, r in batch_dupes:
+                    print(f"    Dup in fetch: {key!r} qty={r.get('quantity')} — keeping first occurrence only")
+            group = list(seen_in_batch.values())
+
             with db_cursor() as cur:
                 cur.execute("""
-                    SELECT card_number, status
+                    SELECT variation_name, status
                     FROM staging
                     WHERE order_number = %s AND source = 'ebay'
                 """, (item_id,))
                 existing = cur.fetchall()
 
-            existing_approved = set((r["card_number"], r.get("source_type") or "") for r in existing if r["status"] == "approved")
-            existing_any      = set((r["card_number"], r.get("source_type") or "") for r in existing)
-            incoming          = set((str(row.get("card_number", "")), row.get("source_type") or "") for row in rows if row["quantity"] > 0)
+            existing_approved = set(r["variation_name"] for r in existing if r["status"] == "approved")
+            existing_any      = set(r["variation_name"] for r in existing)
+            incoming          = set(_dedup_key(r) for r in group if r["quantity"] > 0)
 
-            # All variations already approved → skip entirely
+            # All variations already approved → skip this listing entirely
             if incoming and incoming.issubset(existing_approved):
-                print(f"  ✅ All {len(existing_approved)} variations already approved — skipping import.")
-                return 0
+                print(f"  ✅ [{item_id}] All {len(existing_approved)} variations already approved — skipping.")
+                continue
 
-            # Some already exist → only insert missing ones
+            # Some already exist → only keep missing ones
             if existing_any:
                 missing = incoming - existing_any
                 if missing:
-                    print(f"  ℹ️  Found {len(existing_any)} existing rows, inserting {len(missing)} missing variation(s).")
-                    rows = [r for r in rows if (str(r.get("card_number", "")), r.get("source_type") or "") in missing]
-                    for r in rows:
-                        print(f"    Missing: #{r.get('card_number')} {r.get('card_name')} source={r.get('source_type')}")
+                    print(f"  ℹ️  [{item_id}] Found {len(existing_any)} existing rows, inserting {len(missing)} missing variation(s).")
+                    kept = [r for r in group if _dedup_key(r) in missing]
+                    for r in kept:
+                        print(f"    Missing: #{r.get('card_number')} {r.get('card_name')} "
+                              f"foil={r.get('foil_type')} source={r.get('source_type')}")
+                    filtered_rows.extend(kept)
                 else:
-                    print(f"  ✅ All variations already in staging — skipping import.")
-                    return 0
+                    print(f"  ✅ [{item_id}] All variations already in staging — skipping.")
+                continue
+
+            filtered_rows.extend(group)
+
+        rows = filtered_rows
 
     # ── Process rows ──────────────────────────────────────────────────────────
     for row in rows:
@@ -452,8 +542,24 @@ def write_to_staging(rows: list[dict], batch_id: str, dry_run: bool = False) -> 
                 card_name    = card_name,
                 card_number  = card_number,
                 set_name     = set_name,
-                variant_type = variant_type,
+                foil_type    = row.get("foil_type"),
+                foil_pattern = row.get("foil_pattern"),
+                texture      = row.get("texture"),
+                material     = row.get("material"),
+                size         = row.get("size"),
+                stamp_type   = row.get("stamp_type"),
+                source_type  = row.get("source_type"),
             )
+            # Infer foil_type from rarity if parser defaulted to non_holo
+            HOLO_RARITIES = {
+                'Rare Holo', 'Rare Holo V', 'Rare Holo VMAX', 'Rare Holo VSTAR',
+                'Double Rare', 'Ultra Rare', 'Illustration Rare',
+                'Special Illustration Rare', 'Hyper Rare', 'ACE SPEC Rare',
+                'Rare Holo EX', 'Rare Holo GX', 'Rare Holo LV.X',
+            }
+            if lookup.get("rarity") in HOLO_RARITIES and row.get("foil_type") in (None, "non_holo"):
+                row["foil_type"] = "holo"
+
             if lookup["matched"]:
                 card_id      = lookup["card_id"]
                 variant_id   = lookup["variant_id"]
@@ -463,7 +569,7 @@ def write_to_staging(rows: list[dict], batch_id: str, dry_run: bool = False) -> 
                 # Extract market price and date from cached api_card — no extra API call
                 from utils.pokemon_api import extract_market_price
                 market_price, market_date = extract_market_price(
-                    lookup.get("_api_card"), variant_type
+                    lookup.get("_api_card"), row.get("foil_type")
                 )
                 row["market_price"]      = market_price
                 row["market_price_date"] = market_date
@@ -488,29 +594,16 @@ def write_to_staging(rows: list[dict], batch_id: str, dry_run: bool = False) -> 
         with db_cursor() as cur:
             cur.execute("""
                 INSERT INTO staging (
-                    import_batch,
-                    order_number,
-                    order_date,
-                    source,
-                    card_name,
-                    set_name,
-                    card_number,
-                    condition,
-                    quantity,
-                    price,
-                    card_id,
-                    match_status,
-                    status,
-                    notes,
-                    market_price,
-                    market_price_date,
-                    api_rarity,
-                    foil_type,          
-                    foil_pattern,       
-                    source_type,
-                    stamp_type          
+                    import_batch, order_number, order_date, source,
+                    card_name, set_name, card_number, condition,
+                    quantity, price, listing_price,
+                    card_id, match_status, status, notes,
+                    market_price, market_price_date, api_rarity,
+                    foil_type, foil_pattern, source_type, stamp_type,
+                    variation_name, account
                 ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                 )
                 ON CONFLICT DO NOTHING
             """, (
@@ -523,18 +616,21 @@ def write_to_staging(rows: list[dict], batch_id: str, dry_run: bool = False) -> 
                 row.get("card_number", ""),
                 "Near Mint",
                 row["quantity"],
-                row["price"],
+                0,                    # cost = 0 for eBay (resale, not purchase)
+                row["price"],         # listing_price = eBay variation price
                 card_id,
                 match_status,
                 "approved" if card_id else "pending",
-                f"eBay: {row['title'][:80]} | var: {row['variation_name']} | type: {row['card_type']}",
+                f"eBay: {row['title'][:80]} | var: {row.get('variation_name', '')}",
                 row.get("market_price"),
                 row.get("market_price_date"),
                 row.get("api_rarity"),
-                row.get("variant_type"),  
-                row.get("foil_pattern"), 
-                row.get("source_type"),  
+                row.get("foil_type") or row.get("variant_type"),
+                row.get("foil_pattern"),
+                row.get("source_type"),
                 row.get("stamp_type"),
+                row.get("variation_name", ""),
+                account,
             ))
         inserted += 1
 
@@ -549,7 +645,7 @@ def write_to_staging(rows: list[dict], batch_id: str, dry_run: bool = False) -> 
 # Main entry point
 # ══════════════════════════════════════════════════════════════════════════════
 
-def import_from_ebay(dry_run: bool = False):
+def import_from_ebay(dry_run: bool = False, account_num: int = 1):
     """
     Full eBay import flow:
     1. Fetch all active listing IDs
@@ -563,7 +659,7 @@ def import_from_ebay(dry_run: bool = False):
         print("⚠️  DRY RUN — nothing will be written to the database.\n")
 
     # ── 1. Get all active listing IDs ─────────────────────────────────────────
-    listings = fetch_active_listing_ids()
+    listings = fetch_active_listing_ids(account_num=account_num)
     if not listings:
         print("No active listings found. Make sure your eBay token is valid.")
         return
@@ -578,7 +674,7 @@ def import_from_ebay(dry_run: bool = False):
         print(f"  [{i}/{len(listings)}] Fetching: {title[:60]}")
 
         try:
-            rows = fetch_item_variations(item_id, title)
+            rows = fetch_item_variations(item_id, title, account_num=account_num)
             print(f"           → {len(rows)} variation(s)")
             all_rows.extend(rows)
 
@@ -602,7 +698,7 @@ def import_from_ebay(dry_run: bool = False):
 
     # ── 4. Write to staging ───────────────────────────────────────────────────
     print(f"\n{'[DRY RUN] ' if dry_run else ''}Writing to staging...")
-    inserted = write_to_staging(all_rows, batch_id, dry_run=dry_run)
+    inserted = write_to_staging(all_rows, batch_id, dry_run=dry_run, account=get_account_name(account_num))
 
     print(f"\n✅ Import complete: {inserted} row(s) {'would be ' if dry_run else ''}written to staging.")
     if not dry_run:

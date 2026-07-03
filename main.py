@@ -67,27 +67,51 @@ def cmd_fix_variant(args):
     variant = getattr(args, "variant", None)
 
     if not variant:
-        print("Error: --variant required. e.g. --variant 'Cosmos Holo'")
+        print("Error: --variant required. e.g. --variant 'reverse_holo' or 'poke_ball'")
         return
 
-    SPECIAL_PATTERNS = {"Cosmos Holo", "Master Ball Pattern", "Poke Ball Pattern",
-                        "Cracked Ice Holo", "Galaxy Holo"}
+    # Map a single --variant token onto the right seven-axis column.
+    FOIL_TYPES    = {"non_holo", "holo", "reverse_holo"}
+    FOIL_PATTERNS = {"poke_ball", "master_ball", "friend_ball", "love_ball",
+                     "quick_ball", "dusk_ball", "team_rocket", "energy_symbol"}
+    TEXTURES      = {"cosmos", "hd_cosmos", "galaxy_cosmos"}
+    MATERIALS     = {"metal"}
+    SIZES         = {"jumbo"}
+    STAMPS        = {"1st_edition", "pokemon_center", "prerelease",
+                     "pokemon_day", "mega_evolution", "prismatic_evolution"}
+    SOURCES       = {"deck_exclusive", "product_exclusive", "box_topper", "stamp_promo"}
 
-    foil_pattern = variant if variant in SPECIAL_PATTERNS else None
-    foil_type    = "Holo" if foil_pattern else variant
-    is_special   = variant in SPECIAL_PATTERNS
+    v = variant.strip().lower()
+    col = None
+    for colname, valset in (("foil_type", FOIL_TYPES), ("foil_pattern", FOIL_PATTERNS),
+                            ("texture", TEXTURES), ("material", MATERIALS),
+                            ("size", SIZES), ("stamp_type", STAMPS),
+                            ("source_type", SOURCES)):
+        if v in valset:
+            col = colname
+            break
+
+    if not col:
+        print(f"Error: '{variant}' is not a recognized axis value.")
+        print("  foil_type:    non_holo, holo, reverse_holo")
+        print("  foil_pattern: poke_ball, master_ball, friend_ball, love_ball, "
+              "quick_ball, dusk_ball, team_rocket, energy_symbol")
+        print("  texture:      cosmos, hd_cosmos, galaxy_cosmos")
+        print("  material:     metal    |  size: jumbo")
+        print("  stamp_type:   1st_edition, pokemon_center, prerelease, "
+              "pokemon_day, mega_evolution, prismatic_evolution")
+        print("  source_type:  deck_exclusive, product_exclusive, box_topper, stamp_promo")
+        return
 
     with db_cursor() as cur:
-        query = """
+        query = f"""
             UPDATE card_variants cv
-               SET variant_type = %s,
-                   finish        = %s,
-                   is_special    = %s
+               SET {col} = %s
               FROM card_master cm
              WHERE cv.card_id = cm.id
                AND cm.name = %s
         """
-        params = [variant, foil_type, is_special, name]
+        params = [v, name]
         if number:
             query  += " AND cm.card_number = %s"
             params.append(number)
@@ -95,7 +119,32 @@ def cmd_fix_variant(args):
         count = cur.rowcount
         print(f"Updated {count} variant row(s) for {name}" +
               (f" #{number}" if number else "") +
-              f" → {variant}")
+              f" → {col}={v}")
+
+def _variant_label(r: dict) -> str:
+    """Build a display label from the seven axes (skip blanks)."""
+    DISPLAY = {
+        "non_holo": "Non-Holo", "holo": "Holo", "reverse_holo": "Reverse Holo",
+        "poke_ball": "Poke Ball", "master_ball": "Master Ball",
+        "friend_ball": "Friend Ball", "love_ball": "Love Ball",
+        "quick_ball": "Quick Ball", "dusk_ball": "Dusk Ball",
+        "team_rocket": "Team Rocket", "energy_symbol": "Energy Symbol",
+        "cosmos": "Cosmos", "hd_cosmos": "HD Cosmos", "galaxy_cosmos": "Galaxy Cosmos",
+        "metal": "Metal", "jumbo": "Jumbo",
+        "1st_edition": "1st Edition", "pokemon_center": "Pokemon Center",
+        "prerelease": "Prerelease", "pokemon_day": "Pokemon Day",
+        "mega_evolution": "Mega Evolution", "prismatic_evolution": "Prismatic Evolution",
+        "deck_exclusive": "Deck Exclusive", "product_exclusive": "Product Exclusive",
+        "box_topper": "Box Topper", "stamp_promo": "Stamp Promo",
+    }
+    parts = []
+    for key in ("foil_type", "foil_pattern", "texture", "material", "size",
+                "variant_stamp_type", "variant_source_type"):
+        val = r.get(key)
+        if val:
+            parts.append(DISPLAY.get(val, val))
+    return " · ".join(parts) if parts else "-"
+
 
 def cmd_stock(args):
     from db.connection import get_stock_summary
@@ -104,19 +153,19 @@ def cmd_stock(args):
         print("No inventory found.")
         return
 
-    header = "\n" + f"{'Card':<30} {'Set':<22} {'Number':<10} {'Variant':<22} {'Cond':<18} {'Qty':>4} {'Cost':>7} {'List':>7} {'Market':>8}"
+    header = "\n" + f"{'Card':<30} {'Set':<22} {'Number':<10} {'Variant':<30} {'Cond':<18} {'Qty':>4} {'Cost':>7} {'List':>7} {'Market':>8}"
     print(header)
-    print("-" * 132)
+    print("-" * 140)
 
     for r in rows:
-        variant_str = str(r.get('variant_type') or '-')
+        variant_str = _variant_label(r)
         market      = r.get('market_price')
         num         = str(r.get('display_number') or r.get('card_number') or '-')
         print(
             f"{str(r['card_name']):<30} "
             f"{str(r['set_name']):<22} "
             f"{num:<10} "
-            f"{variant_str:<22} "
+            f"{variant_str:<30} "
             f"{str(r['condition']):<18} "
             f"{r['qty_available']:>4} "
             f"{'$' + '{:.2f}'.format(r['avg_cost_basis'] or 0):>7} "
@@ -130,7 +179,7 @@ def cmd_stock(args):
 def cmd_ebay_verify(args):
     """Quick credential check — no DB writes."""
     from importer.ebay_auth import verify_credentials
-    ok = verify_credentials()
+    ok = verify_credentials(account_num=args.account)
     if not ok:
         print("\nFix your .env credentials and try again.")
         sys.exit(1)
@@ -138,11 +187,12 @@ def cmd_ebay_verify(args):
 def cmd_ebay_import(args):
     """Fetch all active eBay listings → staging table."""
     from importer.ebay import import_from_ebay
-    import_from_ebay(dry_run=args.dry_run)
+    import_from_ebay(dry_run=args.dry_run, account_num=args.account)
 
 def cmd_ebay_item(args):
     from importer.ebay import import_single_item
-    import_single_item(args.ebay_item, dry_run=args.dry_run, no_api=getattr(args, 'no_api', False))
+    import_single_item(args.ebay_item, dry_run=args.dry_run, no_api=getattr(args, 'no_api', False),
+                       account_num=args.account)
 
 def cmd_ebay_export(args):
     from importer.ebay import export_listings_to_csv
@@ -213,6 +263,8 @@ def main():
         help="Card UUID (for --upload-image)")
     parser.add_argument("--search", metavar="NAME",
         help="Card name search (for --upload-image)")
+    parser.add_argument("--account", metavar="N", type=int, default=1,
+        help="eBay account number to use, e.g. --account 2 (matches EBAY_ACCOUNT_{N}_* in .env). Defaults to 1.")
 
     args = parser.parse_args()
 

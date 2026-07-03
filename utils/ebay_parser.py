@@ -9,13 +9,22 @@ Your variation names follow these patterns:
     "SVP 044 Charmander Black Star Promo"   ← promo pattern
     "SWSH001 Pikachu"                        ← SWSH promo pattern
 
-This module extracts:
+This module extracts the SEVEN-AXIS variant model (lookup codes; NULL = standard):
     card_number   → "153"
     set_total     → "197"
     card_name     → "Melmetal ex"
-    variant_type  → "Reverse Holo" | "Normal" | etc.
-    card_type     → "common" | "reverse_holo" | "holo" | "ultra_rare" | "promo"
-    set_override  → set name override for promos (e.g. "Scarlet & Violet Black Star Promos")
+    foil_type     → 'non_holo' | 'holo' | 'reverse_holo' | None
+    foil_pattern  → 'poke_ball' | 'master_ball' | 'love_ball' | ... | None
+    texture       → 'cosmos' | 'hd_cosmos' | 'galaxy_cosmos' | None
+    material      → 'metal' | None
+    size          → 'jumbo' | None
+    stamp_type    → '1st_edition' | 'pokemon_center' | 'pokemon_day' | ... | None
+    source_type   → 'deck_exclusive' | 'product_exclusive' | 'box_topper' | 'stamp_promo' | None
+    is_shiny      → bool (manual axis; parser sets False — user curates)
+    set_override  → set name override for promos
+
+NOTE: variant_type and card_type are RETIRED. Pricing/classification is a
+separate concern; this parser captures FACTS only.
 """
 
 import re
@@ -77,20 +86,91 @@ PROMO_PATTERNS = [
     ),
 ]
 
-# ── Card-type classifier ──────────────────────────────────────────────────────
-def classify_card_type(card_number: int, set_total: int, variant_type: str, card_name: str = "") -> str:
-    if card_number > set_total:
-        return "ultra_rare"
-    vt = (variant_type or "").lower()
-    if "reverse" in vt:
-        return "reverse_holo"
-    if "holo" in vt or "cosmos" in vt:
-        return "holo"
-    # ex, V, VMAX, VSTAR, GX are holofoil by definition
-    name_lower = (card_name or "").lower()
-    if any(name_lower.endswith(s) for s in (" ex", " v", " vmax", " vstar", " gx", " gx tag team")):
-        return "holo"
-    return "common"
+# ── Internal-label → lookup-code normalization ────────────────────────────────
+# The detection logic below uses human labels internally (legacy). This maps
+# them to the seven-axis lookup CODES the DB expects. Anything not mapped → None
+# (standard/none).
+
+def _normalize_axes(result: dict) -> dict:
+    """
+    Convert the parser's internal working labels into the seven-axis lookup
+    codes. Mutates and returns result. Splits the old conflated values:
+      - 'Cosmos Holo'  -> foil_type stays holo/reverse_holo, texture='cosmos'
+      - 'Metal Card'   -> material='metal'
+      - 'Shiny'        -> dropped from foil_pattern (is_shiny is manual)
+      - ball patterns  -> foil_pattern code + foil_type='reverse_holo'
+    """
+    vt  = (result.pop("variant_type", None) or "").strip()
+    fp  = (result.get("foil_pattern") or "").strip()
+
+    foil_type   = None
+    foil_pattern = None
+    texture     = None
+    material    = result.get("material")
+    size        = result.get("size")
+
+    vt_l = vt.lower()
+    fp_l = fp.lower()
+
+    # --- material (Metal Card) ---
+    if vt_l == "metal card":
+        material = "metal"
+        vt_l = ""  # not a foil
+
+    # --- base foil_type from variant_type ---
+    if "reverse" in vt_l:
+        foil_type = "reverse_holo"
+    elif "cosmos" in vt_l or "cosmo" in vt_l:
+        # standalone cosmos = a holo whose texture is cosmos
+        foil_type = "holo"
+        texture   = "cosmos"
+    elif "holo" in vt_l:
+        foil_type = "holo"
+    elif vt_l in ("normal", "", "non-holo", "non_holo"):
+        foil_type = "non_holo"
+    else:
+        foil_type = "non_holo"
+
+    # --- ex / V / VMAX / VSTAR / GX cards are holo by definition ---
+    # If no explicit reverse/holo was detected (foil_type came out non_holo),
+    # infer holo from the card-name suffix. Reverse holo, if detected, wins.
+    if foil_type == "non_holo":
+        name_l = (result.get("card_name") or "").lower().strip()
+        HOLO_SUFFIXES = (" ex", " v", " vmax", " vstar", " gx",
+                         " gx tag team", " vunion", " v-union")
+        if any(name_l.endswith(s) for s in HOLO_SUFFIXES):
+            foil_type = "holo"
+
+    # --- foil_pattern / texture from the old foil_pattern field ---
+    BALL_CODES = {
+        "poke ball": "poke_ball", "poke ball pattern": "poke_ball",
+        "master ball": "master_ball", "master ball pattern": "master_ball",
+        "friend ball": "friend_ball", "love ball": "love_ball",
+        "quick ball": "quick_ball", "dusk ball": "dusk_ball",
+        "team rocket": "team_rocket", "energy symbol": "energy_symbol",
+    }
+    if fp_l in ("cosmos holo", "cosmos", "cosmo", "cosmo holo"):
+        # reverse holo with cosmos texture (the Eevee case)
+        texture = "cosmos"
+        if not foil_type or foil_type == "non_holo":
+            foil_type = "reverse_holo"
+    elif fp_l == "shiny":
+        # shiny is a manual card_master axis, not a foil pattern — drop it
+        pass
+    elif fp_l in BALL_CODES:
+        foil_pattern = BALL_CODES[fp_l]
+        foil_type = "reverse_holo"   # ball patterns are reverse holos
+
+    result["foil_type"]    = foil_type
+    result["foil_pattern"] = foil_pattern
+    result["texture"]      = texture
+    result["material"]     = material
+    result["size"]         = size
+    # stamp_type / source_type already use codes from the detection logic
+    result.setdefault("stamp_type", None)
+    result.setdefault("source_type", None)
+    result.setdefault("is_shiny", False)
+    return result
 
 
 # ── Main parser ───────────────────────────────────────────────────────────────
@@ -115,12 +195,15 @@ def parse_variation_name(variation_name: str, listing_title: str = "") -> dict:
         "card_number":  None,
         "set_total":    None,
         "card_name":    None,
-        "variant_type": "Normal",
-        "card_type":    "common",
+        "variant_type": "Normal",   # internal working label; normalized away at end
         "set_override": None,
+        "foil_pattern": None,        # internal working label; normalized at end
+        "texture":      None,
+        "material":     None,
+        "size":         None,
         "source_type":  None,
-        "stamp_type":   None,        # ← ADD
-        "foil_pattern": None,        # ← ADD
+        "stamp_type":   None,
+        "is_shiny":     False,
         "product_name": None,
         "parse_ok":     False,
     }
@@ -162,17 +245,16 @@ def parse_variation_name(variation_name: str, listing_title: str = "") -> dict:
                 "set_total":    None,
                 "card_name":    card_name,
                 "variant_type": promo_variant,
-                "card_type":    "promo",
                 "set_override": promo_set,
                 "parse_ok":     True,
             })
-            return result
+            return _normalize_axes(result)
 
     # ── Step 1: Extract card_number/set_total prefix ──────────────────────────
     num_match = re.match(r"^(\d+)/(\d+)\s+(.+)$", name)
     if not num_match:
         result["card_name"] = name
-        return result
+        return _normalize_axes(result)
 
     card_num_str  = num_match.group(1).lstrip("0") or "0"
     set_total_str = num_match.group(2)
@@ -189,16 +271,8 @@ def parse_variation_name(variation_name: str, listing_title: str = "") -> dict:
             rest = remainder[len(ball_card):].strip()
             result["card_name"] = ball_card
             result["variant_type"] = "Reverse Holo" if re.search(r'\bRH\b|\bReverse\b', rest, re.IGNORECASE) else "Normal"
-            try:
-                card_num_int  = int(card_num_str)
-                set_total_int = int(set_total_str)
-                result["card_type"] = classify_card_type(
-                    card_num_int, set_total_int, result["variant_type"], result["card_name"]
-                )
-            except ValueError:
-                pass
             result["parse_ok"] = True
-            return result
+            return _normalize_axes(result)
 
     # ── Step 2: Strip ALL variant tokens from remainder ──────────────────────
     clean_name    = remainder
@@ -294,6 +368,24 @@ def parse_variation_name(variation_name: str, listing_title: str = "") -> dict:
 
     # Strip ALL variant-related words in one pass regardless of order
     STRIP_PATTERNS = [
+        # Rarity phrases — these appear in eBay titles but are NOT part of the
+        # card name (rarity comes from the API / card_master). Strip longest
+        # first so "Special Illustration Rare" goes before "Illustration Rare".
+        r"\bSpecial\s+Illustration\s+Rare\b",
+        r"\bIllustration\s+Rare\b",
+        r"\bHyper\s+Rare\b",
+        r"\bUltra\s+Rare\b",
+        r"\bDouble\s+Rare\b",
+        r"\bSecret\s+Rare\b",
+        r"\bRainbow\s+Rare\b",
+        r"\bGold(?:en)?\s+(?:Secret\s+)?Rare\b",
+        r"\bACE\s+SPEC\b",
+        r"\bAmazing\s+Rare\b",
+        r"\bRadiant\b",
+        r"\bFull\s+Art\b",
+        r"\bAlt(?:ernate)?\s+Art\b",
+        r"\bSIR\b", r"\bIR\b", r"\bFA\b", r"\bAA\b",   # common abbreviations
+        # Variant/finish tokens
         r"\bReverse\s+H\w*\b",     # "Reverse H", "Reverse Hol", "Reverse Holo", etc.
         r"\bReverse\b",            # standalone "Reverse"
         r"\bHolo\b",               # standalone "Holo"
@@ -306,7 +398,7 @@ def parse_variation_name(variation_name: str, listing_title: str = "") -> dict:
         r"\bPromo\b",              # "Promo"
         r"\s+R$",                  # trailing rarity indicator "R"
         r"\s*\[.*?\]",             # strips anything in brackets e.g. [Ghetsis], [Paldea]
-        r"\s*\[[^\]]*$",           # ← ADD: dangling unclosed bracket (truncated, e.g. "[Sycamore")
+        r"\s*\[[^\]]*$",           # dangling unclosed bracket (truncated, e.g. "[Sycamore")
         r"\s*\([^)]*\)\s*$",       # strips trailing (content) e.g. (Sada), (Turo)
     ]
     for sp in STRIP_PATTERNS:
@@ -315,23 +407,22 @@ def parse_variation_name(variation_name: str, listing_title: str = "") -> dict:
     # Clean up leftover spaces and punctuation
     clean_name = re.sub(r"\s{2,}", " ", clean_name).strip(" -–,")
 
+    # ── Re-check holo suffix AFTER cleaning (e.g. "Charizard ex Special
+    #    Illustration Rare" -> "Charizard ex" now ends in " ex") ──
     result["card_name"] = clean_name or remainder
+    _name_l = (result["card_name"] or "").lower().strip()
+    _HOLO_SUFFIXES = (" ex", " v", " vmax", " vstar", " gx",
+                      " gx tag team", " vunion", " v-union")
+    if (result["variant_type"] in ("Normal", "")
+            and any(_name_l.endswith(s) for s in _HOLO_SUFFIXES)):
+        # mark as holo so _normalize_axes picks it up
+        result["variant_type"] = "Holo"
     # Only set variant_type if not already set (e.g. Metal Card)
     if result["variant_type"] == "Normal":
         result["variant_type"] = found_variant or "Normal"
 
-    # ── Step 3: Classify card type ────────────────────────────────────────────
-    try:
-        card_num_int  = int(card_num_str)
-        set_total_int = int(set_total_str)
-        result["card_type"] = classify_card_type(
-            card_num_int, set_total_int, result["variant_type"], result["card_name"]
-        )
-    except ValueError:
-        pass
-
     result["parse_ok"] = True
-    return result
+    return _normalize_axes(result)
 
 
 def infer_set_name_from_title(title: str) -> str | None:
@@ -384,16 +475,27 @@ if __name__ == "__main__":
         "SVP 044 Charmander Black Star Promo",
         "SWSH001 Pikachu",
         "SVP044 Eevee",
+        "025/165 Pikachu RH Master Ball",
+        "025/165 Pikachu RH Poke Ball",
+        "036/165 Eevee Reverse Holo Cosmos Pokemon Day",
+        "SVP 050 Pikachu Cosmo Holo",
+        "001/091 Charizard Metal Card Promo",
     ]
-    print(f"{'Raw':<55} {'#':<5} {'Name':<30} {'Variant':<18} {'Type':<12} {'Set Override'}")
-    print("-" * 145)
+    cols = ["#", "Name", "foil_type", "foil_pattern", "texture",
+            "material", "size", "stamp_type", "source_type"]
+    print(f"{'Raw':<48} " + " ".join(f"{c:<13}" for c in cols))
+    print("-" * 170)
     for t in test_cases:
         r = parse_variation_name(t)
         print(
-            f"{r['raw']:<55} "
-            f"{r['card_number'] or '?':<5} "
-            f"{r['card_name'] or '?':<30} "
-            f"{r['variant_type']:<18} "
-            f"{r['card_type']:<12} "
-            f"{r['set_override'] or '-'}"
+            f"{r['raw']:<48} "
+            f"{(r['card_number'] or '?'):<13} "
+            f"{(r['card_name'] or '?'):<13.13} "
+            f"{str(r['foil_type']):<13} "
+            f"{str(r['foil_pattern']):<13} "
+            f"{str(r['texture']):<13} "
+            f"{str(r['material']):<13} "
+            f"{str(r['size']):<13} "
+            f"{str(r['stamp_type']):<13} "
+            f"{str(r['source_type']):<13}"
         )
