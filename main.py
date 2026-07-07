@@ -201,6 +201,21 @@ def cmd_ebay_export(args):
         item_id=getattr(args, 'export_item', None)
     )
 
+def cmd_ebay_pullorders(args):
+    from importer.ebay_orders import pull_orders
+    pull_orders(
+        account_num=args.account,
+        since_str=getattr(args, 'since', None),
+        until_str=getattr(args, 'until', None),
+        order_ids=getattr(args, 'order_id', None),
+        dry_run=args.dry_run,
+        paid_since_str=getattr(args, 'paid_since', None),
+    )
+
+def cmd_ebay_reconcile(args):
+    from importer.ebay_reconcile import reconcile_listings
+    reconcile_listings(account_num=args.account, fix=getattr(args, 'fix', False))
+
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main():
@@ -245,6 +260,10 @@ def main():
         "Default: calls Pokemon TCG API to match cards. "
         "Use --no-api for instant export without API calls."
     ))
+    group.add_argument("--ebay-pullorders", action="store_true",
+        help="Pull eBay orders and record sales (use --dry-run to preview)")
+    group.add_argument("--ebay-reconcile", action="store_true",
+        help="Diff platform_listings against eBay's live quantities (use --fix to apply eBay's numbers)")
 
     # ── Shared optional flags ─────────────────────────────────────────────────
     parser.add_argument("--dry-run", action="store_true",
@@ -253,6 +272,18 @@ def main():
         help="Skip API calls during dry run — just show parsed eBay data")
     parser.add_argument("--order", metavar="ORDER_NUM",
         help="Only process this specific order number")
+    parser.add_argument("--since", metavar="DATE",
+        help="Start of pull window, e.g. 2026-07-01 (for --ebay-pullorders)")
+    parser.add_argument("--until", metavar="DATE",
+        help="End of pull window, e.g. 2026-07-03 (for --ebay-pullorders)")
+    parser.add_argument("--order-id", metavar="ORDER_ID", action="append", default=None,
+        help="Targeted eBay order ID to pull (repeatable, for --ebay-pullorders)")
+    parser.add_argument("--fix", action="store_true",
+        help="Apply eBay's numbers as truth (for --ebay-reconcile)")
+    parser.add_argument("--paid-since", metavar="DATE",
+        help="Only record sales paid on/after this date, e.g. 2026-07-03T00:00:00 "
+             "(for --ebay-pullorders). Persists across future runs once set; "
+             "protects existing inventory from sales that predate your import.")
     parser.add_argument("--export-item", metavar="ITEM_ID",
         help="Export a single eBay listing by item ID (use with --ebay-export)")
     parser.add_argument("--number", metavar="CARD_NUM",
@@ -294,5 +325,9 @@ def main():
         cmd_ebay_item(args)    
     elif args.ebay_export:
         cmd_ebay_export(args)
+    elif args.ebay_pullorders:
+        cmd_ebay_pullorders(args)
+    elif args.ebay_reconcile:
+        cmd_ebay_reconcile(args)
 if __name__ == "__main__":
     main()

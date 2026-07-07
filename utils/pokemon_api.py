@@ -278,6 +278,60 @@ def lookup_card_for_ebay(card_name: str, card_number: str,
         "_api_card":  None,    # full card data — avoids extra API call for market price
     }
 
+    # ── Step 0: Check our own DB first — skip the external API entirely
+    #           for cards we already have, so a transient API hiccup can't
+    #           break a re-import of cards we already matched before. ────────
+    db_set_id = None
+    if set_name:
+        with db_cursor() as _cur:
+            _cur.execute(
+                "SELECT id FROM card_sets WHERE LOWER(name) = LOWER(%s) LIMIT 1",
+                (set_name,),
+            )
+            _set_row = _cur.fetchone()
+            if _set_row:
+                db_set_id = str(_set_row["id"])
+
+    if db_set_id:
+        candidates = find_card_by_name_set(card_name, db_set_id)
+        if candidates:
+            def _norm_num(n):
+                n = str(n or "").strip().lstrip("0")
+                return n or "0"
+            local_matches = [c for c in candidates
+                             if _norm_num(c.get("card_number")) == _norm_num(card_number)]
+            if len(local_matches) == 1:
+                row = local_matches[0]
+                result["card_id"]   = str(row["id"])
+                result["matched"]   = True
+                result["source"]    = "db_exact"
+                result["card_name"] = row["name"]
+                result["rarity"]    = row.get("rarity")
+                result["image_url"] = row.get("image_url")
+                print(f"    ✅ Found in local DB — skipping API lookup: "
+                      f"{row['name']} #{row.get('card_number')} ({set_name})")
+
+                try:
+                    variant_id = get_or_create_variant(
+                        card_id      = result["card_id"],
+                        foil_type    = foil_type,
+                        foil_pattern = foil_pattern,
+                        texture      = texture,
+                        material     = material,
+                        size         = size,
+                        stamp_type   = stamp_type,
+                        source_type  = source_type,
+                    )
+                    result["variant_id"] = variant_id
+                except Exception as e:
+                    print(f"    ⚠️  Could not create variant for {card_name}: {e}")
+
+                _ebay_lookup_cache[cache_key] = result
+                return result
+            elif len(local_matches) > 1:
+                print(f"    ⚠️  Multiple local DB matches for {card_name} #{card_number} "
+                      f"({set_name}) — falling back to API to disambiguate")
+
     # ── Step 1: Search the Pokemon TCG API ───────────────────────────────────
 
     # Normalize curly apostrophes to straight apostrophes
@@ -591,7 +645,19 @@ def _api_search(q: str, page_size: int = 20) -> list[dict]:
             if resp.status_code == 404:
                 return []
             resp.raise_for_status()
-            return resp.json().get("data", [])
+            data = resp.json().get("data", [])
+
+            # A clean 200 with zero results can happen transiently under
+            # backend load (search-index lag), not just genuine "not found".
+            # Retry once or twice before trusting an empty result, unless
+            # this is already our last attempt.
+            if not data and attempt < max_retries:
+                print(f"    ⏳ Empty result (attempt {attempt}/{max_retries}), "
+                      f"retrying in {retry_delay}s in case it's transient...")
+                time.sleep(retry_delay)
+                continue
+
+            return data
 
         except Exception as e:
             if attempt < max_retries:
