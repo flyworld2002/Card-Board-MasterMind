@@ -432,14 +432,25 @@ def retry_open_issues(cur, account: str, dry_run: bool, paid_floor: datetime = N
 
 def pull_orders(account_num: int = 1, since_str: str = None, until_str: str = None,
                 order_ids: list[str] = None, dry_run: bool = False,
-                paid_since_str: str = None):
+                paid_since_str: str = None, quiet: bool = False) -> bool:
+    """
+    Returns True if anything needing manual attention was filed this run
+    (unmatched, insufficient_stock, or error) — main.py uses this to set a
+    nonzero exit code for scheduled runs (Task Scheduler / cron), so a
+    failure can eventually be hooked up to a notification without
+    parsing log text.
+    """
     account = get_account_name(account_num)
     run_start = datetime.now(timezone.utc)
 
-    print(f"\n{'═'*60}")
-    print(f"📦 eBay order pull — account {account_num} ({account})"
-          + (" [DRY RUN]" if dry_run else ""))
-    print(f"{'═'*60}")
+    def p(msg):
+        if not quiet:
+            print(msg)
+
+    p(f"\n{'═'*60}")
+    p(f"📦 eBay order pull — account {account_num} ({account})"
+      + (" [DRY RUN]" if dry_run else ""))
+    p(f"{'═'*60}")
 
     with db_cursor() as cur:
         # Paid-date floor — persists across runs once set. An explicit
@@ -449,46 +460,46 @@ def pull_orders(account_num: int = 1, since_str: str = None, until_str: str = No
             paid_floor = datetime.fromisoformat(paid_since_str).replace(tzinfo=timezone.utc)
             if not dry_run:
                 _set_paid_floor(cur, account_num, paid_floor)
-            print(f"🛡  Paid-floor: {paid_floor.isoformat()} (set via --paid-since)")
+            p(f"🛡  Paid-floor: {paid_floor.isoformat()} (set via --paid-since)")
         else:
             paid_floor = _get_paid_floor(cur, account_num)
             if paid_floor:
-                print(f"🛡  Paid-floor: {paid_floor.isoformat()} (persisted from earlier run)")
+                p(f"🛡  Paid-floor: {paid_floor.isoformat()} (persisted from earlier run)")
             else:
-                print("🛡  Paid-floor: none set — every paid order is eligible for recording")
+                p("🛡  Paid-floor: none set — every paid order is eligible for recording")
 
         since = until = None
         targeted = bool(order_ids)
 
         if targeted:
-            print(f"🎯 Targeted pull: {len(order_ids)} order ID(s) — no time window")
+            p(f"🎯 Targeted pull: {len(order_ids)} order ID(s) — no time window")
         else:
             # Resolve the window: CLI --since > sync_state > start of today (UTC)
             if since_str:
                 since = datetime.fromisoformat(since_str).replace(tzinfo=timezone.utc)
-                print(f"⏱  Window: --since {since.isoformat()} (manual override)")
+                p(f"⏱  Window: --since {since.isoformat()} (manual override)")
             else:
                 last = _get_last_pull(cur, account_num)
                 if last:
                     since = last
-                    print(f"⏱  Window: since last pull {since.isoformat()}")
+                    p(f"⏱  Window: since last pull {since.isoformat()}")
                 else:
                     since = run_start.replace(hour=0, minute=0, second=0, microsecond=0)
-                    print(f"⏱  Window: first run — since start of today {since.isoformat()}")
+                    p(f"⏱  Window: first run — since start of today {since.isoformat()}")
             if until_str:
                 until = datetime.fromisoformat(until_str).replace(tzinfo=timezone.utc)
-                print(f"⏱  Until: {until.isoformat()}")
+                p(f"⏱  Until: {until.isoformat()}")
 
         # Retry anything left open from previous runs
         retried = retry_open_issues(cur, account, dry_run, paid_floor)
         if retried["recorded"] or retried["still_open"]:
-            print(f"🔁 Retried open issues: {retried['recorded']} recorded, {retried['still_open']} still open")
+            p(f"🔁 Retried open issues: {retried['recorded']} recorded, {retried['still_open']} still open")
 
         # Pull + process
-        print("🔍 Fetching orders from eBay...")
+        p("🔍 Fetching orders from eBay...")
         lines = fetch_orders(since=since, until=until, order_ids=order_ids,
                              account_num=account_num)
-        print(f"   → {len(lines)} order line(s)\n")
+        p(f"   → {len(lines)} order line(s)\n")
 
         counts = {"recorded": 0, "recorded_with_gap": 0, "duplicate": 0,
                   "unmatched": 0, "insufficient_stock": 0, "pre_inventory": 0, "error": 0}
@@ -498,19 +509,19 @@ def pull_orders(account_num: int = 1, since_str: str = None, until_str: str = No
             counts[result] = counts.get(result, 0) + 1
             if result == "recorded" and not dry_run:
                 card_desc = line.get("_card_desc", "")
-                print(f"  ✅ order {line['order_id']} — {card_desc} "
-                      f"x{line['quantity']} @ ${line['sale_price']:.2f} — paid {line['paid_at']}")
+                p(f"  ✅ order {line['order_id']} — {card_desc} "
+                  f"x{line['quantity']} @ ${line['sale_price']:.2f} — paid {line['paid_at']}")
             elif result == "recorded_with_gap":
                 card_desc = line.get("_card_desc", "")
-                print(f"  ✅⚠️ order {line['order_id']} — {card_desc} "
-                      f"x{line['quantity']} @ ${line['sale_price']:.2f} — paid {line['paid_at']} "
-                      f"— sale recorded, no listing row (queued)")
+                p(f"  ✅⚠️ order {line['order_id']} — {card_desc} "
+                  f"x{line['quantity']} @ ${line['sale_price']:.2f} — paid {line['paid_at']} "
+                  f"— sale recorded, no listing row (queued)")
             elif result == "unmatched":
-                print(f"  ⚠️  unmatched: {line['title'][:44]} (item {line['item_id']})")
+                p(f"  ⚠️  unmatched: {line['title'][:44]} (item {line['item_id']})")
             elif result == "insufficient_stock":
-                print(f"  ❌ insufficient stock: {line['title'][:44]} x{line['quantity']}")
+                p(f"  ❌ insufficient stock: {line['title'][:44]} x{line['quantity']}")
             elif result == "pre_inventory":
-                print(f"  🛡  pre-inventory (skipped): {line['title'][:40]} — paid {line['paid_at']}")
+                p(f"  🛡  pre-inventory (skipped): {line['title'][:40]} — paid {line['paid_at']}")
 
         # Advance the watermark to run start (not 'now') so nothing that
         # arrived mid-run falls into a gap next time. Targeted (--order) and
@@ -519,17 +530,33 @@ def pull_orders(account_num: int = 1, since_str: str = None, until_str: str = No
         if not dry_run and not targeted and not until:
             _set_last_pull(cur, account_num, run_start)
 
-    print(f"\n{'─'*60}")
+    needs_attention = bool(counts["unmatched"] or counts["insufficient_stock"] or counts["error"])
     total_recorded = counts['recorded'] + counts['recorded_with_gap']
-    print(f"📊 Recorded: {total_recorded} ({counts['recorded_with_gap']} with listing gap) | Duplicates skipped: {counts['duplicate']}")
-    print(f"   Unmatched: {counts['unmatched']} | Insufficient stock: {counts['insufficient_stock']} | "
-          f"Pre-inventory (skipped): {counts['pre_inventory']} | Errors: {counts['error']}")
-    if counts["unmatched"] or counts["insufficient_stock"] or counts["error"]:
-        print(f"   → Filed in ebay_order_issues (status = 'open'); fix the cause and re-run to retry.")
-    if counts["recorded_with_gap"]:
-        print(f"   → Listing gaps filed in ebay_order_issues; sales are recorded, fix the listing rows manually.")
-    if counts["pre_inventory"]:
-        print(f"   → Pre-inventory lines filed in ebay_order_issues (reason='pre_inventory'); "
-              f"these predate your paid-floor cutoff and were intentionally not recorded.")
-    if dry_run:
-        print("   (dry run — nothing was written)")
+
+    # In quiet mode: always print exactly one summary line. Print the full
+    # breakdown too, but only when something actually needs a look — a
+    # scheduled run with nothing but recorded/duplicate stays a single line
+    # in the log.
+    if quiet:
+        print(f"[{run_start.isoformat()}] pull account {account_num}: "
+              f"recorded={total_recorded} duplicate={counts['duplicate']} "
+              f"unmatched={counts['unmatched']} insufficient_stock={counts['insufficient_stock']} "
+              f"pre_inventory={counts['pre_inventory']} error={counts['error']}")
+        if needs_attention:
+            print(f"   → Filed in ebay_order_issues (status = 'open'); fix the cause and re-run to retry.")
+    else:
+        print(f"\n{'─'*60}")
+        print(f"📊 Recorded: {total_recorded} ({counts['recorded_with_gap']} with listing gap) | Duplicates skipped: {counts['duplicate']}")
+        print(f"   Unmatched: {counts['unmatched']} | Insufficient stock: {counts['insufficient_stock']} | "
+              f"Pre-inventory (skipped): {counts['pre_inventory']} | Errors: {counts['error']}")
+        if needs_attention:
+            print(f"   → Filed in ebay_order_issues (status = 'open'); fix the cause and re-run to retry.")
+        if counts["recorded_with_gap"]:
+            print(f"   → Listing gaps filed in ebay_order_issues; sales are recorded, fix the listing rows manually.")
+        if counts["pre_inventory"]:
+            print(f"   → Pre-inventory lines filed in ebay_order_issues (reason='pre_inventory'); "
+                  f"these predate your paid-floor cutoff and were intentionally not recorded.")
+        if dry_run:
+            print("   (dry run — nothing was written)")
+
+    return needs_attention

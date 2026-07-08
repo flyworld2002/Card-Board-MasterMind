@@ -203,14 +203,17 @@ def cmd_ebay_export(args):
 
 def cmd_ebay_pullorders(args):
     from importer.ebay_orders import pull_orders
-    pull_orders(
+    needs_attention = pull_orders(
         account_num=args.account,
         since_str=getattr(args, 'since', None),
         until_str=getattr(args, 'until', None),
         order_ids=getattr(args, 'order_id', None),
         dry_run=args.dry_run,
         paid_since_str=getattr(args, 'paid_since', None),
+        quiet=getattr(args, 'quiet', False),
     )
+    if needs_attention:
+        sys.exit(1)
 
 def cmd_ebay_reconcile(args):
     from importer.ebay_reconcile import reconcile_listings
@@ -268,6 +271,9 @@ def main():
     # ── Shared optional flags ─────────────────────────────────────────────────
     parser.add_argument("--dry-run", action="store_true",
         help="Parse only, no DB writes")
+    parser.add_argument("--quiet", action="store_true",
+        help="Minimal output — one summary line, full detail only if issues need attention "
+             "(for --ebay-pullorders; intended for scheduled/unattended runs)")
     parser.add_argument("--no-api", action="store_true",
         help="Skip API calls during dry run — just show parsed eBay data")
     parser.add_argument("--order", metavar="ORDER_NUM",
