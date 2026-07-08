@@ -538,7 +538,8 @@ def pull_orders(account_num: int = 1, since_str: str = None, until_str: str = No
     # scheduled run with nothing but recorded/duplicate stays a single line
     # in the log.
     if quiet:
-        print(f"[{run_start.isoformat()}] pull account {account_num}: "
+        print(f"[{run_start.isoformat()}] pull account {account_num}"
+              + (" [DRY RUN]" if dry_run else "") + ": "
               f"recorded={total_recorded} duplicate={counts['duplicate']} "
               f"unmatched={counts['unmatched']} insufficient_stock={counts['insufficient_stock']} "
               f"pre_inventory={counts['pre_inventory']} error={counts['error']}")
