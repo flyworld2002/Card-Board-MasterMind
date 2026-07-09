@@ -215,6 +215,15 @@ def cmd_ebay_pullorders(args):
     if needs_attention:
         sys.exit(1)
 
+def cmd_ebay_backfill_orderids(args):
+    from importer.ebay_orders import backfill_order_ids
+    backfill_order_ids(
+        account_num=args.account,
+        since_str=getattr(args, 'since', None),
+        until_str=getattr(args, 'until', None),
+        dry_run=args.dry_run,
+    )
+
 def cmd_ebay_reconcile(args):
     from importer.ebay_reconcile import reconcile_listings
     reconcile_listings(account_num=args.account, fix=getattr(args, 'fix', False))
@@ -265,6 +274,10 @@ def main():
     ))
     group.add_argument("--ebay-pullorders", action="store_true",
         help="Pull eBay orders and record sales (use --dry-run to preview)")
+    group.add_argument("--ebay-backfill-orderids", action="store_true",
+        help="One-time: re-fetch orders and set real eBay OrderID on historical "
+             "sales rows, matching on order_line_item_id "
+             "(use with --since/--until/--account/--dry-run)")
     group.add_argument("--ebay-reconcile", action="store_true",
         help="Diff platform_listings against eBay's live quantities (use --fix to apply eBay's numbers)")
 
@@ -333,6 +346,8 @@ def main():
         cmd_ebay_export(args)
     elif args.ebay_pullorders:
         cmd_ebay_pullorders(args)
+    elif args.ebay_backfill_orderids:
+        cmd_ebay_backfill_orderids(args)
     elif args.ebay_reconcile:
         cmd_ebay_reconcile(args)
 if __name__ == "__main__":

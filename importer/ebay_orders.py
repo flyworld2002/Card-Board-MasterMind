@@ -11,7 +11,8 @@ listing, and files unmatched / insufficient-stock lines into
 ebay_order_issues so they survive past the pull window. Open issues
 are retried automatically at the start of every run.
 
-Dedup is by eBay's OrderLineItemID against sales.platform_order_id,
+Dedup is by eBay's OrderLineItemID against sales.order_line_item_id
+(platform_order_id holds eBay's order-level OrderID for grouping),
 so the command is safe to re-run over any window.
 
 Usage:
@@ -281,7 +282,7 @@ def _process_line(cur, line: dict, account: str, dry_run: bool,
 
     # Dedup on OrderLineItemID
     cur.execute(
-        "SELECT 1 FROM sales WHERE platform = 'ebay' AND platform_order_id = %s LIMIT 1",
+        "SELECT 1 FROM sales WHERE platform = 'ebay' AND order_line_item_id = %s LIMIT 1",
         (line["order_line_item_id"],),
     )
     if cur.fetchone():
@@ -316,13 +317,15 @@ def _process_line(cur, line: dict, account: str, dry_run: bool,
                 p_platform_order_id := %s,
                 p_notes             := %s,
                 p_listing_id        := %s,
-                p_external_id       := %s
+                p_external_id       := %s,
+                p_order_line_item_id := %s
             ) AS result
             """,
             (
                 variant_id, condition, line["quantity"], line["sale_price"],
-                account, line["paid_at"], line["order_line_item_id"],
+                account, line["paid_at"], line["order_id"],
                 sale_notes, line["item_id"], line["variation_name"],
+                line["order_line_item_id"],
             ),
         )
         result = cur.fetchone()["result"]
@@ -560,3 +563,72 @@ def pull_orders(account_num: int = 1, since_str: str = None, until_str: str = No
             print("   (dry run — nothing was written)")
 
     return needs_attention
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Backfill — one-time historical fix for the OrderLineItemID / OrderID split
+# ══════════════════════════════════════════════════════════════════════════════
+
+def backfill_order_ids(account_num: int = 1, since_str: str = None,
+                       until_str: str = None, dry_run: bool = False) -> None:
+    """
+    Rows recorded before the OrderLineItemID / OrderID split have the
+    line-item ID in platform_order_id. Re-fetch orders from eBay and,
+    matching on order_line_item_id, set platform_order_id to the real
+    order-level OrderID.
+
+    Safe to re-run: only touches rows where platform_order_id still equals
+    the line-item id, so already-fixed and newly-recorded rows are no-ops.
+    """
+    account = get_account_name(account_num)
+    print(f"\n🔧 Backfill order IDs — account {account_num} ({account})"
+          + (" [DRY RUN]" if dry_run else ""))
+
+    since = None
+    until = None
+    if since_str:
+        since = datetime.fromisoformat(since_str).replace(tzinfo=timezone.utc)
+    if until_str:
+        until = datetime.fromisoformat(until_str).replace(tzinfo=timezone.utc)
+
+    lines = fetch_orders(since=since, until=until, account_num=account_num)
+    print(f"   fetched {len(lines)} order line(s) from eBay")
+
+    updated = skipped = 0
+    with db_cursor() as cur:
+        for line in lines:
+            if not line.get("order_id") or not line.get("order_line_item_id"):
+                continue
+            if line["order_id"] == line["order_line_item_id"]:
+                skipped += 1   # legacy single-line orders where they coincide
+                continue
+            if dry_run:
+                cur.execute(
+                    """
+                    SELECT count(*) AS n FROM sales
+                    WHERE platform = 'ebay'
+                      AND order_line_item_id = %s
+                      AND platform_order_id = order_line_item_id
+                    """,
+                    (line["order_line_item_id"],),
+                )
+                n = cur.fetchone()["n"]
+                if n:
+                    print(f"   [dry-run] would update {n} row(s): "
+                          f"{line['order_line_item_id']} -> order {line['order_id']}")
+                    updated += n
+            else:
+                cur.execute(
+                    """
+                    UPDATE sales
+                    SET platform_order_id = %s
+                    WHERE platform = 'ebay'
+                      AND order_line_item_id = %s
+                      AND platform_order_id = order_line_item_id
+                    """,
+                    (line["order_id"], line["order_line_item_id"]),
+                )
+                updated += cur.rowcount
+
+    print(f"   done: {updated} row(s) {'would be ' if dry_run else ''}updated, "
+          f"{skipped} skipped (order id == line item id)")
