@@ -224,6 +224,39 @@ def cmd_ebay_backfill_orderids(args):
         dry_run=args.dry_run,
     )
 
+def cmd_ebay_set_label_cost(args):
+    from importer.ebay_syncfees import set_label_cost
+    set_label_cost(
+        order_id=args.order_id[0] if args.order_id else None,
+        amount=args.amount,
+        account_num=args.account,
+        is_return_label=getattr(args, 'return_label', False),
+        dry_run=args.dry_run,
+    )
+
+def cmd_ebay_syncfees(args):
+    from importer.ebay_syncfees import sync_fees
+    since_str = getattr(args, 'since', None)
+    since_days = getattr(args, 'since_days', None)
+    if not since_str and since_days:
+        from datetime import datetime, timedelta, timezone
+        since_str = (datetime.now(timezone.utc) - timedelta(days=since_days)).strftime('%Y-%m-%dT%H:%M:%S')
+    sync_fees(
+        account_num=args.account,
+        since_str=since_str,
+        until_str=getattr(args, 'until', None),
+        order_ids=getattr(args, 'order_id', None),
+        dry_run=args.dry_run,
+    )
+
+def cmd_ebay_fulfillment_test(args):
+    from importer.ebay_finances import test_fetch_order
+    test_fetch_order(order_id=args.fin_order, account_num=args.account)
+
+def cmd_ebay_finances_test(args):
+    from importer.ebay_finances import test_fetch_transactions
+    test_fetch_transactions(order_id=args.fin_order, account_num=args.account)
+
 def cmd_ebay_reconcile(args):
     from importer.ebay_reconcile import reconcile_listings
     reconcile_listings(account_num=args.account, fix=getattr(args, 'fix', False))
@@ -280,6 +313,25 @@ def main():
              "(use with --since/--until/--account/--dry-run)")
     group.add_argument("--ebay-reconcile", action="store_true",
         help="Diff platform_listings against eBay's live quantities (use --fix to apply eBay's numbers)")
+    group.add_argument("--ebay-set-label-cost", action="store_true",
+        help="Manually set label_cost (or --return-label for return_label_cost) "
+             "on one order's sale_orders row, for cases where eBay's Finances "
+             "API never posts a SHIPPING_LABEL transaction. Requires --order-id "
+             "and --amount; the order must already have been synced once via "
+             "--ebay-syncfees so the header row exists.")
+    group.add_argument("--ebay-syncfees", action="store_true",
+        help="Sync real fee/discount/refund/buyer data from eBay's Finances + "
+             "Fulfillment APIs into sale_orders / sale_line_item_fees. Targets "
+             "orders from --since/--until, or specific --order-id(s). Use "
+             "--dry-run to preview without writing.")
+    group.add_argument("--ebay-finances-test", action="store_true",
+        help="One-time connectivity test for the Finances API OAuth setup — "
+             "fetches real transactions for --fin-order and prints the raw "
+             "response. No DB writes.")
+    group.add_argument("--ebay-fulfillment-test", action="store_true",
+        help="Connectivity test for the Fulfillment API (getOrder) — fetches "
+             "pricingSummary (discount, shipping charged) for --fin-order. "
+             "Requires a refresh token consented with sell.fulfillment scope.")
 
     # ── Shared optional flags ─────────────────────────────────────────────────
     parser.add_argument("--dry-run", action="store_true",
@@ -299,6 +351,16 @@ def main():
         help="Targeted eBay order ID to pull (repeatable, for --ebay-pullorders)")
     parser.add_argument("--fix", action="store_true",
         help="Apply eBay's numbers as truth (for --ebay-reconcile)")
+    parser.add_argument("--fin-order", metavar="ORDER_ID",
+        help="Real eBay order ID to test the Finances API against (for --ebay-finances-test)")
+    parser.add_argument("--since-days", metavar="N", type=int,
+        help="Alternative to --since: sync/pull orders from the last N days "
+             "(rolling window, computed at run time — useful for a daily "
+             "scheduled job so it doesn't need external date math). For --ebay-syncfees.")
+    parser.add_argument("--amount", metavar="DOLLARS", type=float,
+        help="Dollar amount to set (for --ebay-set-label-cost)")
+    parser.add_argument("--return-label", action="store_true",
+        help="Target return_label_cost instead of label_cost (for --ebay-set-label-cost)")
     parser.add_argument("--paid-since", metavar="DATE",
         help="Only record sales paid on/after this date, e.g. 2026-07-03T00:00:00 "
              "(for --ebay-pullorders). Persists across future runs once set; "
@@ -350,5 +412,13 @@ def main():
         cmd_ebay_backfill_orderids(args)
     elif args.ebay_reconcile:
         cmd_ebay_reconcile(args)
+    elif args.ebay_set_label_cost:
+        cmd_ebay_set_label_cost(args)
+    elif args.ebay_syncfees:
+        cmd_ebay_syncfees(args)
+    elif args.ebay_finances_test:
+        cmd_ebay_finances_test(args)
+    elif args.ebay_fulfillment_test:
+        cmd_ebay_fulfillment_test(args)
 if __name__ == "__main__":
     main()
