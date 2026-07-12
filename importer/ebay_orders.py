@@ -146,6 +146,15 @@ def fetch_orders(since: datetime = None, until: datetime = None,
             if checkout is not None and _text(checkout, "Status") != "Complete":
                 continue
 
+            # Cancellation: Trading API returns this at the ORDER level (not
+            # per-line). "NotApplicable" is the normal/no-cancellation value —
+            # anything else means a cancellation was requested/closed against
+            # this order. We don't enumerate every possible non-"NotApplicable"
+            # value (CancelRequested, CancelClosed, etc.) — any of them means
+            # "don't treat this as a normal sale," so _process_line handles
+            # all non-NotApplicable values the same way.
+            cancel_status = _text(order, "CancelStatus", "NotApplicable")
+
             tx_array = _find(order, "TransactionArray")
             if tx_array is None:
                 continue
@@ -182,6 +191,7 @@ def fetch_orders(since: datetime = None, until: datetime = None,
                     "quantity":           int(_text(tx, "QuantityPurchased", "1")),
                     "sale_price":         price,
                     "paid_at":            paid_time,
+                    "cancel_status":      cancel_status,
                 })
 
         has_more = (_text(root, "HasMoreOrders", "false") == "true")
@@ -260,7 +270,8 @@ def _match_line(cur, line: dict):
 def _process_line(cur, line: dict, account: str, dry_run: bool,
                   paid_floor: datetime = None) -> str:
     """Returns: recorded | recorded_with_gap | duplicate | unmatched |
-                insufficient_stock | pre_inventory | error"""
+                insufficient_stock | pre_inventory | cancelled |
+                cancelled_after_recording | error"""
 
     # Paid-date floor: a sale that happened before your inventory snapshot
     # existed has no valid relationship to current stock — never attempt
@@ -285,7 +296,36 @@ def _process_line(cur, line: dict, account: str, dry_run: bool,
         "SELECT 1 FROM sales WHERE platform = 'ebay' AND order_line_item_id = %s LIMIT 1",
         (line["order_line_item_id"],),
     )
-    if cur.fetchone():
+    already_recorded = bool(cur.fetchone())
+
+    # Cancellation — checked BEFORE match/record_sale. Filed as a visible,
+    # non-auto-retried issue either way (Fei's call: keep it in the Issues
+    # list for manual review until the pattern's trusted enough to automate).
+    # Two distinct cases, since they carry very different stakes:
+    #   - never recorded: informational only, nothing to undo
+    #   - already recorded: inventory was decremented for a sale that no
+    #     longer exists — needs a human decision on whether/how to reverse it
+    if line.get("cancel_status", "NotApplicable") != "NotApplicable":
+        if already_recorded:
+            _file_issue(
+                cur, line, account, "cancelled_after_recording",
+                f"order cancelled on eBay (CancelStatus={line['cancel_status']}) "
+                f"AFTER this line was already recorded as a sale — inventory was "
+                f"decremented for a sale that no longer exists. Review and reverse "
+                f"manually if appropriate (Sales tab).",
+                dry_run,
+            )
+            return "cancelled_after_recording"
+        else:
+            _file_issue(
+                cur, line, account, "cancelled",
+                f"order cancelled on eBay (CancelStatus={line['cancel_status']}) "
+                f"before ever being recorded — no inventory impact, informational only.",
+                dry_run,
+            )
+            return "cancelled"
+
+    if already_recorded:
         return "duplicate"
 
     variant_id, cond_or_detail = _match_line(cur, line)
@@ -303,6 +343,7 @@ def _process_line(cur, line: dict, account: str, dry_run: bool,
         return "recorded"
 
     try:
+        cur.execute("SAVEPOINT sp_process_line")
         sale_notes = f"{line['title']} | var: {line['variation_name']}"
         cur.execute(
             """
@@ -331,7 +372,20 @@ def _process_line(cur, line: dict, account: str, dry_run: bool,
         result = cur.fetchone()["result"]
         if isinstance(result, str):
             result = json.loads(result)
+        cur.execute("RELEASE SAVEPOINT sp_process_line")
     except Exception as e:
+        # Roll back to the savepoint (not the whole transaction) — this is
+        # what actually failed before: an error here used to poison the
+        # ENTIRE run's transaction, which meant _file_issue's own INSERT
+        # would itself fail with InFailedSqlTransaction, which meant the
+        # exception propagated all the way up uncaught, which meant
+        # _set_last_pull() never ran, which meant the watermark never
+        # advanced, which meant the SAME poisoned line got refetched and
+        # recrashed every 15 minutes forever. The savepoint breaks that
+        # chain at its root: whatever failed above is undone, but everything
+        # else this run already recorded stays committed, and _file_issue
+        # below runs against a healthy transaction.
+        cur.execute("ROLLBACK TO SAVEPOINT sp_process_line")
         msg = str(e)
         reason = "insufficient_stock" if "Insufficient stock" in msg else "error"
         _file_issue(cur, line, account, reason, msg, dry_run)
@@ -398,7 +452,8 @@ def retry_open_issues(cur, account: str, dry_run: bool, paid_floor: datetime = N
                quantity, sale_price, paid_at
         FROM ebay_order_issues
         WHERE status = 'open' AND account = %s
-          AND reason NOT IN ('listing_gap', 'pre_inventory')  -- not auto-retried; manual review only
+          AND reason NOT IN ('listing_gap', 'pre_inventory',
+                             'cancelled', 'cancelled_after_recording')  -- not auto-retried; manual review only
         ORDER BY created_at
         """,
         (account,),
@@ -505,7 +560,8 @@ def pull_orders(account_num: int = 1, since_str: str = None, until_str: str = No
         p(f"   → {len(lines)} order line(s)\n")
 
         counts = {"recorded": 0, "recorded_with_gap": 0, "duplicate": 0,
-                  "unmatched": 0, "insufficient_stock": 0, "pre_inventory": 0, "error": 0}
+                  "unmatched": 0, "insufficient_stock": 0, "pre_inventory": 0,
+                  "cancelled": 0, "cancelled_after_recording": 0, "error": 0}
 
         for line in lines:
             result = _process_line(cur, line, account, dry_run, paid_floor)
@@ -525,6 +581,11 @@ def pull_orders(account_num: int = 1, since_str: str = None, until_str: str = No
                 p(f"  ❌ insufficient stock: {line['title'][:44]} x{line['quantity']}")
             elif result == "pre_inventory":
                 p(f"  🛡  pre-inventory (skipped): {line['title'][:40]} — paid {line['paid_at']}")
+            elif result == "cancelled":
+                p(f"  🚫 cancelled (never recorded, filed for visibility): {line['title'][:40]}")
+            elif result == "cancelled_after_recording":
+                p(f"  🚫⚠️ CANCELLED AFTER RECORDING — inventory may need manual reversal: "
+                  f"{line['title'][:44]} x{line['quantity']} (order {line['order_id']})")
 
         # Advance the watermark to run start (not 'now') so nothing that
         # arrived mid-run falls into a gap next time. Targeted (--order) and
@@ -533,7 +594,8 @@ def pull_orders(account_num: int = 1, since_str: str = None, until_str: str = No
         if not dry_run and not targeted and not until:
             _set_last_pull(cur, account_num, run_start)
 
-    needs_attention = bool(counts["unmatched"] or counts["insufficient_stock"] or counts["error"])
+    needs_attention = bool(counts["unmatched"] or counts["insufficient_stock"]
+                           or counts["error"] or counts["cancelled_after_recording"])
     total_recorded = counts['recorded'] + counts['recorded_with_gap']
 
     # In quiet mode: always print exactly one summary line. Print the full
@@ -545,7 +607,8 @@ def pull_orders(account_num: int = 1, since_str: str = None, until_str: str = No
               + (" [DRY RUN]" if dry_run else "") + ": "
               f"recorded={total_recorded} duplicate={counts['duplicate']} "
               f"unmatched={counts['unmatched']} insufficient_stock={counts['insufficient_stock']} "
-              f"pre_inventory={counts['pre_inventory']} error={counts['error']}")
+              f"pre_inventory={counts['pre_inventory']} cancelled={counts['cancelled']} "
+              f"cancelled_after_recording={counts['cancelled_after_recording']} error={counts['error']}")
         if needs_attention:
             print(f"   → Filed in ebay_order_issues (status = 'open'); fix the cause and re-run to retry.")
     else:
@@ -553,6 +616,8 @@ def pull_orders(account_num: int = 1, since_str: str = None, until_str: str = No
         print(f"📊 Recorded: {total_recorded} ({counts['recorded_with_gap']} with listing gap) | Duplicates skipped: {counts['duplicate']}")
         print(f"   Unmatched: {counts['unmatched']} | Insufficient stock: {counts['insufficient_stock']} | "
               f"Pre-inventory (skipped): {counts['pre_inventory']} | Errors: {counts['error']}")
+        print(f"   Cancelled (never recorded): {counts['cancelled']} | "
+              f"Cancelled after recording: {counts['cancelled_after_recording']}")
         if needs_attention:
             print(f"   → Filed in ebay_order_issues (status = 'open'); fix the cause and re-run to retry.")
         if counts["recorded_with_gap"]:
@@ -560,6 +625,10 @@ def pull_orders(account_num: int = 1, since_str: str = None, until_str: str = No
         if counts["pre_inventory"]:
             print(f"   → Pre-inventory lines filed in ebay_order_issues (reason='pre_inventory'); "
                   f"these predate your paid-floor cutoff and were intentionally not recorded.")
+        if counts["cancelled_after_recording"]:
+            print(f"   → ⚠️  {counts['cancelled_after_recording']} order(s) were cancelled AFTER their sale was "
+                  f"recorded — inventory may be overstated. Review in Issues (reason='cancelled_after_recording') "
+                  f"and reverse manually if appropriate.")
         if dry_run:
             print("   (dry run — nothing was written)")
 
