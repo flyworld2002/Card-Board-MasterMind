@@ -1,3 +1,4 @@
 @echo off
-cd /d "C:\path\to\card_inventory"
+cd /d C:\Users\Fei\Card-Board-MasterMind
+set PYTHONUTF8=1
 python main.py --ebay-syncfees --since-days 14 >> logs\syncfees.log 2>&1
