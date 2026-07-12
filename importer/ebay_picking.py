@@ -139,7 +139,8 @@ def _card_info(cur, variant_ids: list) -> dict:
                coalesce(display_number, card_number) AS card_number,
                set_name,
                foil_label,
-               stamp_label, pattern_label
+               stamp_label, pattern_label,
+               image_url
         FROM v_card_variants
         WHERE variant_id = ANY(%s::uuid[])
         """,
@@ -156,6 +157,7 @@ def _card_info(cur, variant_ids: list) -> dict:
             "card_number": row["card_number"],
             "set_name":    row["set_name"],
             "variant_label": label,
+            "image_url":   row.get("image_url"),
         }
     return info
 
@@ -223,6 +225,7 @@ def _order_to_rows(cur, order: dict, account_num: int) -> list:
             "card_number":        info.get("card_number"),
             "set_name":           info.get("set_name"),
             "variant_label":      info.get("variant_label"),
+            "image_url":          info.get("image_url"),
             "quantity":           l["quantity"],
             "matched":            bool(info),
             "raw_variation_name": l["var_name"],
@@ -306,7 +309,7 @@ def pull_picking(account_nums: list = None, dry_run: bool = False,
                     INSERT INTO picking_queue (
                         account_num, platform_order_id, order_line_item_id,
                         ebay_item_id, listing_title,
-                        card_name, card_number, set_name, variant_label,
+                        card_name, card_number, set_name, variant_label, image_url,
                         quantity, matched, raw_variation_name,
                         buyer_username, ship_name, ship_city, ship_state,
                         ship_postal_code, ship_country,
@@ -314,7 +317,7 @@ def pull_picking(account_nums: list = None, dry_run: bool = False,
                     ) VALUES (
                         %(account_num)s, %(platform_order_id)s, %(order_line_item_id)s,
                         %(ebay_item_id)s, %(listing_title)s,
-                        %(card_name)s, %(card_number)s, %(set_name)s, %(variant_label)s,
+                        %(card_name)s, %(card_number)s, %(set_name)s, %(variant_label)s, %(image_url)s,
                         %(quantity)s, %(matched)s, %(raw_variation_name)s,
                         %(buyer_username)s, %(ship_name)s, %(ship_city)s, %(ship_state)s,
                         %(ship_postal_code)s, %(ship_country)s,
