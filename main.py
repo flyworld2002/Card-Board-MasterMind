@@ -249,6 +249,18 @@ def cmd_ebay_syncfees(args):
         dry_run=args.dry_run,
     )
 
+def cmd_ebay_pullpicking(args):
+    from importer.ebay_picking import pull_picking
+    import sys as _sys
+    # --account only narrows the pull when explicitly passed; the default
+    # behavior is ALL accounts with a refresh token in .env.
+    account_nums = [args.account] if "--account" in _sys.argv else None
+    pull_picking(
+        account_nums=account_nums,
+        dry_run=args.dry_run,
+        quiet=getattr(args, 'quiet', False),
+    )
+
 def cmd_ebay_fulfillment_test(args):
     from importer.ebay_finances import test_fetch_order
     test_fetch_order(order_id=args.fin_order, account_num=args.account)
@@ -324,6 +336,9 @@ def main():
              "Fulfillment APIs into sale_orders / sale_line_item_fees. Targets "
              "orders from --since/--until, or specific --order-id(s). Use "
              "--dry-run to preview without writing.")
+    group.add_argument("--ebay-pullpicking", action="store_true",
+        help="Snapshot paid-but-unshipped orders into picking_queue for the "
+             "Picking tab (all accounts by default; --account N to narrow)")
     group.add_argument("--ebay-finances-test", action="store_true",
         help="One-time connectivity test for the Finances API OAuth setup — "
              "fetches real transactions for --fin-order and prints the raw "
@@ -416,6 +431,8 @@ def main():
         cmd_ebay_set_label_cost(args)
     elif args.ebay_syncfees:
         cmd_ebay_syncfees(args)
+    elif args.ebay_pullpicking:
+        cmd_ebay_pullpicking(args)
     elif args.ebay_finances_test:
         cmd_ebay_finances_test(args)
     elif args.ebay_fulfillment_test:
