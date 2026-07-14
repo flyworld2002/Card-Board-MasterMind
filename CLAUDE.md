@@ -26,6 +26,9 @@ There is no test suite, linter, or build step configured in this repo —
 don't invent `pytest`/`ruff` invocations. Validate changes with `--dry-run`
 where a command supports it.
 
+Always invoke `python3` explicitly, not `python`, when running commands in
+this repo.
+
 Run `python main.py --help` (or read the module docstring at the top of
 `main.py`) for the full, current flag list — it is the source of truth over
 `README.md`, which documents an older CLI shape (`--tcgplayer orders.csv`,
@@ -153,6 +156,14 @@ Both auth models read from the same numbered `EBAY_ACCOUNT_{N}_*` block in
 with no `--account`) probes `EBAY_ACCOUNT_{N}_REFRESH_TOKEN` from N=1 until
 a gap.
 
+**Known bug:** `rename_variation.py` fails when eBay's
+`VariationSpecificsSet` count doesn't match the active variation rows on
+eBay's side — needs a manual fix in Seller Hub when it happens.
+
+**Known deprecation:** eBay Picture Services (EPS), used for image uploads,
+is being retired September 30, 2026 — image upload code will need to
+migrate to the Media API before then.
+
 `picking_queue` (written by `ebay_picking.py`) is a full snapshot, not an
 incremental table — every run truncates and rewrites it in one transaction
 across all accounts.
@@ -169,6 +180,17 @@ reachable from the CLI without checking `main.py` first.
 `Order2.html` / `Order3.html` (+ `_files/` asset folders) at the repo root
 are saved TCGPlayer pages used as real fixtures for the HTML importer, not
 part of any build output.
+
+## Current priorities / TODO
+
+- Market-price refresh command hitting the Pokemon TCG API for existing
+  inventory — still deciding whether the CLI trigger should refresh all
+  cards or be scoped per-card/set.
+- "Pending shipment" feature: pull paid-but-unshipped eBay orders for a
+  pick/pack workflow.
+- Next architecture decision: auto-refreshing inventory as eBay orders
+  sell — options being weighed are cron/launchd polling, eBay webhooks, or
+  Supabase realtime subscriptions on the frontend Inventory tab.
 
 ## Secrets
 
