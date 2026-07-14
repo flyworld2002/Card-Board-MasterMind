@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": ["Read", "Edit", "Glob", "Grep", "Bash(python3 *)", "Bash(git *)"],
+    "deny": [
+      "Bash(git push --force*)",
+      "Bash(rm -rf *)",
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Bash(cat .env)",
+      "Bash(cat .env.*)"
+    ]
+  }
+}
