@@ -395,8 +395,8 @@ def recalc(account_num: int = 1, item_id: str = None, card_query: str = None,
         template_ids = {l["template_id"] for l in listings if l.get("template_id")}
         templates = {}
         if template_ids:
-            cur.execute("SELECT id, base_price FROM listing_templates WHERE id = ANY(%s)",
-                        (list(template_ids),))
+            cur.execute("SELECT id, base_price FROM listing_templates WHERE id = ANY(%s::uuid[])",
+                        ([str(t) for t in template_ids],))
             templates = {t["id"]: t for t in cur.fetchall()}
 
         n_updated = n_skipped = n_wildcard = n_unchanged = n_guarded = 0
@@ -685,9 +685,9 @@ def _push_variation_listing(cur, item_id_: str, group_listings: list, account_nu
     )
     from importer.ebay import _post, _findall
 
-    platform_listing_ids = [l["id"] for l in group_listings]
+    platform_listing_ids = [str(l["id"]) for l in group_listings]
     cur.execute(
-        "SELECT * FROM listing_card_assignments WHERE platform_listing_id = ANY(%s) OR ebay_item_id = %s",
+        "SELECT * FROM listing_card_assignments WHERE platform_listing_id = ANY(%s::uuid[]) OR ebay_item_id = %s",
         (platform_listing_ids, item_id_),
     )
     assignments = cur.fetchall()

@@ -124,6 +124,15 @@ Proceeding to recalc engine, push engine, main.py flags.**
 - ⏳ Not started: `listing_card_assignments` backfill (Rollout sequence
   step 2) for any real listing.
 
+## LATE CORRECTION (2026-07-21, from the listing-pricing-system build)
+The 3 new tables from this doc's migration (`card_type_mapping`,
+`platform_sync_status`, `listing_card_assignments`) did not have Row Level
+Security enabled, unlike established tables (`listing_templates`,
+`platform_listings`) which have RLS + an `"authenticated only"` policy.
+Found and fixed while auditing the newer listing-pricing-system tables —
+see `docs/plans/listing-pricing-system.md`'s build log for detail. RLS is
+now enabled with the matching policy on all 3.
+
 ## Session context
 This was a `/plan`-only conversation. No code written, no migrations applied.
 This doc is the full agreed design, ready to execute in a build session.

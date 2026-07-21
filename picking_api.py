@@ -38,8 +38,10 @@ import threading
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 from importer.ebay_picking import pull_picking
+from importer.ebay_pushprices import push_prices
 
 load_dotenv()
 
@@ -64,6 +66,15 @@ app.add_middleware(
 # nearly-instant re-pull, and both callers get a complete fresh snapshot.
 _pull_lock = threading.Lock()
 
+# Separate lock for price pushes — unrelated to picking, shouldn't block on it.
+_push_prices_lock = threading.Lock()
+
+
+class PushPricesRequest(BaseModel):
+    listing_id: str
+    account_num: int = 1
+    dry_run: bool = False
+
 
 @app.post("/api/picking/refresh")
 def refresh(x_picking_token: str = Header(default="")):
@@ -76,6 +87,28 @@ def refresh(x_picking_token: str = Header(default="")):
         except Exception as e:
             # Surface the real reason to the frontend banner instead of a bare 500.
             raise HTTPException(status_code=502, detail=f"pull failed: {e}")
+
+    return summary
+
+
+@app.post("/api/push-prices")
+def push_prices_endpoint(body: PushPricesRequest, x_picking_token: str = Header(default="")):
+    """
+    Listing Pricing System (docs/plans/listing-pricing-system.md) push
+    endpoint — same auth as /api/picking/refresh. Resolution always comes
+    from the resolve_listing_prices() Postgres RPC; this endpoint just
+    triggers the CLI's push_prices(), which diffs against pushed_*
+    columns and sends only the changed variations.
+    """
+    if x_picking_token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="bad token")
+
+    with _push_prices_lock:
+        try:
+            summary = push_prices(listing_id=body.listing_id, account_num=body.account_num,
+                                   dry_run=body.dry_run, quiet=True)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"push failed: {e}")
 
     return summary
 

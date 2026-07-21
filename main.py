@@ -285,6 +285,13 @@ def cmd_ebay_push_listings(args):
          card_query=getattr(args, 'card', None), dry_run=args.dry_run,
          quiet=args.quiet, force=getattr(args, 'force', False))
 
+def cmd_ebay_pushprices(args):
+    from importer.ebay_pushprices import push_prices
+    if not args.listing_id:
+        raise SystemExit("--ebay-pushprices requires --listing-id")
+    push_prices(listing_id=args.listing_id, account_num=args.account,
+                dry_run=args.dry_run, quiet=args.quiet)
+
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main():
@@ -367,6 +374,12 @@ def main():
         help="Push recalculated price/quantity to eBay via ReviseFixedPriceItem "
              "(NOT YET IMPLEMENTED — see importer/ebay_listing_sync.py). "
              "Scope with --item-id or --card; --force to push unchanged listings.")
+    group.add_argument("--ebay-pushprices", action="store_true",
+        help="Push resolved prices/quantities for one listing via the Listing "
+             "Pricing System (resolve_listing_prices() RPC) — see "
+             "docs/plans/listing-pricing-system.md. Requires --listing-id. "
+             "Only sends variations that actually changed since the last push. "
+             "Use --dry-run to preview.")
 
     # ── Shared optional flags ─────────────────────────────────────────────────
     parser.add_argument("--dry-run", action="store_true",
@@ -424,6 +437,8 @@ def main():
     parser.add_argument("--force", action="store_true",
         help="Push all listings in scope regardless of pending-changes detection "
              "(for --ebay-push-listings).")
+    parser.add_argument("--listing-id", metavar="ITEM_ID",
+        help="eBay ItemID to push (for --ebay-pushprices).")
 
     args = parser.parse_args()
 
@@ -473,5 +488,7 @@ def main():
         cmd_ebay_recalc_prices(args)
     elif args.ebay_push_listings:
         cmd_ebay_push_listings(args)
+    elif args.ebay_pushprices:
+        cmd_ebay_pushprices(args)
 if __name__ == "__main__":
     main()
