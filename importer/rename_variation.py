@@ -60,33 +60,7 @@ import xml.etree.ElementTree as ET
 
 from importer.ebay import _post, _find, _findall, _text, NS
 from importer.ebay_auth import get_user_token
-
-EBAY_VARIATION_VALUE_MAX_LEN = 50
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Fetch
-# ══════════════════════════════════════════════════════════════════════════════
-
-def fetch_item(item_id: str) -> ET.Element:
-    """GetItem with full detail, including Variations + Pictures. Returns <Item> element."""
-    token = get_user_token()
-
-    xml = f"""<?xml version="1.0" encoding="utf-8"?>
-<GetItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
-  <RequesterCredentials>
-    <eBayAuthToken>{token}</eBayAuthToken>
-  </RequesterCredentials>
-  <ItemID>{item_id}</ItemID>
-  <DetailLevel>ReturnAll</DetailLevel>
-  <IncludeItemSpecifics>true</IncludeItemSpecifics>
-</GetItemRequest>"""
-
-    root = _post("GetItem", xml)
-    item = _find(root, "Item")
-    if item is None:
-        raise RuntimeError(f"GetItem returned no <Item> for {item_id}.")
-    return item
+from importer.ebay_variations_xml import fetch_item, EBAY_VARIATION_VALUE_MAX_LEN
 
 
 # ══════════════════════════════════════════════════════════════════════════════
