@@ -602,6 +602,23 @@ migration.
    engine even if `sync_enabled` were somehow true. This is additive
    safety, not a reinterpretation of the locked allowlist mechanism.
 
+   **UPDATE (2026-07-21, later same day)**: after discussing the overlap
+   between `do_not_sync` and `sync_enabled` with Fei, he decided
+   `do_not_sync` was redundant with the new `sync_enabled` allowlist (which
+   already defaults to `false`) and asked to remove it entirely — not just
+   from the sync engine's gating, but as a concept from the app. Removed
+   from every place it appeared in `inventory.js` (status filter dropdown,
+   both status badge color maps, the `platCell` summary logic, both
+   listing-edit status `<select>`s, the create-listing "Do not sync"
+   button + handler, and the `openListingsModal` query filter). Zero real
+   rows had `status='do_not_sync'` at the time (confirmed: all 9,363
+   `platform_listings` rows were `active` or `out_of_stock`), so this was a
+   pure UI/code removal with no data migration needed. The
+   `status='active'` check in `ebay_listing_sync.py` is unaffected — it
+   was never keyed to the specific `do_not_sync` value, so it continues to
+   correctly exclude `draft`/`delisted`/`out_of_stock` listings the same
+   as before.
+
 5. **`card_sets.total_cards` likely already covers the plan's proposed
    `official_set_total` column.** Confirmed in
    `card-board-mastermind-WebInvManagement/configuration.js`: the Set

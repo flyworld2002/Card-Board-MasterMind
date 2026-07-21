@@ -11,9 +11,12 @@ Two-phase, per docs/plans/ebay-listing-sync.md:
 
 Gating (checked in this order, ALL must pass): platform_sync_status kill
 switch -> platform_listings.sync_enabled -> platform_listings.status =
-'active' (the last clause hard-excludes the pre-existing 'do_not_sync' /
-'draft' / 'delisted' manual statuses regardless of sync_enabled — see
-Step 0 finding #4 in the plan doc).
+'active' (the last clause hard-excludes 'draft' / 'delisted' manual
+statuses regardless of sync_enabled — see Step 0 finding #4 in the plan
+doc). The 'do_not_sync' status value that finding #4 originally discussed
+has since been removed from the app entirely (2026-07-21, Fei's decision —
+sync_enabled alone covers that use case); this status='active' check is
+unaffected since it was never keyed to that specific value.
 
 Pricing pipeline (locked design, revised per Step 0 findings #5/#8):
   1. card_pricing_overrides.list_price       — absolute, beats floors too
