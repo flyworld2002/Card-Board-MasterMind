@@ -1,5 +1,95 @@
 # Plan: Listing Pricing System (profiles + rules + pins)
 
+## PIVOT (2026-07-21, later same day): template-centric roster + manual groups
+Fei changed the design after using the first version. New shape,
+confirmed explicitly:
+
+1. **`listing_templates` becomes ~1:1 with a real listing** — gets a
+   `listing_id` column (unique per platform+listing_id). "Template" and
+   "listing" are now effectively the same entity; template = that
+   listing's header/config, not a shared archetype used by many listings.
+2. **The card roster is explicit, not inferred from sync.** Previously
+   `resolve_listing_prices()` just read whatever `platform_listings` rows
+   already existed (from eBay import). Now `listing_card_assignments`
+   (built last session for the 250-cap design, never used) becomes the
+   actual roster — a card belongs to a listing by having a row here
+   (`status='active'` = live, has a `platform_listings` row via
+   `platform_listing_id`; `status='queued'` = planned, not live yet, no
+   `platform_listings` row needed).
+3. **Grouping is manual, not auto-derived from rarity/foil_type.** New
+   `listing_card_groups` table: freely-named, created inline on the
+   listing page, cards assigned to a group via `listing_card_assignments.
+   group_id`. A group carries a `profile_id` directly — that IS the
+   pricing rule now.
+4. **`listing_pricing_rules` (built this session) is retired** —
+   rarity/foil_type/set/card attribute-matching is replaced entirely by
+   explicit manual group membership. Table had 0 rows, dropped cleanly.
+5. **New "add card to listing" feature**, supporting queued (not-yet-live)
+   cards — you can plan a listing's roster before the cards are live on
+   eBay.
+6. **`--ebay-push-listings` (session 1) is merged into `--ebay-pushprices`.**
+   Both would otherwise walk the same `listing_card_assignments` roster
+   for 250-cap promotion — one push command going forward.
+   `--ebay-push-listings` / `push()` / `_push_single` /
+   `_push_variation_listing` in `ebay_listing_sync.py` are removed.
+   `--ebay-recalc-prices` is left alone for now (separate, already-noted
+   superseded pipeline, not explicitly asked to be removed this round).
+
+Resolution becomes: card → its group (`listing_card_assignments.group_id`)
+→ group's `profile_id` → `pricing_profile_tiers`. `manual_price` pin
+(still only meaningful for `status='active'` rows, since that's where
+`platform_listings` — and thus the pin column — exists) still overrides
+everything, same as before.
+
+### Build log for the pivot (2026-07-21)
+- ✅ Migration 003: `listing_templates.listing_id` (unique per
+  platform+listing_id), new `listing_card_groups` table, `template_id`/
+  `group_id` on `listing_card_assignments`, `listing_pricing_rules`
+  dropped (0 rows). **Caught during testing**: the old
+  `chk_lca_has_listing_ref` check constraint (platform_listing_id OR
+  ebay_item_id) rejected a queued row using only `template_id` — fixed by
+  dropping that constraint, making `template_id` `NOT NULL` (now the sole
+  listing reference), and dropping the now-redundant `ebay_item_id`
+  column. Table was still empty, safe to tighten.
+- ✅ Migration 004: `resolve_listing_prices()` rewritten to resolve off
+  the roster (`listing_card_assignments` joined to `listing_card_groups`)
+  instead of `platform_listings` + the now-dropped `listing_pricing_rules`.
+  `row_id` is now `listing_card_assignments.id`; `platform_listing_id` is
+  returned separately (NULL for queued rows). Verified end-to-end with a
+  rollback-only test: 2 active + 1 queued roster row, all three correctly
+  resolved via the assigned group's profile tiers.
+- ✅ `ebay_pushprices.py` rewritten: gates only `status='active'` rows
+  (queued rows are preview-only, never pushed directly), absorbed the
+  250-cap promotion logic from the now-removed `--ebay-push-listings`
+  (delete sold-out variation, promote highest-priority queued row,
+  **create a new `platform_listings` row for it** — the original
+  session-1 implementation never actually did this, a gap fixed here).
+  `--ebay-push-listings` / `push()` / `_push_single` /
+  `_push_variation_listing` / `_compute_desired_qty` / `_get_listing_kind`
+  removed from `ebay_listing_sync.py` entirely (superseded helpers used
+  only by them); `_render_variation_name` / `_compute_insert_position` /
+  `platform_sync_allowed` kept (still imported by `ebay_pushprices.py`).
+  Verified template resolution + roster diffing against real data
+  (rollback-only).
+- ✅ Web UI rewritten (`listing-pricing.js`): a template IS the listing
+  now — page offers to create one if none exists for the typed Item #.
+  Manual groups (create inline, rename, delete, assign a profile).
+  Checkbox-select + bulk "assign to group." **New "Import into roster"
+  action** — surfaces existing `platform_listings` rows for a listing_id
+  that predate this system (e.g. Fei's manually-imported 84-row test
+  listing) so they don't have to be re-added one by one. **New "Add card
+  to listing"** — search catalog by name, pick a variant, adds as
+  `status='queued'`. `configuration.js`'s template modal + table gained a
+  `listing_id` field.
+  **Caught and fixed while writing this**: initially used Supabase's
+  embedded-resource join syntax (`card_sets(name)`) in the card search —
+  nothing else in this codebase uses that pattern, and the FK relationship
+  might not be registered in PostgREST's schema cache; switched to the
+  established flat-query + JS-side-map convention used everywhere else in
+  this app instead of risking an untested code path.
+- Not yet done: no live browser/eBay test (same limitation as every prior
+  UI pass — no JS runtime available in this environment).
+
 ## Status (2026-07-21)
 Full replacement of the `card_type_mapping` + `price_tiers`-as-global +
 `set_pricing_config` multiplier/floor pipeline built in

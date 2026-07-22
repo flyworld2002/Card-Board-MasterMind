@@ -279,12 +279,6 @@ def cmd_ebay_recalc_prices(args):
            card_query=getattr(args, 'card', None), dry_run=args.dry_run,
            quiet=args.quiet, allow_decreases=getattr(args, 'allow_decreases', False))
 
-def cmd_ebay_push_listings(args):
-    from importer.ebay_listing_sync import push
-    push(account_num=args.account, item_id=getattr(args, 'item_id', None),
-         card_query=getattr(args, 'card', None), dry_run=args.dry_run,
-         quiet=args.quiet, force=getattr(args, 'force', False))
-
 def cmd_ebay_pushprices(args):
     from importer.ebay_pushprices import push_prices
     if not args.listing_id:
@@ -370,16 +364,12 @@ def main():
         help="Recalculate list_price for sync-enabled platform_listings rows "
              "(DB-only, never calls eBay). Scope with --item-id or --card; "
              "use --dry-run to preview. See docs/plans/ebay-listing-sync.md.")
-    group.add_argument("--ebay-push-listings", action="store_true",
-        help="Push recalculated price/quantity to eBay via ReviseFixedPriceItem "
-             "(NOT YET IMPLEMENTED — see importer/ebay_listing_sync.py). "
-             "Scope with --item-id or --card; --force to push unchanged listings.")
     group.add_argument("--ebay-pushprices", action="store_true",
         help="Push resolved prices/quantities for one listing via the Listing "
              "Pricing System (resolve_listing_prices() RPC) — see "
              "docs/plans/listing-pricing-system.md. Requires --listing-id. "
-             "Only sends variations that actually changed since the last push. "
-             "Use --dry-run to preview.")
+             "Only sends variations that actually changed since the last push, "
+             "and handles 250-cap variation promotion. Use --dry-run to preview.")
 
     # ── Shared optional flags ─────────────────────────────────────────────────
     parser.add_argument("--dry-run", action="store_true",
@@ -426,17 +416,14 @@ def main():
     parser.add_argument("--account", metavar="N", type=int, default=1,
         help="eBay account number to use, e.g. --account 2 (matches EBAY_ACCOUNT_{N}_* in .env). Defaults to 1.")
     parser.add_argument("--item-id", metavar="ITEM_ID",
-        help="Scope to one eBay listing (for --ebay-recalc-prices / --ebay-push-listings). "
+        help="Scope to one eBay listing (for --ebay-recalc-prices). "
              "Must already have sync_enabled=true — a disabled listing is skipped even "
              "when explicitly targeted.")
     parser.add_argument("--card", metavar="NAME",
         help="Scope to one card by name, across whichever sync-enabled listings hold it "
-             "(for --ebay-recalc-prices / --ebay-push-listings).")
+             "(for --ebay-recalc-prices).")
     parser.add_argument("--allow-decreases", action="store_true",
         help="Bypass the never-lower price guard (for --ebay-recalc-prices).")
-    parser.add_argument("--force", action="store_true",
-        help="Push all listings in scope regardless of pending-changes detection "
-             "(for --ebay-push-listings).")
     parser.add_argument("--listing-id", metavar="ITEM_ID",
         help="eBay ItemID to push (for --ebay-pushprices).")
 
@@ -486,8 +473,6 @@ def main():
         cmd_ebay_fulfillment_test(args)
     elif args.ebay_recalc_prices:
         cmd_ebay_recalc_prices(args)
-    elif args.ebay_push_listings:
-        cmd_ebay_push_listings(args)
     elif args.ebay_pushprices:
         cmd_ebay_pushprices(args)
 if __name__ == "__main__":
