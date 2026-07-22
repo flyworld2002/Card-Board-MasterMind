@@ -522,6 +522,59 @@ additive — no existing data affected, safe to build without a confirmation
 step.
 
 **Suggested build order**: #1 (data fix) → #2 display half → #3 (schema +
-RPC + UI, additive) → #2 pin half (needs the reset confirmation). Commit
+RPC + UI, additive) → #2 pin half (needs the reset confirmation).
+
+### Build log (2026-07-22, session 2)
+- ✅ **#1 fixed** (data only, no migration file — a straight `UPDATE`, not
+  DDL): closed all 7 boundary gaps in `COM-IN-CommonUncommon`
+  (`eb1cb1c4-...`) by setting each tier's `min_market` to the prior tier's
+  `max_market` (`0.11→0.10`, `0.21→0.20`, `0.26→0.25`, `0.36→0.35`,
+  `0.51→0.50`, `0.76→0.75`, `1.01→1.00`). Audited all 3 live profiles first
+  — `double_rare_common` / `double_rare_rh_ur` had no gaps, only this one
+  needed it. Verified against the real listing (`336204674240`): Vulpix and
+  Chi-Yu (both market `$0.10`) now resolve at `$1.37` via
+  `group:b8d67a05-...` instead of falling through to the `$1.20` default.
+- ✅ **#2 display half**: added a "Resolved Qty" column to
+  `listing-pricing.js`'s roster table, computed the same way
+  `ebay_pushprices.py` computes `qty_to_push`
+  (`max(available - low_stock_qty, 0)`, capped by `quantity_limit`).
+  **Found and fixed a related latent bug while doing this**: `needsPush()`
+  (drives the "stale row" highlighting and the Push button's pending count)
+  computed the low-stock-gated qty but never applied the `quantity_limit`
+  cap, so it could flag a row as needing a push based on a qty that didn't
+  match what a real push would actually send. Refactored it to share the
+  new `resolvedQty()` helper instead of duplicating the calculation.
+- ✅ **#3 formula tiers**: migration 007 adds nullable `multiplier`/`plus`
+  to `pricing_profile_tiers`, drops `list_price`'s `NOT NULL`, adds
+  `chk_tier_price_or_formula` (`list_price IS NOT NULL OR multiplier IS NOT
+  NULL`) so a tier can't be saved with neither. `resolve_listing_prices()`
+  tier lookup now branches: flat `list_price` when set, else
+  `market_price * multiplier + plus`. Verified via a rollback-only test
+  against the real listing (temporarily pointed a live group at a scratch
+  formula profile, confirmed `market×3+0.50` computed correctly and still
+  composed correctly with the migration-006 `base_price` floor, e.g. `$0.06
+  → $0.68 formula → floored to $0.99`; rollback left no trace). Added a
+  flat/formula toggle to **both** tier-editing surfaces in the web app —
+  Configuration's per-profile Tiers modal (the primary path) and the
+  inline "New profile" quick-create modal on the Listing pricing page —
+  since both write directly to `pricing_profile_tiers` and the inline one
+  would otherwise silently drop formula-only rows (its old filter required
+  a numeric `list_price` on every row). `tiersSummary()` and the tier
+  table now render formula tiers as `market × N (+ $P)` via a new
+  `tierPriceLabel()` helper instead of showing a broken price.
+- ✅ **#2 pin half**: Fei gave the explicit go-ahead in-session. Reset
+  confirmed live (9,363 rows had a value beforehand, 0 after). Migration
+  008 flips `resolve_listing_prices()`'s `quantity_limit` precedence to
+  `COALESCE(row_quantity_limit, v_default_quantity_limit, 24)` (row pin
+  wins). Verified via rollback-only test: pinning one row to `7` made the
+  RPC return `quantity_limit=7` for it; rollback confirmed 0 rows still
+  carry a value. Added a "Qty Limit pin" input in `listing-pricing.js`,
+  same change-on-blur pattern as the existing manual-price pin input.
+  **Caught while wiring it**: the `platform_listings` select used to
+  populate `state.listingRowsByPLId` didn't list `quantity_limit` in its
+  column list — the new input would have always rendered blank even for a
+  row with a pin set. Added it to the select.
+- No live browser/eBay test of the new UI (same standing limitation — no
+  JS runtime available in this environment). Commit
 message convention so far has been one commit per logical fix/feature,
 matching this doc's dated sections.
