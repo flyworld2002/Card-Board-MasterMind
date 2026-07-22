@@ -119,6 +119,31 @@ everything, same as before.
    opens its roster/groups view (the existing post-Load flow), with a new
    "← Back to templates" button to return.
 
+### Four more follow-ups (2026-07-22)
+1. Migration 005: `resolve_listing_prices()` now also returns `set_name`
+   and `card_number_numeric`, with `ORDER BY set_name, card_number_numeric`
+   at the SQL level. Verified read-only against real listings the user
+   had already created between sessions. **No JS change needed** — the
+   grouping loop in `listing-pricing.js` just splits `state.resolvedRows`
+   into buckets in iteration order, so DB-sorted input stays sorted in
+   every bucket (grouped and ungrouped) for free.
+2. "New group"'s naming suggestions switched from a native `<datalist>`
+   (only reliably shows on typing, not focus, across browsers) to a
+   hand-rolled dropdown that shows all names on focus and filters as you
+   type — `mousedown` (not `click`) on a suggestion so it registers before
+   the input's `blur` hides the dropdown.
+3. Added a "Groups" tab to Configuration (`listing_card_groups` — rename,
+   reassign profile, delete without opening the listing; day-to-day
+   creation stays inline on the Listing pricing page since a group needs
+   a template/listing context). **Caught while building it**: initially
+   referenced `profilesState.profiles`, which is only populated if the
+   user already visited the Pricing profiles tab this session — fixed to
+   load profiles independently inside `loadGroups()`.
+4. Shift-click range-select added to the roster's row checkboxes — click
+   (not `change`, to read `e.shiftKey`) toggles every checkbox between the
+   last-clicked one and the current one to match the just-clicked state,
+   using the checkboxes' DOM order (spans group boundaries) as the range.
+
 ## Status (2026-07-21)
 Full replacement of the `card_type_mapping` + `price_tiers`-as-global +
 `set_pricing_config` multiplier/floor pipeline built in
