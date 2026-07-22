@@ -90,6 +90,35 @@ everything, same as before.
 - Not yet done: no live browser/eBay test (same limitation as every prior
   UI pass — no JS runtime available in this environment).
 
+### Three follow-up requests (2026-07-22)
+1. **`low_stock_bump` needed decimal support** — was `integer` (a dollar
+   amount), fixed to `numeric(10,2)`. Confirmed via
+   `information_schema.columns` before and after. No Python change needed
+   (`ebay_listing_sync.py` already did `float(...)`).
+2. **Groups need to be "universal"** — clarified with Fei: NOT one shared
+   group/profile across listings (that would undo the whole "same card,
+   different price per listing" point of this system) — just reusable,
+   consistent NAMING. Schema already supported this (`UNIQUE
+   (template_id, name)` only prevents duplicate names *within* one
+   listing). Added a proper "New group" modal with a `<datalist>` of every
+   group name used anywhere, replacing the old bare `window.prompt()` —
+   picking a suggested name still creates a separate, listing-scoped row
+   with its own profile assignment.
+3. **Listing templates moved entirely into the Listing pricing page** —
+   removed from Configuration (nav item, section, state, all functions)
+   per Fei's choice to move rather than duplicate. `index.html`'s router
+   and `configKeys` array updated to drop the `listing-templates` route.
+   The Listing pricing page's landing view is now a template list (ported
+   the create/edit modal from `configuration.js`, minus the
+   `included_types`/`excluded_types`/`card_num_min/max`/`shipping_*`/
+   `max_quantity`/`priority_rule`/`card_type_filter` fields — those are
+   `listing_templates` columns tied to the OLD retired pricing pipeline
+   and the old `listing_kind`/priority-based promotion queue ordering,
+   not used by the new roster+groups model; can be re-added to this modal
+   later if a real need for them resurfaces). Clicking a template row
+   opens its roster/groups view (the existing post-Load flow), with a new
+   "← Back to templates" button to return.
+
 ## Status (2026-07-21)
 Full replacement of the `card_type_mapping` + `price_tiers`-as-global +
 `set_pricing_config` multiplier/floor pipeline built in
