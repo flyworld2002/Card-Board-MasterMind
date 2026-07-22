@@ -451,3 +451,77 @@ deciding to turn sync on for it):
    eBay listings, so "the commons listing" isn't a single, unambiguous
    `listing_id` — need this confirmed before seeding real rules (seeding
    the profiles + tiers themselves has no such ambiguity and can proceed).
+
+## HANDOFF — three confirmed, not-yet-built items (2026-07-22)
+
+Fei reviewed a real listing (`336204674240`, "Mega Evolution Base Set
+Common Listing") and confirmed all three of the following. None of this
+has been implemented yet — start here in the next session.
+
+### 1. Tier gap bug in `COM-IN-CommonUncommon` profile (data fix, not code)
+Confirmed live: profile `eb1cb1c4-8789-403b-900a-ec21433d7f2e`'s tiers
+have 1-cent dead zones between brackets — e.g. `[0.00,0.10)` then
+`[0.11,0.20)`, nothing covers exactly `0.10`. Cards landing exactly on a
+boundary cent value (`019/132 Vulpix`, `031/132 Chi-Yu`, both market
+`$0.10`) fall through `resolve_listing_prices()`'s tier match and silently
+hit the `market×2+1` default-formula fallback ($1.20) instead of the
+group's real price ($0.99), showing `price_source='default'` instead of
+`group:...` even though the card is grouped and the group has a profile.
+Same gap pattern likely repeats at every other boundary in this profile
+(`0.20/0.21`, `0.25/0.26`, `0.35/0.36`, `0.50/0.51`, `0.75/0.76`,
+`1.00/1.01`) and possibly other profiles too — worth auditing all
+profiles' tiers for `max_market(n) != min_market(n+1)` gaps, not just
+patching this one profile. Fix is a data edit (`UPDATE
+pricing_profile_tiers SET min_market = ...` to close each gap), no schema
+or RPC change needed. Do this check/fix first since it's cheap and
+explains a real user-visible discrepancy.
+
+### 2. Resolved Qty column + "Manual Pin Qty" repurposing of `quantity_limit`
+Two parts, different risk levels:
+
+- **Display (low-risk, do first)**: `resolve_listing_prices()` already
+  returns `quantity_limit` (and `available_qty`/`low_stock_qty`) but
+  `listing-pricing.js`'s `rowHTML()` doesn't show a resolved/effective qty
+  anywhere. Add a column computing the same thing `ebay_pushprices.py`
+  already computes at push time: `max(available_qty - (low_stock_qty ??
+  0), 0)`, then capped by `min(..., quantity_limit)`. Pure display, no
+  schema change, no ambiguity — safe to just build.
+
+- **"Manual Pin Qty" (needs a data reset first — confirm before running)**:
+  Fei wants `platform_listings.quantity_limit` turned into a genuine
+  per-card override (like `manual_price` is a price pin), rather than its
+  current meaningless state — confirmed live that **all 9,363 rows** carry
+  `quantity_limit=18`, purely an old column default, never a real
+  per-card decision. Plan:
+  1. Reset all 9,363 rows' `quantity_limit` to `NULL` (this is the "confirm
+     before running" step — it's a bulk update across every
+     `platform_listings` row; get an explicit go-ahead in-session even
+     though the design itself is already agreed, since irreversibly
+     wiping a column's data on 9k+ rows deserves a last check).
+  2. Flip `resolve_listing_prices()`'s precedence for `quantity_limit` from
+     `COALESCE(v_default_quantity_limit, l.row_quantity_limit, 24)`
+     (template wins) to `COALESCE(l.row_quantity_limit,
+     v_default_quantity_limit, 24)` (row-level pin wins when set, template
+     default otherwise) — this is the mirror image of the base_price/pin
+     precedence already used for `manual_price`.
+  3. Add an editable "Qty Limit" input next to the existing pin-price
+     input in `listing-pricing.js`, writing to `platform_listings.quantity_limit`.
+
+### 3. Formula-based tiers in `pricing_profile_tiers`
+Add nullable `multiplier numeric` and `plus numeric` columns to
+`pricing_profile_tiers`. Resolution rule in `resolve_listing_prices()`:
+if a tier's `list_price` is set, use it as today (flat price); if
+`list_price` is `NULL` but `multiplier` is set, compute
+`market_price * multiplier + plus` instead. Lets one profile mix flat
+tiers for low brackets with an open-ended formula tier for "anything over
+$2" (`min_market=2.00, max_market=NULL, list_price=NULL, multiplier=2,
+plus=1`) — replicates the old `ultra_rare_rule` formula behavior, scoped
+per-tier instead of profile-wide. Needs a UI toggle in the tier editor
+(flat price vs. formula) instead of the current single price field. Purely
+additive — no existing data affected, safe to build without a confirmation
+step.
+
+**Suggested build order**: #1 (data fix) → #2 display half → #3 (schema +
+RPC + UI, additive) → #2 pin half (needs the reset confirmation). Commit
+message convention so far has been one commit per logical fix/feature,
+matching this doc's dated sections.
