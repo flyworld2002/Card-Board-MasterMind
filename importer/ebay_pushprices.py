@@ -29,26 +29,40 @@ from importer.ebay_variations_xml import (
 
 def _compute_changes(cur, platform: str, listing_id: str):
     """
-    Returns (resolved_rows, changes) where changes is a list of dicts with
-    the fields needed to push: row_id, external_id, derived_label,
-    resolved_price, price_source, qty_to_push (already low-stock-gated).
-    A row is a "change" if its resolved price or gated quantity differs
-    from what was last pushed (pushed_price/pushed_qty), or it has never
-    been pushed (pushed_at IS NULL).
+    Returns (resolved_rows, changes, skipped_ungated) where:
+    - resolved_rows: raw resolve_listing_prices() output, unfiltered (used
+      for display/preview — a row not yet opted into sync should still be
+      visible with its computed price, just never pushed).
+    - changes: rows that are both GATED-IN (sync_enabled + status='active'
+      + no kill switch engaged, same rules as ebay_listing_sync.py's
+      _resolve_scope) and have a resolved price/qty that differs from
+      what was last pushed.
+    - skipped_ungated: rows that would otherwise be changes but aren't
+      gated in — surfaced so it's obvious *why* a row didn't push, rather
+      than silently dropping it.
     """
     cur.execute("SELECT * FROM resolve_listing_prices(%s, %s)", (platform, listing_id))
     resolved = cur.fetchall()
     if not resolved:
-        return [], []
+        return [], [], []
 
     row_ids = [str(r["row_id"]) for r in resolved]
     cur.execute(
-        "SELECT id, external_id, pushed_price, pushed_qty FROM platform_listings WHERE id = ANY(%s::uuid[])",
+        "SELECT id, external_id, pushed_price, pushed_qty, sync_enabled, status, account "
+        "FROM platform_listings WHERE id = ANY(%s::uuid[])",
         (row_ids,),
     )
     current_by_id = {r["id"]: r for r in cur.fetchall()}
 
+    # Kill-switch check per distinct account present (usually just one —
+    # all variations of one eBay listing normally belong to one account —
+    # but don't assume it).
+    from importer.ebay_listing_sync import platform_sync_allowed
+    accounts_present = {r["account"] for r in current_by_id.values()} | {None}
+    kill_switch_ok = {a: platform_sync_allowed(cur, platform, a) for a in accounts_present}
+
     changes = []
+    skipped_ungated = []
     for r in resolved:
         cur_row = current_by_id.get(r["row_id"])
         if cur_row is None:
@@ -65,17 +79,35 @@ def _compute_changes(cur, platform: str, listing_id: str):
         )
         qty_changed = cur_row["pushed_qty"] is None or cur_row["pushed_qty"] != qty_to_push
 
-        if price_changed or qty_changed:
-            changes.append({
-                "row_id": r["row_id"],
-                "external_id": cur_row["external_id"],
-                "derived_label": r["derived_label"],
-                "resolved_price": float(r["resolved_price"]),
-                "price_source": r["price_source"],
-                "qty_to_push": qty_to_push,
-            })
+        if not (price_changed or qty_changed):
+            continue
 
-    return resolved, changes
+        change = {
+            "row_id": r["row_id"],
+            "external_id": cur_row["external_id"],
+            "derived_label": r["derived_label"],
+            "resolved_price": float(r["resolved_price"]),
+            "price_source": r["price_source"],
+            "qty_to_push": qty_to_push,
+        }
+
+        gated_in = (
+            cur_row["sync_enabled"]
+            and cur_row["status"] == "active"
+            and kill_switch_ok.get(cur_row["account"], True)
+            and kill_switch_ok.get(None, True)
+        )
+        if gated_in:
+            changes.append(change)
+        else:
+            reason = (
+                "platform/account sync disabled" if not (kill_switch_ok.get(cur_row["account"], True) and kill_switch_ok.get(None, True))
+                else "sync_enabled=false" if not cur_row["sync_enabled"]
+                else f"status={cur_row['status']!r}"
+            )
+            skipped_ungated.append({**change, "reason": reason})
+
+    return resolved, changes, skipped_ungated
 
 
 def push_prices(listing_id: str, account_num: int = 1, platform: str = "ebay",
@@ -93,7 +125,7 @@ def push_prices(listing_id: str, account_num: int = 1, platform: str = "ebay",
             print(msg)
 
     with db_cursor() as cur:
-        resolved, changes = _compute_changes(cur, platform, listing_id)
+        resolved, changes, skipped_ungated = _compute_changes(cur, platform, listing_id)
         summary = {"listing_id": listing_id, "resolved": len(resolved), "changed": len(changes),
                    "pushed": 0, "warnings": [], "dry_run": dry_run}
 
@@ -101,8 +133,15 @@ def push_prices(listing_id: str, account_num: int = 1, platform: str = "ebay",
             p(f"No platform_listings rows found for {platform} listing {listing_id}.")
             return summary
 
+        if skipped_ungated:
+            for s in skipped_ungated:
+                msg = f"{s['derived_label']} ({s['external_id']}): would change but not synced — {s['reason']}"
+                summary["warnings"].append(msg)
+                p(f"  [NOT SYNCED] {msg}")
+
         if not changes:
-            p(f"[{listing_id}] already in sync with {len(resolved)} row(s) resolved — nothing to push.")
+            p(f"[{listing_id}] nothing gated-in with pending changes "
+              f"({len(resolved)} row(s) resolved, {len(skipped_ungated)} skipped as not synced) — nothing to push.")
             return summary
 
         item = fetch_item(listing_id, account_num=account_num)

@@ -225,6 +225,39 @@ eBay variation names stay display-only strings on `ebay_listing_map`.
   balance checks and manual re-read only, same limitation as last
   session's UI work).
 
+## Post-build self-review finding + fix (2026-07-21, later same day)
+Asked to check my own work. Found a real, significant gap:
+**`resolve_listing_prices()` had zero awareness of `sync_enabled` /
+`status` / `platform_sync_status`** — the entire staged-rollout safety
+model from `ebay-listing-sync.md` (kill switch → `sync_enabled` →
+`status='active'`) didn't apply to this feature at all. Confirmed the
+real consequence: the listing used for every test this session
+(`335662210469`) has `sync_enabled=false` on all 244 rows (never opted
+into anything) — `--ebay-pushprices` would have pushed real changes to it
+anyway if run for real.
+
+**Fix, keeping resolve vs. push separate per Fei's call** (resolution
+stays unfiltered — useful for previewing a listing's prices before
+deciding to turn sync on for it):
+- Extracted the kill-switch check out of `ebay_listing_sync.py`'s
+  `_resolve_scope` into a standalone `platform_sync_allowed(cur, platform,
+  account)`, reused by both features instead of duplicated.
+- `ebay_pushprices.py`'s `_compute_changes` now returns a 3-tuple
+  (`resolved, changes, skipped_ungated`) — `changes` only includes rows
+  that are BOTH stale AND gated-in (`sync_enabled` + `status='active'` +
+  kill switch); `skipped_ungated` surfaces rows that would've changed but
+  aren't gated in, with a reason, instead of silently dropping them.
+  Verified: the never-opted-in test listing now correctly shows
+  0 changes / 244 skipped (`sync_enabled=false`); enabling `sync_enabled`
+  on 3 rows (rollback-only test) correctly flips exactly those 3 to
+  eligible, the other 241 stay skipped.
+- Added a `window.confirm()` to the web UI's Push button (there was none —
+  this is the first place in the whole app that writes to a live eBay
+  listing) and a "Synced?" column per row so the grid is transparent about
+  which rows are actually gate-eligible, not just which have a pending
+  price change. The pending-count banner now separately reports "N need
+  push" (gated + stale) vs. "N changed but not sync-enabled (won't push)".
+
 ## Open questions (from the spec, plus one found during audit)
 1. ~~Exact live names/PKs~~ — RESOLVED above (corrections #1-#5).
 2. Should `low_stock_qty` gate pushed quantity (`available - low_stock_qty`,

@@ -46,6 +46,33 @@ TIER_TYPES = ("common", "holo", "reverse_holo", "ultra_rare_rule")
 # Scope resolution
 # ══════════════════════════════════════════════════════════════════════════════
 
+def platform_sync_allowed(cur, platform: str, account: str = None) -> bool:
+    """
+    Checks the platform_sync_status kill switch only (platform-wide, then
+    account-specific). Shared by _resolve_scope here and by
+    importer/ebay_pushprices.py's push-time gating — the two features use
+    different pricing pipelines but the same kill switch.
+    """
+    cur.execute(
+        "SELECT sync_enabled FROM platform_sync_status WHERE platform = %s AND account IS NULL",
+        (platform,),
+    )
+    row = cur.fetchone()
+    if row and not row["sync_enabled"]:
+        return False  # platform-wide kill switch engaged
+
+    if account:
+        cur.execute(
+            "SELECT sync_enabled FROM platform_sync_status WHERE platform = %s AND account = %s",
+            (platform, account),
+        )
+        row = cur.fetchone()
+        if row and not row["sync_enabled"]:
+            return False  # account-level kill switch engaged
+
+    return True
+
+
 def _resolve_scope(cur, platform: str, account: str = None,
                     item_id: str = None, card_query: str = None):
     """
@@ -55,22 +82,8 @@ def _resolve_scope(cur, platform: str, account: str = None,
     `card_query` scopes to one card (by name, case-insensitive substring)
     across whichever enabled listings hold it.
     """
-    cur.execute(
-        "SELECT sync_enabled FROM platform_sync_status WHERE platform = %s AND account IS NULL",
-        (platform,),
-    )
-    row = cur.fetchone()
-    if row and not row["sync_enabled"]:
-        return []  # platform-wide kill switch engaged
-
-    if account:
-        cur.execute(
-            "SELECT sync_enabled FROM platform_sync_status WHERE platform = %s AND account = %s",
-            (platform, account),
-        )
-        row = cur.fetchone()
-        if row and not row["sync_enabled"]:
-            return []  # account-level kill switch engaged
+    if not platform_sync_allowed(cur, platform, account):
+        return []
 
     where = ["pl.platform = %s", "pl.sync_enabled = true", "pl.status = 'active'"]
     params = [platform]
