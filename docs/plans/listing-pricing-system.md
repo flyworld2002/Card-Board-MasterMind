@@ -144,6 +144,42 @@ everything, same as before.
    last-clicked one and the current one to match the just-clicked state,
    using the checkboxes' DOM order (spans group boundaries) as the range.
 
+### Three more fixes (2026-07-22) — two were real, confirmed-live gaps
+1. **`listing_templates.base_price` (floor) was never respected** —
+   confirmed by grepping the RPC and push code for it, zero hits. Fixed
+   in migration 006: applied as `GREATEST(computed_price, base_price)`,
+   skipped for pins (an explicit human price shouldn't be second-guessed
+   by a safety-net floor). Verified against real data — the floor
+   correctly didn't change a price that already exceeded it (math
+   confirmed: market $0.22 → formula $1.44 → floor $0.99 → stays $1.44).
+2. **`listing_templates.default_quantity_limit` was never respected**
+   either — `ebay_pushprices.py` only ever used `low_stock_qty` for
+   gating, never capped by any quantity limit. Migration 006 added a
+   resolved `quantity_limit` output column. **Caught while verifying**:
+   my first attempt had the precedence backwards
+   (`COALESCE(row_quantity_limit, template_default, 24)`) — confirmed via
+   query that ALL 9,363 `platform_listings` rows have
+   `quantity_limit=18`, i.e. purely the column's blanket default from an
+   earlier migration, never a real per-card override, so it was silently
+   always winning over the template's actual configured value. Flipped to
+   `COALESCE(template_default, row_quantity_limit, 24)`. Verified: a row
+   with `available_qty=34` now correctly caps `qty_to_push` at the
+   template's `default_quantity_limit=24`. Applied in both
+   `_compute_roster_changes` and `_do_promotions` (250-cap promotion).
+   Also made the profile-tier lookup fall back to the platform-default
+   formula instead of returning NULL when a profile has no matching tier
+   — more likely now that profiles can be created with zero tiers
+   momentarily via the new inline-creation flow (item 3 below).
+3. **Inline profile creation on the Listing pricing page** — a group's
+   profile `<select>` gained a "+ New profile..." option opening a modal
+   (name, optional default low-stock qty, one or more tier rows, "+ Add
+   tier"), which creates the profile, its tiers, and assigns it to the
+   group in one step. Generates the profile's id client-side via
+   `crypto.randomUUID()` rather than reading it back after insert with
+   `.select().single()` — that chaining pattern isn't used anywhere else
+   in this codebase, so avoided it in favor of the plain
+   insert-with-a-known-id shape already used throughout.
+
 ## Status (2026-07-21)
 Full replacement of the `card_type_mapping` + `price_tiers`-as-global +
 `set_pricing_config` multiplier/floor pipeline built in

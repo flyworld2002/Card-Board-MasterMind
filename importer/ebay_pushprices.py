@@ -85,6 +85,8 @@ def _compute_roster_changes(cur, platform: str, listing_id: str):
         qty_to_push = available
         if r["low_stock_qty"] is not None:
             qty_to_push = max(available - r["low_stock_qty"], 0)
+        if r["quantity_limit"] is not None:
+            qty_to_push = min(qty_to_push, r["quantity_limit"])
 
         price_changed = (
             cur_row["pushed_price"] is None
@@ -198,7 +200,10 @@ def _do_promotions(cur, template, platform: str, listing_id: str, account_num: i
         resolved_price = float(promoted_resolved["resolved_price"]) if promoted_resolved else 0.0
         available = (promoted_resolved["available_qty"] or 0) if promoted_resolved else 0
         low_stock = promoted_resolved["low_stock_qty"] if promoted_resolved else None
+        qty_limit = promoted_resolved["quantity_limit"] if promoted_resolved else None
         qty_to_push = max(available - low_stock, 0) if low_stock is not None else available
+        if qty_limit is not None:
+            qty_to_push = min(qty_to_push, qty_limit)
 
         add_variation_row(variations, {specific_name: promoted_name}, quantity=qty_to_push,
                            start_price=resolved_price)
