@@ -212,12 +212,12 @@ def _do_promotions(cur, template, platform: str, listing_id: str, account_num: i
             """
             INSERT INTO platform_listings
                 (platform, account, listing_id, external_id, variant_id, list_price,
-                 quantity_listed, quantity_limit, status, sync_enabled, template_id, listed_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'active', true, %s, now())
+                 quantity_listed, status, sync_enabled, template_id, listed_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, 'active', true, %s, now())
             RETURNING id
             """,
             (platform, meta["account"], listing_id, promoted_name, promote["variant_id"],
-             resolved_price, qty_to_push, template.get("default_quantity_limit"), template["id"]),
+             resolved_price, qty_to_push, template["id"]),
         )
         new_platform_listing_id = cur.fetchone()["id"]
 

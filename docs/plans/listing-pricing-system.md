@@ -612,6 +612,92 @@ Fei reviewed the roster grid live (group `COM-IN-DoubleRare` on listing
    and its `image_url` is `null` (no stock or own photo on file). Either
    the wrong card got matched in "Add card to listing"'s search, or the
    real promo variant isn't in the catalog yet — worth a manual check now
-   that the grid shows the real name instead of masking it as "Common Holo". Commit
+   that the grid shows the real name instead of masking it as "Common Holo".
+
+### Set column + queued-card pins + the "push live" gap (2026-07-22, session 4)
+Fei asked two follow-ups from the live grid: show the card's set, and why
+`Low-stock qty`/`Manual pin`/`Qty Limit pin` are grayed out for queued
+rows plus what the workflow is to get a card out of `queued`.
+
+1. **Set column** — trivial, `resolve_listing_prices()` already returned
+   `set_name` (migration 005); just wasn't rendered. Added to the grid.
+2. **Root cause of the grayed-out queued inputs**: `manual_price`/
+   `low_stock_qty`/`quantity_limit` lived on `platform_listings`, which
+   only has a row once a card is actually live — a queued row has nowhere
+   to store a pin. **Root cause of "no workflow to un-queue"**: the only
+   code path that flips `queued` → `active` is `_do_promotions()` in
+   `ebay_pushprices.py`, and it explicitly no-ops unless the roster's
+   total row count exceeds 250 — this listing has ~12 rows, so a queued
+   card here could never be promoted by anything that exists today.
+3. **Scoped two features to fix this** (not yet built — schema/data layer
+   done this session, the actual eBay-write code is next session):
+   - A **per-card "Push live" button** for one queued row: adds just that
+     one new `<Variation>` to the live listing (reusing the deep-copy
+     helpers in `ebay_variations_xml.py`), touching no other variation's
+     price/qty on eBay.
+   - The **general Push button auto-promoting queued rows** whenever
+     there's room under 250 (not just when something sold out at cap) —
+     `_do_promotions()` needs a "free slot, no deletion needed" branch
+     added alongside its existing "at cap, swap a sold-out row" branch.
+     Confirm dialog will report the promotion count explicitly (e.g. "3
+     price/qty changes + 2 cards going live for the first time").
+4. **Pin storage — real architecture discussion, not just a data fix**:
+   Fei's ask ("I should be able to edit these regardless of status")
+   forced the actual design question of where a pin belongs. Landed on:
+   `platform_listings` stays a pure live-eBay-state mirror (external_id,
+   pushed_*, sync_enabled — nothing conceptually possible for a card
+   that's never been pushed); `listing_card_assignments` (the roster row,
+   which exists for every card regardless of status) becomes the single
+   source of truth for `manual_price`/`low_stock_qty`/`quantity_limit`.
+   No copying needed on promotion — same `id` before and after, so a pin
+   set while queued just keeps applying once live. Migration 010:
+   - Added the three columns to `listing_card_assignments`.
+   - Dropped them from `platform_listings` (confirmed zero live data
+     first — no row anywhere had a non-null value in any of the three).
+   - `resolve_listing_prices()` now reads pins straight from `lca.*` (the
+     `platform_listings` join that existed only for these three columns
+     is gone entirely). Also exposes the raw pin values as new output
+     columns (`manual_price`, `row_low_stock_qty`, `row_quantity_limit`)
+     alongside the existing resolved `low_stock_qty`/`quantity_limit`, so
+     the UI can show "what's actually pinned" without a second query.
+     **Incidental fix**: the low-stock input previously displayed the
+     RESOLVED value (profile-default fallback included) as if it were the
+     raw override — saving without touching it could silently write a
+     profile's default as an explicit per-row pin. Now shows the true raw
+     value, same as manual_price/quantity_limit already correctly did.
+   - `ebay_pushprices.py`'s promotion `INSERT` no longer writes
+     `quantity_limit` into the new `platform_listings` row — nothing to
+     copy, the pin already lives on the roster row being promoted.
+   - Web UI: all three pin inputs are now always-editable regardless of
+     status, reading/writing `listing_card_assignments` via `row_id`.
+   - **Real regression caught and fixed before it shipped**: initially
+     dropped `quantity_limit` from `platform_listings` without grepping
+     the whole web app first — `inventory.js` (a completely separate,
+     pricing-system-unrelated page) has its own "Edit listing" feature
+     that reads/writes `platform_listings.quantity_limit` directly as
+     genuine live-eBay state (independent of the pricing pin concept).
+     Considered pointing `inventory.js` at `listing_card_assignments`
+     instead, but only 243 of 9,363 `platform_listings` rows (2.6%) have
+     a roster row at all — the other 97.4% were never added to a
+     template, so there'd be nothing to point at for almost every
+     listing. Fei's call: drop `quantity_limit` from `inventory.js`
+     entirely instead (three separate UI locations — two edit panels, one
+     "Add listing" modal) rather than restore it on `platform_listings`
+     or half-wire it through the roster table.
+   - **Known side effect, disclosed and accepted**: the OLD, already-
+     superseded `--ebay-recalc-prices` pipeline
+     (`ebay_listing_sync.py::_apply_bumps`) reads `quantity_limit` off a
+     raw `SELECT pl.*` for its low-stock-bump feature. After the drop,
+     that key is simply absent, so `.get()` returns `None` instead of
+     erroring — `low_stock_bump` goes permanently inert on that pipeline
+     (no crash). Not patched, since that pipeline is being moved away
+     from anyway.
+   - Open question raised by Fei, explicitly deferred: how will a
+     "single listing per card" roster scale if it means hundreds of
+     `listing_card_assignments` rows per card? No action taken — revisit
+     when it's actually needed.
+5. **Not yet built**: the per-card "Push live" action and the general
+   push's queued-row auto-promotion (item 3 above) — schema is ready,
+   the eBay-write code is next. Commit
 message convention so far has been one commit per logical fix/feature,
 matching this doc's dated sections.
