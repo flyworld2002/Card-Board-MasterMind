@@ -36,12 +36,14 @@ import os
 import threading
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from importer.ebay_picking import pull_picking
-from importer.ebay_pushprices import push_prices, push_single_card_live, remove_single_card_live
+from importer.ebay_pushprices import (
+    push_prices, push_single_card_live, remove_single_card_live, stage_card_picture,
+)
 
 load_dotenv()
 
@@ -78,6 +80,10 @@ _push_card_lock = threading.Lock()
 # queue behind a push and vice versa.
 _remove_card_lock = threading.Lock()
 
+# Same reasoning again — staging a picture (an EPS upload) shouldn't
+# queue behind any of the other actions.
+_stage_picture_lock = threading.Lock()
+
 
 class PushPricesRequest(BaseModel):
     listing_id: str
@@ -95,6 +101,12 @@ class RemoveCardRequest(BaseModel):
     row_id: str
     account_num: int = 1
     dry_run: bool = False
+
+
+class StagePictureRequest(BaseModel):
+    row_id: str
+    image_url: str
+    account_num: int = 1
 
 
 @app.post("/api/picking/refresh")
@@ -170,6 +182,57 @@ def remove_card_endpoint(body: RemoveCardRequest, x_picking_token: str = Header(
                                               dry_run=body.dry_run, quiet=True)
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"remove failed: {e}")
+
+    return result
+
+
+@app.post("/api/stage-card-picture")
+def stage_card_picture_endpoint(body: StagePictureRequest, x_picking_token: str = Header(default="")):
+    """
+    Uploads body.image_url to eBay's own hosting (EPS) right now and
+    stages the resulting URL on a QUEUED roster row — attached
+    automatically the next time that row actually gets pushed live.
+    No R2/card_master involvement — this only ever touches eBay's own
+    image hosting. Same auth as the other endpoints, own lock.
+    """
+    if x_picking_token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="bad token")
+
+    with _stage_picture_lock:
+        try:
+            result = stage_card_picture(row_id=body.row_id, source_url=body.image_url,
+                                         account_num=body.account_num, quiet=True)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"picture upload failed: {e}")
+
+    return result
+
+
+@app.post("/api/stage-card-picture-file")
+async def stage_card_picture_file_endpoint(
+    row_id: str = Form(...),
+    account_num: int = Form(1),
+    file: UploadFile = File(...),
+    x_picking_token: str = Header(default=""),
+):
+    """
+    Same as /api/stage-card-picture but for a directly-uploaded local
+    file instead of a URL — a separate route because FastAPI can't mix a
+    JSON body with multipart Form/File params on one endpoint. Uploads
+    file bytes straight to EPS, no download step.
+    """
+    if x_picking_token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="bad token")
+
+    image_bytes = await file.read()
+
+    with _stage_picture_lock:
+        try:
+            result = stage_card_picture(row_id=row_id, image_bytes=image_bytes,
+                                         filename=file.filename or "card.jpg",
+                                         account_num=account_num, quiet=True)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"picture upload failed: {e}")
 
     return result
 

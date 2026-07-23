@@ -304,6 +304,17 @@ def cmd_ebay_remove_card(args):
     if result.get("error"):
         raise SystemExit(f"--ebay-remove-card failed: {result['error']}")
 
+def cmd_ebay_stage_picture(args):
+    from importer.ebay_pushprices import stage_card_picture
+    if not args.row_id:
+        raise SystemExit("--ebay-stage-picture requires --row-id")
+    if not args.image_url:
+        raise SystemExit("--ebay-stage-picture requires --image-url")
+    result = stage_card_picture(row_id=args.row_id, source_url=args.image_url,
+                                 account_num=args.account, quiet=args.quiet)
+    if result.get("error"):
+        raise SystemExit(f"--ebay-stage-picture failed: {result['error']}")
+
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main():
@@ -399,6 +410,12 @@ def main():
              "back to 'queued', can be pushed live again later. Requires "
              "--row-id. Use --dry-run to preview. See "
              "docs/plans/listing-pricing-system.md.")
+    group.add_argument("--ebay-stage-picture", action="store_true",
+        help="Upload an image to eBay's own hosting (EPS) right now and stage "
+             "it on a QUEUED roster row (listing_card_assignments.eps_picture_url) "
+             "— attached automatically the next time that row is pushed live. "
+             "Requires --row-id and --image-url. See "
+             "docs/plans/listing-pricing-system.md.")
 
     # ── Shared optional flags ─────────────────────────────────────────────────
     parser.add_argument("--dry-run", action="store_true",
@@ -457,7 +474,10 @@ def main():
         help="eBay ItemID to push (for --ebay-pushprices).")
     parser.add_argument("--row-id", metavar="UUID",
         help="listing_card_assignments.id of the roster row to act on "
-             "(for --ebay-push-card / --ebay-remove-card).")
+             "(for --ebay-push-card / --ebay-remove-card / --ebay-stage-picture).")
+    parser.add_argument("--image-url", metavar="URL",
+        help="Source image URL to fetch and upload to eBay's EPS "
+             "(for --ebay-stage-picture).")
 
     args = parser.parse_args()
 
@@ -511,5 +531,7 @@ def main():
         cmd_ebay_push_card(args)
     elif args.ebay_remove_card:
         cmd_ebay_remove_card(args)
+    elif args.ebay_stage_picture:
+        cmd_ebay_stage_picture(args)
 if __name__ == "__main__":
     main()

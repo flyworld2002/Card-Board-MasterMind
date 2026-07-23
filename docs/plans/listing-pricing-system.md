@@ -871,6 +871,69 @@ render, nothing cached; the final rendered name only persists once a
 card actually goes live, as `platform_listings.external_id`, set once at
 push/promotion time and treated as sticky afterward.
 
+### Stage a picture for eBay (EPS) before a card goes live (2026-07-22/23, session 6)
+Fei wants to attach a photo to a new variation as part of adding it —
+initially framed as "planning," landed on: click a queued card's
+thumbnail, provide an image URL, upload it to eBay's own hosting (EPS)
+right now, and have it attach automatically the next time that specific
+card is actually pushed live. Explicitly **not** the R2/card_master
+catalog-photo pipeline (that's a separate, later plan) — this only ever
+touches eBay's own image hosting.
+
+**Investigated first, before designing anything**: confirmed eBay's
+Trading API does not accept an arbitrary external URL for a
+variation-specific picture — `VariationSpecificPictureSet` needs an
+EPS-hosted URL, so "fetch the bytes, then multipart-upload to EPS" is
+mandatory, not just the fallback path. That exact mechanism already
+existed and was proven working, just as an uncommitted, one-off script
+(`upload_listing_a_images.py`) never wired into the real codebase.
+
+Built:
+- **New `importer/ebay_pictures.py`** — promotes the proven
+  `upload_picture_from_url()`/EPS-multipart-upload logic out of the
+  one-off script into a real, reusable module. Also adds
+  `upload_picture_bytes()` (skips the download step, for a future
+  direct-file-upload path — see below).
+- **`set_variation_picture()`** (`ebay_variations_xml.py`) — adds/updates
+  one `<VariationSpecificPictureSet>` entry inside `<Variations>
+  <Pictures>`. **Real ordering bug caught before it shipped**: this
+  function and `add_variation_row()` both simply append to `variations`
+  — if a batch promotes several queued rows in one push (the "room under
+  250" case), naively calling `set_variation_picture()` right after each
+  `add_variation_row()` inside the same loop would interleave `<Pictures>`
+  between `<Variation>` elements, which is malformed. Fixed by
+  restructuring so `_stage_promotion()` only returns the staged picture
+  URL (never applies it), and both callers (`_do_promotions()`,
+  `push_single_card_live()`) apply every picture in one pass, strictly
+  after every variation in the batch has already been added.
+- **Migration 013**: `listing_card_assignments.eps_picture_url` (nullable)
+  — same staged-pin pattern as `custom_name`. Exposed via
+  `resolve_listing_prices()`.
+- **`stage_card_picture(row_id, source_url, ...)`** (`ebay_pushprices.py`)
+  — uploads now, writes `eps_picture_url`, only for `status='queued'`
+  rows (nothing live to stage against otherwise — active-row support
+  explicitly deferred, Fei's call). CLI: `--ebay-stage-picture --row-id
+  <uuid> --image-url <url>`. API: `POST /api/stage-card-picture`.
+- **Verified against the real Charcadet row, not just a rollback test**:
+  ran the actual CLI command with a real public image URL, got back a
+  genuine `i.ebayimg.com`-hosted URL from eBay, confirmed it persisted,
+  then ran `--ebay-push-card --dry-run` and confirmed the picture-attach
+  code path executes cleanly alongside the promo-naming fix with no
+  errors. Cleared the test `eps_picture_url` back to NULL afterward so
+  the real row doesn't end up with a stray test image staged on it.
+- **Web UI**: thumbnail is clickable only on queued rows (shows the
+  staged EPS picture if one exists, falling back to the catalog image,
+  with a small checkmark badge when staged) — opens a URL-input modal,
+  calls the new endpoint, refreshes.
+- **Local-file upload, built same session**: installed `python-multipart`
+  (added to `requirements.txt`), new `POST /api/stage-card-picture-file`
+  (separate route from the URL one — FastAPI can't mix a JSON body with
+  multipart `Form`/`File` params on one endpoint) using the
+  already-written `upload_picture_bytes()`. Web modal now offers both
+  URL and file, mutually exclusive (picking one clears the other).
+- **Still deferred**: staging/immediately-revising a picture for an
+  already-active row (Fei's explicit call — queued-only for now).
+
 **Real bug found immediately after Fei tested this live**: the "Import
 into roster" banner ("N existing platform_listings row(s) for this Item
 # aren't on the roster yet") counted ALL `platform_listings` rows for the

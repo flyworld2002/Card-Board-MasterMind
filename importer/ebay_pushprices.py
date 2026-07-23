@@ -31,11 +31,12 @@ from importer.ebay_variations_xml import (
     fetch_item, deep_copy_variations, strip_selling_status, get_quantity_sold,
     find_variation_by_specifics, set_variation_price_qty, get_specifics_set,
     insert_specifics_value, mark_variation_deleted, add_variation_row,
-    build_revise_xml,
+    set_variation_picture, build_revise_xml,
 )
 from importer.ebay_listing_sync import (
     platform_sync_allowed, _render_variation_name, _compute_insert_position,
 )
+from importer.ebay_pictures import upload_picture_from_url, upload_picture_bytes
 
 
 def _resolve_template(cur, platform: str, listing_id: str):
@@ -153,6 +154,16 @@ def _stage_promotion(cur, template, platform: str, listing_id: str, promote, pro
     (e.g. matching a listing's alpha-sort word order, or promo wording
     _render_variation_name() has no token for) instead of whatever the
     format-string default would produce.
+
+    If `promote` carries a non-null "eps_picture_url" (staged via
+    stage_card_picture() when the user clicked the thumbnail before this
+    card ever went live), it's passed back in the returned promotion dict
+    but deliberately NOT applied to `variations` here — the caller must
+    call set_variation_picture() for every promotion in the batch only
+    AFTER every add_variation_row() call has finished (see that
+    function's docstring for why: <Pictures> must land after every
+    <Variation>, and this function may be called several times in a loop
+    for one batch).
     """
     promoted_name = promote.get("custom_name") or _render_variation_name(cur, promote["variant_id"], template["id"])
     position = _compute_insert_position(cur, variations, specific_name, listing_id,
@@ -200,6 +211,7 @@ def _stage_promotion(cur, template, platform: str, listing_id: str, promote, pro
         "price_source": promoted_resolved["price_source"] if promoted_resolved else "default",
         "qty_to_push": qty_to_push,
         "position": position,
+        "eps_picture_url": promote.get("eps_picture_url"),
     }
     return promotion, pending_writes
 
@@ -224,7 +236,7 @@ def _do_promotions(cur, template, platform: str, listing_id: str, account_num: i
             print(msg)
 
     cur.execute(
-        "SELECT id, variant_id, priority_rank, custom_name FROM listing_card_assignments "
+        "SELECT id, variant_id, priority_rank, custom_name, eps_picture_url FROM listing_card_assignments "
         "WHERE template_id = %s AND status = 'queued' ORDER BY priority_rank ASC",
         (template["id"],),
     )
@@ -309,6 +321,15 @@ def _do_promotions(cur, template, platform: str, listing_id: str, account_num: i
             pending_writes.extend(writes)
             p(f"    [PROMOTE] {meta['external_id']} (sold out) -> {promotion['external_id']!r} "
               f"at position {promotion['position'] if promotion['position'] is not None else 'end'}")
+
+    # Pictures are applied in a single pass here, after every
+    # add_variation_row()/mark_variation_deleted() call above has already
+    # happened for this whole batch — set_variation_picture() requires
+    # <Pictures> to land after every <Variation> element, and this
+    # function may have staged several promotions above.
+    for promotion in promotions:
+        if promotion["eps_picture_url"]:
+            set_variation_picture(variations, promotion["external_id"], promotion["eps_picture_url"])
 
     return promotions, pending_writes
 
@@ -489,7 +510,8 @@ def push_single_card_live(row_id: str, account_num: int = 1, platform: str = "eb
 
     with db_cursor() as cur:
         cur.execute(
-            "SELECT lca.id, lca.variant_id, lca.status, lca.custom_name, lt.platform, lt.listing_id "
+            "SELECT lca.id, lca.variant_id, lca.status, lca.custom_name, lca.eps_picture_url, "
+            "lt.platform, lt.listing_id "
             "FROM listing_card_assignments lca "
             "JOIN listing_templates lt ON lt.id = lca.template_id "
             "WHERE lca.id = %s",
@@ -548,10 +570,13 @@ def push_single_card_live(row_id: str, account_num: int = 1, platform: str = "eb
 
         promotion, pending_writes = _stage_promotion(
             cur, template, row_platform, listing_id,
-            {"id": row_id, "variant_id": roster_row["variant_id"], "custom_name": roster_row["custom_name"]},
+            {"id": row_id, "variant_id": roster_row["variant_id"], "custom_name": roster_row["custom_name"],
+             "eps_picture_url": roster_row["eps_picture_url"]},
             promoted_resolved, variations, specific_name,
             template.get("display_sort") or "card_number", account,
         )
+        if promotion["eps_picture_url"]:
+            set_variation_picture(variations, promotion["external_id"], promotion["eps_picture_url"])
 
         if dry_run:
             p(f"[DRY-RUN] would push {promotion['external_id']!r} live on {listing_id}: "
@@ -652,3 +677,54 @@ def remove_single_card_live(row_id: str, account_num: int = 1, platform: str = "
 
         p(f"[{listing_id}] removed {external_id!r} — roster row back to 'queued'")
         return {"row_id": row_id, "external_id": external_id, "removed": True, "dry_run": False}
+
+
+def stage_card_picture(row_id: str, source_url: str = None, image_bytes: bytes = None,
+                        filename: str = None, account_num: int = 1, quiet: bool = False) -> dict:
+    """
+    Uploads a picture to eBay's EPS right now and stores the resulting
+    hosted URL on a QUEUED roster row (listing_card_assignments.
+    eps_picture_url) — nothing changes on the live listing yet, since a
+    queued card has no live variation to attach a picture to. The staged
+    URL rides along automatically the next time this row actually gets
+    pushed live (push_single_card_live, or the general push's promotion
+    path) — see set_variation_picture() in ebay_variations_xml.py.
+
+    Pass either `source_url` (fetched, then uploaded) or
+    `image_bytes`+`filename` (uploaded directly, e.g. a browser file
+    upload) — not both. Only ever offered for queued rows: an
+    already-active row has nothing here to stage against (see
+    docs/plans/listing-pricing-system.md).
+    """
+    def p(msg):
+        if not quiet:
+            print(msg)
+
+    if not source_url and not image_bytes:
+        return {"row_id": row_id, "staged": False, "error": "must provide source_url or image_bytes"}
+
+    with db_cursor() as cur:
+        cur.execute("SELECT id, status FROM listing_card_assignments WHERE id = %s", (row_id,))
+        roster_row = cur.fetchone()
+        if roster_row is None:
+            return {"row_id": row_id, "staged": False, "error": "no such roster row"}
+        if roster_row["status"] != "queued":
+            return {"row_id": row_id, "staged": False,
+                     "error": f"row is {roster_row['status']!r}, not 'queued' — pictures can only be "
+                              f"staged for queued cards right now"}
+
+        try:
+            if source_url:
+                eps_url = upload_picture_from_url(source_url, account_num=account_num)
+            else:
+                eps_url = upload_picture_bytes(image_bytes, filename or "card.jpg", account_num=account_num)
+        except Exception as e:
+            return {"row_id": row_id, "staged": False, "error": f"EPS upload failed: {e}"}
+
+        cur.execute(
+            "UPDATE listing_card_assignments SET eps_picture_url = %s, updated_at = now() WHERE id = %s",
+            (eps_url, row_id),
+        )
+
+    p(f"Staged picture for row {row_id}: {eps_url}")
+    return {"row_id": row_id, "staged": True, "eps_picture_url": eps_url}

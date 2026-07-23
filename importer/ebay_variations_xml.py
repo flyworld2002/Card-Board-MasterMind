@@ -229,6 +229,52 @@ def insert_specifics_value(variations: ET.Element, specific_name: str,
 # Building the Revise request
 # ══════════════════════════════════════════════════════════════════════════════
 
+def set_variation_picture(variations: ET.Element, specific_value: str, picture_url: str) -> None:
+    """
+    Add or update the <VariationSpecificPictureSet> entry (inside
+    <Variations><Pictures>) for one VariationSpecificValue — `picture_url`
+    must already be an eBay-hosted URL (EPS's UploadSiteHostedPictures
+    FullURL, see importer/ebay_pictures.py) — eBay's Trading API does not
+    accept an arbitrary external URL here, only its own hosted ones.
+
+    Creates <Pictures> (and its <VariationSpecificName>, inferred from
+    VariationSpecificsSet) if the listing has no per-variation pictures
+    at all yet.
+
+    Callers MUST call this only AFTER every add_variation_row() call for
+    the current batch has already happened — both functions append to
+    `variations` in place, and <Pictures> needs to land after every
+    <Variation> element, never in between, or the revised XML is
+    malformed. (_do_promotions() in ebay_pushprices.py collects all
+    promotions first, then applies pictures in one pass at the end, for
+    exactly this reason.)
+    """
+    pictures_node = _find(variations, "Pictures")
+    if pictures_node is None:
+        pictures_node = ET.SubElement(variations, f"{{{NS}}}Pictures")
+
+    if _find(pictures_node, "VariationSpecificName") is None:
+        specifics_set = get_specifics_set(variations)
+        specific_name = next(iter(specifics_set), None)
+        if specific_name:
+            name_el = ET.SubElement(pictures_node, f"{{{NS}}}VariationSpecificName")
+            name_el.text = specific_name
+
+    for vsp in _findall(pictures_node, "VariationSpecificPictureSet"):
+        if _text(vsp, "VariationSpecificValue") == specific_value:
+            pic_url_el = _find(vsp, "PictureURL")
+            if pic_url_el is None:
+                pic_url_el = ET.SubElement(vsp, f"{{{NS}}}PictureURL")
+            pic_url_el.text = picture_url
+            return
+
+    vsp = ET.SubElement(pictures_node, f"{{{NS}}}VariationSpecificPictureSet")
+    val_el = ET.SubElement(vsp, f"{{{NS}}}VariationSpecificValue")
+    val_el.text = specific_value
+    pic_url_el = ET.SubElement(vsp, f"{{{NS}}}PictureURL")
+    pic_url_el.text = picture_url
+
+
 def build_revise_xml(item_id: str, variations: ET.Element,
                       call_name: str = "ReviseFixedPriceItem",
                       account_num: int = 1) -> str:
