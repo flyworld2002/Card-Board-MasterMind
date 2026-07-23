@@ -749,6 +749,41 @@ rows plus what the workflow is to get a card out of `queued`.
      every prior pass on this feature: no browser or eBay API access in
      this environment. Verified via `py_compile` (syntax only) and
      careful manual re-read; a real dry-run against a live listing is
-     the next verification step before trusting this against real data. Commit
+     the next verification step before trusting this against real data.
+
+### Manual market-price edit (2026-07-22, session 5)
+Fei asked for a way to edit market price directly on the Listing pricing
+page. First version wrote manual edits to a sentinel `condition='manual'`
+row in `market_prices`, isolated from `v_inventory` (Inventory tab) and
+every other consumer — Fei caught this immediately ("does it get
+reflected in the real table?") and confirmed the actual intent: a manual
+edit should BE the real market price everywhere, not a pricing-page-only
+override. Checked live data before redoing it: all 8,182 existing
+`market_prices` rows use `condition='Near Mint'`, no exceptions — no real
+per-variant condition ambiguity to resolve, so the fix is simple. Final
+migration 011: the web UI upserts directly into the variant's
+`condition='Near Mint'` row (`source='manual'`) — the exact same row
+`v_inventory` already reads via `mp.variant_id = i.variant_id AND
+mp.condition = i.condition`. `resolve_listing_prices()` needs no special
+casing for this at all (reverted the "prefer source='manual'" ordering
+from the first attempt) — a manual edit just becomes the newest row for
+that variant, which its existing "most recent updated_at" lookup already
+picks up naturally. Still exposes `market_price_source` (`mp.source`
+directly) so the UI can show a "manually set" badge. Clearing the input
+now deletes the row entirely (no separate "automatic" value to fall back
+to anymore) rather than reverting to something else.
+
+Verified with a rollback-only test against the real listing, checking
+BOTH `resolve_listing_prices()` and `v_inventory` in the same
+transaction: both showed the manually-set $8.88 before rollback,
+confirming it actually reaches the Inventory tab now, not just the
+pricing grid.
+
+Web UI: the "Market" column is now an editable input (previously plain
+text), writes to `market_prices` via `variant_id` + `condition='Near
+Mint'`, highlighted (purple border) when manually set. Confirmed
+`market_prices` already has proper RLS (predates the Listing Pricing
+System — "authenticated only" policy, same as everywhere else) — no gap
+to fix this time, unlike the 6 newer tables from earlier sessions. Commit
 message convention so far has been one commit per logical fix/feature,
 matching this doc's dated sections.
