@@ -41,7 +41,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from importer.ebay_picking import pull_picking
-from importer.ebay_pushprices import push_prices
+from importer.ebay_pushprices import push_prices, push_single_card_live
 
 load_dotenv()
 
@@ -69,9 +69,20 @@ _pull_lock = threading.Lock()
 # Separate lock for price pushes — unrelated to picking, shouldn't block on it.
 _push_prices_lock = threading.Lock()
 
+# Separate again from the general price push — a single-card push touches
+# one specific queued row and shouldn't queue behind a full-listing push
+# (or vice versa) any longer than it has to.
+_push_card_lock = threading.Lock()
+
 
 class PushPricesRequest(BaseModel):
     listing_id: str
+    account_num: int = 1
+    dry_run: bool = False
+
+
+class PushCardRequest(BaseModel):
+    row_id: str
     account_num: int = 1
     dry_run: bool = False
 
@@ -111,6 +122,26 @@ def push_prices_endpoint(body: PushPricesRequest, x_picking_token: str = Header(
             raise HTTPException(status_code=502, detail=f"push failed: {e}")
 
     return summary
+
+
+@app.post("/api/push-card")
+def push_card_endpoint(body: PushCardRequest, x_picking_token: str = Header(default="")):
+    """
+    Pushes ONE queued roster row (listing_card_assignments.id) live as a
+    brand-new variation on its listing — does not touch any other
+    variation's price/qty. Same auth as /api/push-prices, separate lock.
+    """
+    if x_picking_token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="bad token")
+
+    with _push_card_lock:
+        try:
+            result = push_single_card_live(row_id=body.row_id, account_num=body.account_num,
+                                            dry_run=body.dry_run, quiet=True)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"push failed: {e}")
+
+    return result
 
 
 @app.get("/api/picking/health")

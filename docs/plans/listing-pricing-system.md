@@ -696,8 +696,59 @@ rows plus what the workflow is to get a card out of `queued`.
      "single listing per card" roster scale if it means hundreds of
      `listing_card_assignments` rows per card? No action taken — revisit
      when it's actually needed.
-5. **Not yet built**: the per-card "Push live" action and the general
-   push's queued-row auto-promotion (item 3 above) — schema is ready,
-   the eBay-write code is next. Commit
+5. ✅ **Built**: both eBay-write features from item 3.
+   - **Real bug caught and fixed while building this**: the ORIGINAL
+     `_do_promotions()` executed its `INSERT`/`UPDATE` writes immediately
+     — even during `--dry-run`, and even before the actual eBay
+     `ReviseItem` call had happened at all. That meant a dry-run (or a
+     push whose later POST failed) would still leave the DB believing a
+     card had gone live, when eBay never received anything. Refactored
+     `_do_promotions()` and the new `_stage_promotion()` helper (factored
+     out, shared by both the general push and the new per-card push) to
+     only *mutate the in-memory XML* and return `(promotions,
+     pending_writes)` — the caller now only executes `pending_writes`
+     after a real, successful `ReviseItem` POST. The new
+     `platform_listings` row's id is generated client-side
+     (`uuid.uuid4()`) specifically so the INSERT + both dependent UPDATEs
+     can be pre-built as plain parameterized tuples without a `RETURNING`
+     round-trip forcing immediate execution. Also fixed a smaller latent
+     bug in the same pass: the original promotion INSERT never set
+     `pushed_price`/`pushed_qty`/`pushed_at`, so a just-promoted row would
+     immediately show as "stale, needs push" again on the very next page
+     load even though it had just been pushed — now set directly in the
+     INSERT.
+   - `_do_promotions()` now has two cases instead of one: **direct**
+     (active count under eBay's 250-variation cap — promote as many
+     queued rows as fit, no deletion needed) and **swap** (at cap — the
+     original one-for-one "delete a sold-out row, promote the next
+     queued row" logic). The old gate (`total_roster > 250`, counting
+     queued+active+sold_out_retained combined) was actually wrong for
+     the real constraint, which is the LIVE variation count — fixed to
+     check active count specifically.
+   - New `push_single_card_live(row_id, ...)` in `ebay_pushprices.py` —
+     pushes exactly one queued row live, refuses if the listing's live
+     variation count is already at 250 (with a clear error pointing at
+     the general push's swap logic instead), reuses `_stage_promotion`
+     so the two paths can never compute a promotion differently.
+   - CLI: `--ebay-push-card --row-id <uuid> [--account N] [--dry-run]
+     [--quiet]`, wired in `main.py`.
+   - API: new `POST /api/push-card` in `picking_api.py` (same token
+     auth as `/push-prices`, separate lock so a single-card push doesn't
+     queue behind a full-listing push or vice versa).
+   - Web UI: "Push live" button on each queued row (replaces the "n/a"
+     that used to sit in the Synced? column) — does a silent dry-run
+     first to show exact card/price/qty in the confirm dialog, then
+     pushes for real. General Push button now also does a silent
+     dry-run first specifically to build the count-aware confirm text
+     Fei asked for ("3 price/qty changes + 2 cards going live for the
+     first time"), and is no longer disabled just because there are zero
+     active-row price/qty changes — a queued row alone is now enough to
+     enable it (the exact promotable count isn't knowable client-side
+     without asking the Python side, which the pre-push dry-run does).
+   - **Not tested against live eBay** — same standing limitation as
+     every prior pass on this feature: no browser or eBay API access in
+     this environment. Verified via `py_compile` (syntax only) and
+     careful manual re-read; a real dry-run against a live listing is
+     the next verification step before trusting this against real data. Commit
 message convention so far has been one commit per logical fix/feature,
 matching this doc's dated sections.

@@ -22,6 +22,8 @@ ebay_listing_sync.py's _resolve_scope. Quantity gating: available_qty is
 reduced by low_stock_qty (floored at 0) before being sent.
 """
 
+import uuid
+
 from db.connection import db_cursor
 from importer.ebay_auth import get_account_name, get_user_token
 from importer.ebay import _post, _find, _findall
@@ -126,123 +128,181 @@ def _compute_roster_changes(cur, platform: str, listing_id: str):
     return resolved, changes, skipped_ungated
 
 
+def _stage_promotion(cur, template, platform: str, listing_id: str, promote, promoted_resolved,
+                      variations, specific_name: str, display_sort: str, account: str):
+    """
+    Mutates `variations` in-memory to add one new <Variation> row for
+    `promote` (a queued listing_card_assignments row — anything with
+    ["id"] and ["variant_id"]). Purely in-memory, always safe to call —
+    has no live effect until the caller actually POSTs the Revise call.
+
+    Returns (promotion, pending_writes). `pending_writes` is a list of
+    (sql, params) tuples the caller MUST NOT execute until AFTER a
+    successful live eBay Revise call — running them before that (e.g. for
+    --dry-run, or if the POST fails) would leave the DB believing a card
+    is live on eBay when it never actually was. The new platform_listings
+    row's id is generated client-side (uuid.uuid4()) specifically so the
+    INSERT + the two dependent UPDATEs can all be pre-built as plain
+    parameterized tuples and deferred as a unit, instead of needing a
+    RETURNING round-trip before the rest of the writes can be built.
+    """
+    promoted_name = _render_variation_name(cur, promote["variant_id"], template["id"])
+    position = _compute_insert_position(cur, variations, specific_name, listing_id,
+                                         promote["variant_id"], display_sort)
+    insert_specifics_value(variations, specific_name, promoted_name, position=position)
+
+    resolved_price = float(promoted_resolved["resolved_price"]) if promoted_resolved else 0.0
+    available = (promoted_resolved["available_qty"] or 0) if promoted_resolved else 0
+    low_stock = promoted_resolved["low_stock_qty"] if promoted_resolved else None
+    qty_limit = promoted_resolved["quantity_limit"] if promoted_resolved else None
+    qty_to_push = max(available - low_stock, 0) if low_stock is not None else available
+    if qty_limit is not None:
+        qty_to_push = min(qty_to_push, qty_limit)
+
+    add_variation_row(variations, {specific_name: promoted_name}, quantity=qty_to_push,
+                       start_price=resolved_price)
+
+    new_platform_listing_id = str(uuid.uuid4())
+    pending_writes = [
+        (
+            """
+            INSERT INTO platform_listings
+                (id, platform, account, listing_id, external_id, variant_id, list_price,
+                 quantity_listed, status, sync_enabled, template_id, listed_at,
+                 pushed_price, pushed_qty, pushed_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'active', true, %s, now(), %s, %s, now())
+            """,
+            (new_platform_listing_id, platform, account, listing_id, promoted_name,
+             promote["variant_id"], resolved_price, qty_to_push, template["id"],
+             resolved_price, qty_to_push),
+        ),
+        (
+            "UPDATE listing_card_assignments SET status = 'active', platform_listing_id = %s, updated_at = now() "
+            "WHERE id = %s",
+            (new_platform_listing_id, promote["id"]),
+        ),
+    ]
+
+    promotion = {
+        "row_id": promote["id"],
+        "platform_listing_id": new_platform_listing_id,
+        "external_id": promoted_name,
+        "derived_label": promoted_resolved["derived_label"] if promoted_resolved else promoted_name,
+        "resolved_price": resolved_price,
+        "price_source": promoted_resolved["price_source"] if promoted_resolved else "default",
+        "qty_to_push": qty_to_push,
+        "position": position,
+    }
+    return promotion, pending_writes
+
+
 def _do_promotions(cur, template, platform: str, listing_id: str, account_num: int,
                     resolved: list, variations, quantity_sold_by_var: dict, quiet: bool):
     """
-    250-cap promotion: if the roster (all statuses) exceeds 250 and a live
-    'active' row is sold out (available_qty <= 0), delete its variation
-    and promote the highest-priority 'queued' row into the freed slot —
-    creates a NEW platform_listings row for it (inherits sync_enabled=true
-    since the listing it's joining is already being pushed) and updates
-    listing_card_assignments. Mutates `variations` in place. Returns a
-    list of "change"-shaped dicts for the newly promoted rows (to be
-    pushed in the same Revise call and stamped afterward), and the
-    account name to use for the new platform_listings rows.
+    Adds new <Variation> rows for queued cards, two cases:
+      1. Room under eBay's 250-variation cap (active count < 250):
+         promote directly, no deletion needed — can promote several
+         queued rows in the same call.
+      2. At cap (active count >= 250): free a slot by deleting a
+         sold-out active variation first, one-for-one swap (the original
+         250-cap holdback design).
+    Mutates `variations` in place (always safe — in-memory only). Returns
+    (promotions, pending_writes) — see _stage_promotion's docstring for
+    why pending_writes must only be executed after a successful live
+    Revise call, never for --dry-run.
     """
     def p(msg):
         if not quiet:
             print(msg)
 
     cur.execute(
-        "SELECT COUNT(*) AS n FROM listing_card_assignments WHERE template_id = %s",
-        (template["id"],),
-    )
-    total_roster = cur.fetchone()["n"]
-    if total_roster <= 250:
-        return []
-
-    cur.execute(
         "SELECT id, variant_id, priority_rank FROM listing_card_assignments "
         "WHERE template_id = %s AND status = 'queued' ORDER BY priority_rank ASC",
         (template["id"],),
     )
-    queued = cur.fetchall()
+    queued = list(cur.fetchall())
     if not queued:
-        return []
-    queued = list(queued)
+        return [], []
 
     resolved_by_row_id = {r["row_id"]: r for r in resolved}
-    active_rows_sql = [r for r in resolved if r["status"] == "active" and r["platform_listing_id"]]
-
-    cur.execute(
-        "SELECT id, external_id, account FROM platform_listings WHERE id = ANY(%s::uuid[])",
-        ([str(r["platform_listing_id"]) for r in active_rows_sql],),
-    )
-    listing_meta = {r["id"]: r for r in cur.fetchall()}
-
     specifics_set = get_specifics_set(variations)
     specific_name = next(iter(specifics_set), None)
+    if specific_name is None:
+        return [], []
     display_sort = template.get("display_sort") or "card_number"
 
     promotions = []
-    for r in active_rows_sql:
-        if not queued:
-            break
-        if (r["available_qty"] or 0) > 0:
-            continue  # not sold out, never delete a row with stock
+    pending_writes = []
 
-        meta = listing_meta.get(r["platform_listing_id"])
-        if not meta or specific_name is None:
-            continue
-        var_el = find_variation_by_specifics(variations, specific_name, meta["external_id"])
-        if var_el is None:
-            continue
-
-        promote = queued.pop(0)
-        mark_variation_deleted(var_el)
-
-        promoted_name = _render_variation_name(cur, promote["variant_id"], template["id"])
-        position = _compute_insert_position(cur, variations, specific_name, listing_id,
-                                             promote["variant_id"], display_sort)
-        insert_specifics_value(variations, specific_name, promoted_name, position=position)
-
-        promoted_resolved = resolved_by_row_id.get(promote["id"])
-        resolved_price = float(promoted_resolved["resolved_price"]) if promoted_resolved else 0.0
-        available = (promoted_resolved["available_qty"] or 0) if promoted_resolved else 0
-        low_stock = promoted_resolved["low_stock_qty"] if promoted_resolved else None
-        qty_limit = promoted_resolved["quantity_limit"] if promoted_resolved else None
-        qty_to_push = max(available - low_stock, 0) if low_stock is not None else available
-        if qty_limit is not None:
-            qty_to_push = min(qty_to_push, qty_limit)
-
-        add_variation_row(variations, {specific_name: promoted_name}, quantity=qty_to_push,
-                           start_price=resolved_price)
-
+    # Case 1: direct promotion — room under the cap, no deletion needed.
+    active_count = sum(1 for r in resolved if r["status"] == "active")
+    room = max(250 - active_count, 0)
+    if room > 0 and queued:
         cur.execute(
-            """
-            INSERT INTO platform_listings
-                (platform, account, listing_id, external_id, variant_id, list_price,
-                 quantity_listed, status, sync_enabled, template_id, listed_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, 'active', true, %s, now())
-            RETURNING id
-            """,
-            (platform, meta["account"], listing_id, promoted_name, promote["variant_id"],
-             resolved_price, qty_to_push, template["id"]),
+            "SELECT DISTINCT account FROM platform_listings "
+            "WHERE platform = %s AND listing_id = %s AND account IS NOT NULL LIMIT 1",
+            (platform, listing_id),
         )
-        new_platform_listing_id = cur.fetchone()["id"]
+        acct_row = cur.fetchone()
+        account = acct_row["account"] if acct_row else None
 
+        while queued and room > 0:
+            promote = queued.pop(0)
+            promoted_resolved = resolved_by_row_id.get(promote["id"])
+            if promoted_resolved is None:
+                continue
+            promotion, writes = _stage_promotion(
+                cur, template, platform, listing_id, promote, promoted_resolved,
+                variations, specific_name, display_sort, account,
+            )
+            promotions.append(promotion)
+            pending_writes.extend(writes)
+            room -= 1
+            p(f"    [PROMOTE] (free slot) -> {promotion['external_id']!r} "
+              f"at position {promotion['position'] if promotion['position'] is not None else 'end'}")
+
+    # Case 2: at cap — free a slot by deleting a sold-out active variation.
+    if queued:
+        active_rows_sql = [r for r in resolved if r["status"] == "active" and r["platform_listing_id"]]
         cur.execute(
-            "UPDATE listing_card_assignments SET status = 'sold_out_retained', updated_at = now() WHERE id = %s",
-            (r["row_id"],),
+            "SELECT id, external_id, account FROM platform_listings WHERE id = ANY(%s::uuid[])",
+            ([str(r["platform_listing_id"]) for r in active_rows_sql],),
         )
-        cur.execute(
-            "UPDATE listing_card_assignments SET status = 'active', platform_listing_id = %s, updated_at = now() "
-            "WHERE id = %s",
-            (new_platform_listing_id, promote["id"]),
-        )
+        listing_meta = {r["id"]: r for r in cur.fetchall()}
 
-        promotions.append({
-            "row_id": promote["id"],
-            "platform_listing_id": new_platform_listing_id,
-            "external_id": promoted_name,
-            "derived_label": promoted_resolved["derived_label"] if promoted_resolved else promoted_name,
-            "resolved_price": resolved_price,
-            "price_source": promoted_resolved["price_source"] if promoted_resolved else "default",
-            "qty_to_push": qty_to_push,
-        })
-        p(f"    [PROMOTE] {meta['external_id']} (sold out) -> {promoted_name!r} at position {position if position is not None else 'end'}")
+        for r in active_rows_sql:
+            if not queued:
+                break
+            if (r["available_qty"] or 0) > 0:
+                continue  # not sold out, never delete a row with stock
 
-    return promotions
+            meta = listing_meta.get(r["platform_listing_id"])
+            if not meta:
+                continue
+            var_el = find_variation_by_specifics(variations, specific_name, meta["external_id"])
+            if var_el is None:
+                continue
+
+            promote = queued.pop(0)
+            promoted_resolved = resolved_by_row_id.get(promote["id"])
+            if promoted_resolved is None:
+                continue
+
+            mark_variation_deleted(var_el)
+            promotion, writes = _stage_promotion(
+                cur, template, platform, listing_id, promote, promoted_resolved,
+                variations, specific_name, display_sort, meta["account"],
+            )
+            promotions.append(promotion)
+            pending_writes.append((
+                "UPDATE listing_card_assignments SET status = 'sold_out_retained', updated_at = now() WHERE id = %s",
+                (r["row_id"],),
+            ))
+            pending_writes.extend(writes)
+            p(f"    [PROMOTE] {meta['external_id']} (sold out) -> {promotion['external_id']!r} "
+              f"at position {promotion['position'] if promotion['position'] is not None else 'end'}")
+
+    return promotions, pending_writes
 
 
 def push_prices(listing_id: str, account_num: int = 1, platform: str = "ebay",
@@ -262,12 +322,12 @@ def push_prices(listing_id: str, account_num: int = 1, platform: str = "ebay",
         if template is None:
             print(f"No listing_templates row for {platform} listing {listing_id} — "
                   f"create one (set its listing_id) before pushing.")
-            return {"listing_id": listing_id, "resolved": 0, "changed": 0, "pushed": 0,
+            return {"listing_id": listing_id, "resolved": 0, "changed": 0, "pushed": 0, "promoted": 0,
                     "warnings": ["no template for this listing_id"], "dry_run": dry_run}
 
         resolved, changes, skipped_ungated = _compute_roster_changes(cur, platform, listing_id)
         summary = {"listing_id": listing_id, "resolved": len(resolved), "changed": len(changes),
-                   "pushed": 0, "warnings": [], "dry_run": dry_run}
+                   "pushed": 0, "promoted": 0, "warnings": [], "dry_run": dry_run}
 
         if not resolved:
             p(f"No roster (listing_card_assignments) rows found for {platform} listing {listing_id}.")
@@ -338,7 +398,7 @@ def push_prices(listing_id: str, account_num: int = 1, platform: str = "ebay",
         specifics_set = get_specifics_set(variations)
         specific_name = next(iter(specifics_set), None)
 
-        pushed = []
+        changes_pushed = []
         for change in changes:
             if specific_name is None or not change["external_id"]:
                 msg = f"{change['derived_label']}: no specifics name / external_id, skipping"
@@ -355,17 +415,24 @@ def push_prices(listing_id: str, account_num: int = 1, platform: str = "ebay",
             qty_sold = quantity_sold_by_var.get(id(var_el), 0)
             qty_to_set = qty_sold + change["qty_to_push"]
             set_variation_price_qty(var_el, start_price=change["resolved_price"], quantity=qty_to_set)
-            pushed.append(change)
+            changes_pushed.append(change)
             p(f"  {change['external_id']}: ${change['resolved_price']:.2f}, qty -> {qty_to_set} "
               f"(sold={qty_sold} + push={change['qty_to_push']}) [{change['price_source']}]")
 
-        promotions = _do_promotions(cur, template, platform, listing_id, account_num,
-                                     resolved, variations, quantity_sold_by_var, quiet)
-        pushed.extend(promotions)
+        # promotions' DB writes (pending_writes) are deferred — mutating
+        # `variations` here is always safe (in-memory only), but nothing
+        # about a promotion may be written to the DB until AFTER a real,
+        # successful eBay Revise call below. Doing it earlier (the
+        # previous implementation executed these immediately) meant
+        # --dry-run — or a POST that later failed — would still leave the
+        # DB believing a card had gone live when eBay never received it.
+        promotions, pending_writes = _do_promotions(cur, template, platform, listing_id, account_num,
+                                                      resolved, variations, quantity_sold_by_var, quiet)
         for promo in promotions:
             p(f"  {promo['external_id']}: ${promo['resolved_price']:.2f}, qty -> {promo['qty_to_push']} "
               f"(newly promoted) [{promo['price_source']}]")
 
+        pushed = changes_pushed + promotions
         if not pushed:
             p(f"[{listing_id}] {len(changes)} change(s) computed, but none matched a live variation "
               f"and no promotions triggered — nothing pushed.")
@@ -375,17 +442,120 @@ def push_prices(listing_id: str, account_num: int = 1, platform: str = "ebay",
             p(f"[DRY-RUN] would push {len(pushed)} of {len(resolved)} row(s) to {listing_id} "
               f"({len(promotions)} via 250-cap promotion) — not re-sending all {len(resolved)}")
             summary["pushed"] = len(pushed)
+            summary["promoted"] = len(promotions)
             return summary
 
         xml = build_revise_xml(listing_id, variations, "ReviseFixedPriceItem", account_num=account_num)
         _post("ReviseFixedPriceItem", xml, account_num=account_num)
 
-        for change in pushed:
+        for change in changes_pushed:
             cur.execute(
                 "UPDATE platform_listings SET pushed_price = %s, pushed_qty = %s, pushed_at = now() WHERE id = %s",
                 (change["resolved_price"], change["qty_to_push"], change["platform_listing_id"]),
             )
+        for sql, params in pending_writes:
+            cur.execute(sql, params)
 
         summary["pushed"] = len(pushed)
+        summary["promoted"] = len(promotions)
         p(f"[{listing_id}] pushed {len(pushed)} of {len(resolved)} row(s) ({len(promotions)} promoted).")
         return summary
+
+
+def push_single_card_live(row_id: str, account_num: int = 1, platform: str = "ebay",
+                           dry_run: bool = False, quiet: bool = False) -> dict:
+    """
+    Pushes ONE queued roster row live as a brand-new <Variation> on its
+    listing — reuses _stage_promotion, the same helper push_prices()'s
+    250-cap promotion uses, so the two paths can never diverge in how a
+    promoted row is priced/quantified or written to the DB. Deliberately
+    separate from push_prices()'s general diff-and-push flow: this is an
+    explicit, single-card action a user chooses to take right now, not a
+    scheduled sync, and it must NOT touch any other variation's price or
+    quantity on the live listing — only the deep-copied <Variations> tree
+    is mutated, and only to append one new row.
+    """
+    def p(msg):
+        if not quiet:
+            print(msg)
+
+    with db_cursor() as cur:
+        cur.execute(
+            "SELECT lca.id, lca.variant_id, lca.status, lt.platform, lt.listing_id "
+            "FROM listing_card_assignments lca "
+            "JOIN listing_templates lt ON lt.id = lca.template_id "
+            "WHERE lca.id = %s",
+            (row_id,),
+        )
+        roster_row = cur.fetchone()
+        if roster_row is None:
+            return {"row_id": row_id, "pushed": False, "dry_run": dry_run, "error": "no such roster row"}
+        if roster_row["status"] != "queued":
+            return {"row_id": row_id, "pushed": False, "dry_run": dry_run,
+                     "error": f"row is {roster_row['status']!r}, not 'queued' — nothing to push live"}
+
+        listing_id = roster_row["listing_id"]
+        row_platform = roster_row["platform"]
+        template = _resolve_template(cur, row_platform, listing_id)
+        if template is None:
+            return {"row_id": row_id, "pushed": False, "dry_run": dry_run,
+                     "error": f"no listing_templates row for {row_platform} listing {listing_id}"}
+
+        cur.execute("SELECT * FROM resolve_listing_prices(%s, %s)", (row_platform, listing_id))
+        resolved_by_row_id = {r["row_id"]: r for r in cur.fetchall()}
+        promoted_resolved = resolved_by_row_id.get(row_id)
+        if promoted_resolved is None:
+            return {"row_id": row_id, "pushed": False, "dry_run": dry_run,
+                     "error": "row not found in resolve_listing_prices() output"}
+
+        item = fetch_item(listing_id, account_num=account_num)
+        variations_node = _find(item, "Variations")
+        if variations_node is None:
+            return {"row_id": row_id, "pushed": False, "dry_run": dry_run,
+                     "error": "live listing has no <Variations> block — not a multi-variation listing"}
+
+        variations = deep_copy_variations(item)
+        strip_selling_status(variations)
+
+        live_variation_count = len(_findall(variations, "Variation"))
+        if live_variation_count >= 250:
+            return {"row_id": row_id, "pushed": False, "dry_run": dry_run,
+                     "error": f"listing already has {live_variation_count} live variations "
+                              f"(eBay's hard cap is 250) — free a slot first, e.g. via the general "
+                              f"Push button, which swaps out a sold-out row"}
+
+        specifics_set = get_specifics_set(variations)
+        specific_name = next(iter(specifics_set), None)
+        if specific_name is None:
+            return {"row_id": row_id, "pushed": False, "dry_run": dry_run,
+                     "error": "listing has no VariationSpecificsSet to add a value to"}
+
+        cur.execute(
+            "SELECT DISTINCT account FROM platform_listings "
+            "WHERE platform = %s AND listing_id = %s AND account IS NOT NULL LIMIT 1",
+            (row_platform, listing_id),
+        )
+        acct_row = cur.fetchone()
+        account = acct_row["account"] if acct_row else None
+
+        promotion, pending_writes = _stage_promotion(
+            cur, template, row_platform, listing_id,
+            {"id": row_id, "variant_id": roster_row["variant_id"]},
+            promoted_resolved, variations, specific_name,
+            template.get("display_sort") or "card_number", account,
+        )
+
+        if dry_run:
+            p(f"[DRY-RUN] would push {promotion['external_id']!r} live on {listing_id}: "
+              f"${promotion['resolved_price']:.2f}, qty {promotion['qty_to_push']}")
+            return {**promotion, "pushed": False, "dry_run": True}
+
+        xml = build_revise_xml(listing_id, variations, "ReviseFixedPriceItem", account_num=account_num)
+        _post("ReviseFixedPriceItem", xml, account_num=account_num)
+
+        for sql, params in pending_writes:
+            cur.execute(sql, params)
+
+        p(f"[{listing_id}] pushed {promotion['external_id']!r} live: "
+          f"${promotion['resolved_price']:.2f}, qty {promotion['qty_to_push']}")
+        return {**promotion, "pushed": True, "dry_run": False}

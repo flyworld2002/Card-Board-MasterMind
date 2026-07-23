@@ -286,6 +286,15 @@ def cmd_ebay_pushprices(args):
     push_prices(listing_id=args.listing_id, account_num=args.account,
                 dry_run=args.dry_run, quiet=args.quiet)
 
+def cmd_ebay_push_card(args):
+    from importer.ebay_pushprices import push_single_card_live
+    if not args.row_id:
+        raise SystemExit("--ebay-push-card requires --row-id")
+    result = push_single_card_live(row_id=args.row_id, account_num=args.account,
+                                    dry_run=args.dry_run, quiet=args.quiet)
+    if result.get("error"):
+        raise SystemExit(f"--ebay-push-card failed: {result['error']}")
+
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main():
@@ -370,6 +379,11 @@ def main():
              "docs/plans/listing-pricing-system.md. Requires --listing-id. "
              "Only sends variations that actually changed since the last push, "
              "and handles 250-cap variation promotion. Use --dry-run to preview.")
+    group.add_argument("--ebay-push-card", action="store_true",
+        help="Push ONE queued roster row live as a brand-new variation on its "
+             "listing — does not touch any other variation's price/qty. "
+             "Requires --row-id (listing_card_assignments.id). Use --dry-run "
+             "to preview. See docs/plans/listing-pricing-system.md.")
 
     # ── Shared optional flags ─────────────────────────────────────────────────
     parser.add_argument("--dry-run", action="store_true",
@@ -426,6 +440,9 @@ def main():
         help="Bypass the never-lower price guard (for --ebay-recalc-prices).")
     parser.add_argument("--listing-id", metavar="ITEM_ID",
         help="eBay ItemID to push (for --ebay-pushprices).")
+    parser.add_argument("--row-id", metavar="UUID",
+        help="listing_card_assignments.id of the queued roster row to push live "
+             "(for --ebay-push-card).")
 
     args = parser.parse_args()
 
@@ -475,5 +492,7 @@ def main():
         cmd_ebay_recalc_prices(args)
     elif args.ebay_pushprices:
         cmd_ebay_pushprices(args)
+    elif args.ebay_push_card:
+        cmd_ebay_push_card(args)
 if __name__ == "__main__":
     main()
