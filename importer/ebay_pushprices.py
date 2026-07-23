@@ -559,3 +559,88 @@ def push_single_card_live(row_id: str, account_num: int = 1, platform: str = "eb
         p(f"[{listing_id}] pushed {promotion['external_id']!r} live: "
           f"${promotion['resolved_price']:.2f}, qty {promotion['qty_to_push']}")
         return {**promotion, "pushed": True, "dry_run": False}
+
+
+def remove_single_card_live(row_id: str, account_num: int = 1, platform: str = "ebay",
+                             dry_run: bool = False, quiet: bool = False) -> dict:
+    """
+    Pulls ONE active roster row's variation off its live eBay listing —
+    the reverse of push_single_card_live(). Deletes only that one
+    <Variation> (via mark_variation_deleted, same helper the general
+    push's 250-cap swap uses to free a slot) — every other variation's
+    XML is untouched. On success the roster row goes back to 'queued'
+    (platform_listing_id cleared) rather than being deleted outright, so
+    it can be pushed live again later with no extra setup; the old
+    platform_listings row is kept as history (status='delisted',
+    sync_enabled=false) instead of deleted.
+    """
+    def p(msg):
+        if not quiet:
+            print(msg)
+
+    with db_cursor() as cur:
+        cur.execute(
+            "SELECT lca.id, lca.platform_listing_id, lca.status, lt.platform, lt.listing_id "
+            "FROM listing_card_assignments lca "
+            "JOIN listing_templates lt ON lt.id = lca.template_id "
+            "WHERE lca.id = %s",
+            (row_id,),
+        )
+        roster_row = cur.fetchone()
+        if roster_row is None:
+            return {"row_id": row_id, "removed": False, "dry_run": dry_run, "error": "no such roster row"}
+        if roster_row["status"] != "active" or not roster_row["platform_listing_id"]:
+            return {"row_id": row_id, "removed": False, "dry_run": dry_run,
+                     "error": f"row is {roster_row['status']!r}, not 'active' — nothing live to remove"}
+
+        listing_id = roster_row["listing_id"]
+        row_platform = roster_row["platform"]
+        old_platform_listing_id = roster_row["platform_listing_id"]
+
+        cur.execute(
+            "SELECT external_id FROM platform_listings WHERE id = %s",
+            (old_platform_listing_id,),
+        )
+        pl_row = cur.fetchone()
+        if pl_row is None or not pl_row["external_id"]:
+            return {"row_id": row_id, "removed": False, "dry_run": dry_run,
+                     "error": "no external_id on the platform_listings row — can't locate the live variation"}
+        external_id = pl_row["external_id"]
+
+        item = fetch_item(listing_id, account_num=account_num)
+        variations_node = _find(item, "Variations")
+        if variations_node is None:
+            return {"row_id": row_id, "removed": False, "dry_run": dry_run,
+                     "error": "live listing has no <Variations> block — not a multi-variation listing"}
+
+        variations = deep_copy_variations(item)
+        strip_selling_status(variations)
+
+        specifics_set = get_specifics_set(variations)
+        specific_name = next(iter(specifics_set), None)
+        var_el = find_variation_by_specifics(variations, specific_name, external_id) if specific_name else None
+        if var_el is None:
+            return {"row_id": row_id, "removed": False, "dry_run": dry_run,
+                     "error": f"variation {external_id!r} not found live — mismatch, needs manual reconcile in Seller Hub"}
+
+        mark_variation_deleted(var_el)
+
+        if dry_run:
+            p(f"[DRY-RUN] would remove {external_id!r} from {listing_id} — roster row goes back to 'queued'")
+            return {"row_id": row_id, "external_id": external_id, "removed": False, "dry_run": True}
+
+        xml = build_revise_xml(listing_id, variations, "ReviseFixedPriceItem", account_num=account_num)
+        _post("ReviseFixedPriceItem", xml, account_num=account_num)
+
+        cur.execute(
+            "UPDATE platform_listings SET status = 'delisted', sync_enabled = false WHERE id = %s",
+            (old_platform_listing_id,),
+        )
+        cur.execute(
+            "UPDATE listing_card_assignments SET status = 'queued', platform_listing_id = NULL, updated_at = now() "
+            "WHERE id = %s",
+            (row_id,),
+        )
+
+        p(f"[{listing_id}] removed {external_id!r} — roster row back to 'queued'")
+        return {"row_id": row_id, "external_id": external_id, "removed": True, "dry_run": False}

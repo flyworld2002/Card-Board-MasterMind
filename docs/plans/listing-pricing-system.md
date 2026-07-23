@@ -784,6 +784,39 @@ text), writes to `market_prices` via `variant_id` + `condition='Near
 Mint'`, highlighted (purple border) when manually set. Confirmed
 `market_prices` already has proper RLS (predates the Listing Pricing
 System — "authenticated only" policy, same as everywhere else) — no gap
-to fix this time, unlike the 6 newer tables from earlier sessions. Commit
+to fix this time, unlike the 6 newer tables from earlier sessions.
+
+### Remove-from-listing + permanent roster removal (2026-07-22, session 5)
+Fei asked for the reverse of "Push live" — pulling one card's variation
+off a live listing. Two distinct actions, confirmed explicitly ("go back
+to queue, until I permanently remove it from roster"):
+- **Remove from listing** (active → queued): `remove_single_card_live()`
+  in `ebay_pushprices.py`, the mirror image of `push_single_card_live()`
+  — deletes only that one `<Variation>` (`mark_variation_deleted`, the
+  same helper the 250-cap swap already uses), touches nothing else on
+  the live listing. On success the roster row goes back to `'queued'`
+  (`platform_listing_id` cleared) rather than being deleted, so it can be
+  pushed live again later with zero extra setup — the old
+  `platform_listings` row is kept as history (`status='delisted',
+  sync_enabled=false`) instead of deleted. CLI: `--ebay-remove-card
+  --row-id <uuid>`. API: `POST /api/remove-card` (own lock, same auth).
+- **Remove from roster** (permanent): plain `DELETE` on
+  `listing_card_assignments`, client-side, no eBay call — deliberately
+  only ever offered for `'queued'`/`'sold_out_retained'` rows, never
+  `'active'`, so a live eBay variation can never end up with no roster
+  row tracking it (which would silently stop it from ever being priced
+  or synced again). An active row has to go through "Remove from
+  listing" first.
+
+Web UI: added a dedicated "Actions" column (previously the "Push live"
+button lived awkwardly in the Synced? column, which now just shows
+plain yes/no/n/a again). Active rows get a "Remove" button; queued rows
+get both "Push live" and "Remove from roster"; sold_out_retained rows
+get only "Remove from roster" (nothing left to push live for that
+specific row — it's a historical record of a card that already got
+swapped out).
+
+Not tested against live eBay — same standing limitation as every other
+piece of this feature. Commit
 message convention so far has been one commit per logical fix/feature,
 matching this doc's dated sections.

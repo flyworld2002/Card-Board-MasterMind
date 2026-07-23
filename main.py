@@ -295,6 +295,15 @@ def cmd_ebay_push_card(args):
     if result.get("error"):
         raise SystemExit(f"--ebay-push-card failed: {result['error']}")
 
+def cmd_ebay_remove_card(args):
+    from importer.ebay_pushprices import remove_single_card_live
+    if not args.row_id:
+        raise SystemExit("--ebay-remove-card requires --row-id")
+    result = remove_single_card_live(row_id=args.row_id, account_num=args.account,
+                                      dry_run=args.dry_run, quiet=args.quiet)
+    if result.get("error"):
+        raise SystemExit(f"--ebay-remove-card failed: {result['error']}")
+
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main():
@@ -384,6 +393,12 @@ def main():
              "listing — does not touch any other variation's price/qty. "
              "Requires --row-id (listing_card_assignments.id). Use --dry-run "
              "to preview. See docs/plans/listing-pricing-system.md.")
+    group.add_argument("--ebay-remove-card", action="store_true",
+        help="Pull ONE active roster row's variation off its live listing — "
+             "does not touch any other variation's price/qty. Roster row goes "
+             "back to 'queued', can be pushed live again later. Requires "
+             "--row-id. Use --dry-run to preview. See "
+             "docs/plans/listing-pricing-system.md.")
 
     # ── Shared optional flags ─────────────────────────────────────────────────
     parser.add_argument("--dry-run", action="store_true",
@@ -441,8 +456,8 @@ def main():
     parser.add_argument("--listing-id", metavar="ITEM_ID",
         help="eBay ItemID to push (for --ebay-pushprices).")
     parser.add_argument("--row-id", metavar="UUID",
-        help="listing_card_assignments.id of the queued roster row to push live "
-             "(for --ebay-push-card).")
+        help="listing_card_assignments.id of the roster row to act on "
+             "(for --ebay-push-card / --ebay-remove-card).")
 
     args = parser.parse_args()
 
@@ -494,5 +509,7 @@ def main():
         cmd_ebay_pushprices(args)
     elif args.ebay_push_card:
         cmd_ebay_push_card(args)
+    elif args.ebay_remove_card:
+        cmd_ebay_remove_card(args)
 if __name__ == "__main__":
     main()

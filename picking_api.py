@@ -41,7 +41,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from importer.ebay_picking import pull_picking
-from importer.ebay_pushprices import push_prices, push_single_card_live
+from importer.ebay_pushprices import push_prices, push_single_card_live, remove_single_card_live
 
 load_dotenv()
 
@@ -74,6 +74,10 @@ _push_prices_lock = threading.Lock()
 # (or vice versa) any longer than it has to.
 _push_card_lock = threading.Lock()
 
+# Same reasoning as _push_card_lock — remove is its own action, shouldn't
+# queue behind a push and vice versa.
+_remove_card_lock = threading.Lock()
+
 
 class PushPricesRequest(BaseModel):
     listing_id: str
@@ -82,6 +86,12 @@ class PushPricesRequest(BaseModel):
 
 
 class PushCardRequest(BaseModel):
+    row_id: str
+    account_num: int = 1
+    dry_run: bool = False
+
+
+class RemoveCardRequest(BaseModel):
     row_id: str
     account_num: int = 1
     dry_run: bool = False
@@ -140,6 +150,26 @@ def push_card_endpoint(body: PushCardRequest, x_picking_token: str = Header(defa
                                             dry_run=body.dry_run, quiet=True)
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"push failed: {e}")
+
+    return result
+
+
+@app.post("/api/remove-card")
+def remove_card_endpoint(body: RemoveCardRequest, x_picking_token: str = Header(default="")):
+    """
+    Pulls ONE active roster row's variation off its live listing — the
+    reverse of /api/push-card. Roster row goes back to 'queued', not
+    deleted. Same auth as the other push/remove endpoints, own lock.
+    """
+    if x_picking_token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="bad token")
+
+    with _remove_card_lock:
+        try:
+            result = remove_single_card_live(row_id=body.row_id, account_num=body.account_num,
+                                              dry_run=body.dry_run, quiet=True)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"remove failed: {e}")
 
     return result
 
