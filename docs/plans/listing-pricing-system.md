@@ -575,6 +575,43 @@ RPC + UI, additive) → #2 pin half (needs the reset confirmation).
   column list — the new input would have always rendered blank even for a
   row with a pin set. Added it to the select.
 - No live browser/eBay test of the new UI (same standing limitation — no
-  JS runtime available in this environment). Commit
+  JS runtime available in this environment).
+
+### Four UI requests from a live screenshot review (2026-07-22, session 3)
+Fei reviewed the roster grid live (group `COM-IN-DoubleRare` on listing
+`336204674240`) and asked for four things:
+1. **Edit a profile's tiers without leaving the Listing pricing page** —
+   added an "Edit tiers" button next to the group's Profile picker
+   (only shown once a profile is assigned), opening a standalone modal
+   (`openEditTiersModal`) that mirrors Configuration's tier editor
+   (including the flat/formula toggle) rather than importing it — same
+   duplication convention already used for the inline "New profile" modal.
+2. **Card images, hover-to-enlarge** — migration 009 adds `image_url`
+   (`COALESCE(card_master.image_url_own, image_url)`) to
+   `resolve_listing_prices()`. Added a 40×56 thumbnail column and ported
+   picking.js's exact hover-zoom pattern (`img.card-thumb` + one shared
+   floating preview element cached on `window`).
+3. **Group-level select-all** — checkbox in each group's header (including
+   the "(no group)" bucket) that toggles every row checkbox within that
+   specific group's table, scoped via `.closest('.lp-group')` so it
+   doesn't touch other groups' selections.
+4. **Root cause of the "Common Holo" label on a Mega Evolution promo**:
+   `derived_label` (rarity + foil_type, e.g. "Common Holo") is a leftover
+   identity from the old auto-grouping design, where it doubled as a
+   row's whole identity. `rowHTML()` shows `platform_listings.external_id`
+   (the real eBay title) for `active` rows, but `queued` rows have no
+   `external_id` yet and were falling back to `derived_label` — reading as
+   flatly wrong once grouping became manual and every row is one specific
+   card. Migration 009 also adds `card_name`/`card_number` from
+   `card_master`; `rowHTML()` now shows `card_number card_name` (falling
+   back to `derived_label` only if a row somehow has no card identity),
+   with `derived_label` demoted to a small subtitle under it.
+   **Found something worth flagging while verifying this against the real
+   listing**: the queued row in question actually resolves to
+   **Charcadet #22** in `card_master`, not a Mega Evolution promo card —
+   and its `image_url` is `null` (no stock or own photo on file). Either
+   the wrong card got matched in "Add card to listing"'s search, or the
+   real promo variant isn't in the catalog yet — worth a manual check now
+   that the grid shows the real name instead of masking it as "Common Holo". Commit
 message convention so far has been one commit per logical fix/feature,
 matching this doc's dated sections.
