@@ -934,6 +934,18 @@ Built:
 - **Still deferred**: staging/immediately-revising a picture for an
   already-active row (Fei's explicit call — queued-only for now).
 
+### Duplicate listing template (2026-07-23, session 6)
+Fei asked for a "duplicate template" action, listing_id left blank
+(since the copy isn't tied to a real eBay listing yet). Confirmed scope:
+config only, no roster — reuses the existing template create/edit modal
+entirely (`openTemplateModal()` gained an optional `duplicateFromId`
+param that seeds every field from the source template except `name`
+(" (copy)" appended) and `listing_id` (forced blank), while still
+submitting through the normal INSERT path — no new modal, no new DB
+logic, `listing_card_groups`/`listing_card_assignments` untouched so the
+new template starts with a genuinely empty roster). "Duplicate" button
+added next to "Edit" in the templates list.
+
 **Real bug found immediately after Fei tested this live**: the "Import
 into roster" banner ("N existing platform_listings row(s) for this Item
 # aren't on the roster yet") counted ALL `platform_listings` rows for the
