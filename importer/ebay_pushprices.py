@@ -145,8 +145,16 @@ def _stage_promotion(cur, template, platform: str, listing_id: str, promote, pro
     INSERT + the two dependent UPDATEs can all be pre-built as plain
     parameterized tuples and deferred as a unit, instead of needing a
     RETURNING round-trip before the rest of the writes can be built.
+
+    If `promote` carries a non-null "custom_name" (listing_card_assignments.
+    custom_name — a per-card override, same pin pattern as manual_price
+    etc.), it's used verbatim instead of calling _render_variation_name()
+    at all — lets a card get an exact hand-typed eBay variation name
+    (e.g. matching a listing's alpha-sort word order, or promo wording
+    _render_variation_name() has no token for) instead of whatever the
+    format-string default would produce.
     """
-    promoted_name = _render_variation_name(cur, promote["variant_id"], template["id"])
+    promoted_name = promote.get("custom_name") or _render_variation_name(cur, promote["variant_id"], template["id"])
     position = _compute_insert_position(cur, variations, specific_name, listing_id,
                                          promote["variant_id"], display_sort)
     insert_specifics_value(variations, specific_name, promoted_name, position=position)
@@ -216,7 +224,7 @@ def _do_promotions(cur, template, platform: str, listing_id: str, account_num: i
             print(msg)
 
     cur.execute(
-        "SELECT id, variant_id, priority_rank FROM listing_card_assignments "
+        "SELECT id, variant_id, priority_rank, custom_name FROM listing_card_assignments "
         "WHERE template_id = %s AND status = 'queued' ORDER BY priority_rank ASC",
         (template["id"],),
     )
@@ -481,7 +489,7 @@ def push_single_card_live(row_id: str, account_num: int = 1, platform: str = "eb
 
     with db_cursor() as cur:
         cur.execute(
-            "SELECT lca.id, lca.variant_id, lca.status, lt.platform, lt.listing_id "
+            "SELECT lca.id, lca.variant_id, lca.status, lca.custom_name, lt.platform, lt.listing_id "
             "FROM listing_card_assignments lca "
             "JOIN listing_templates lt ON lt.id = lca.template_id "
             "WHERE lca.id = %s",
@@ -540,7 +548,7 @@ def push_single_card_live(row_id: str, account_num: int = 1, platform: str = "eb
 
         promotion, pending_writes = _stage_promotion(
             cur, template, row_platform, listing_id,
-            {"id": row_id, "variant_id": roster_row["variant_id"]},
+            {"id": row_id, "variant_id": roster_row["variant_id"], "custom_name": roster_row["custom_name"]},
             promoted_resolved, variations, specific_name,
             template.get("display_sort") or "card_number", account,
         )

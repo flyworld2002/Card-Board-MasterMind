@@ -497,7 +497,8 @@ def _humanize(value: str) -> str:
 def _render_variation_name(cur, variant_id: str, template_id: str = None) -> str:
     """Renders a card's display name for VariationSpecificsSet via the
     template's name_format (default if no template): tokens {number},
-    {number:pad}, {set_total} (= card_sets.total_cards), {name}, {suffix}.
+    {number:pad}, {set_total} (= card_sets.total_cards), {prefix} (=
+    card_sets.set_prefix, e.g. "MEP"/"SVP"), {name}, {suffix}.
 
     The suffix MUST distinguish foil_type — confirmed against real listings
     (e.g. item 334903449758): reverse-holo variants are always suffixed
@@ -506,10 +507,23 @@ def _render_variation_name(cur, variant_id: str, template_id: str = None) -> str
     the same RH-to-UR listing and need distinct VariationSpecificsSet
     values. Without this, two different variants of the same card could
     render to an identical name.
+
+    Promo sets typically carry a set_prefix but no total_cards (unlike a
+    numbered main set) — confirmed live: "Mega Evolution Black Star Promos"
+    (set_prefix='MEP') has total_cards=NULL, which the old numbered-only
+    default rendered as a broken "22/ Charcadet" (dangling slash, no
+    denominator). When a card's set has set_prefix but no total_cards and
+    no per-template name_format override exists, default to
+    "{prefix} {number} {name} {suffix}" instead — callers needing anything
+    more specific (e.g. literal "Black Star Promo" wording, or a different
+    word order for alpha-sorted listings) should set the template's
+    name_format explicitly, or use a per-card custom_name override
+    (listing_card_assignments.custom_name) at the call site instead of
+    relying on this function at all.
     """
     cur.execute(
         """
-        SELECT cm.name, cm.card_number, cs.total_cards,
+        SELECT cm.name, cm.card_number, cs.total_cards, cs.set_prefix,
                cv.foil_type, cv.foil_pattern, cv.stamp_type
         FROM card_variants cv
         JOIN card_master cm ON cv.card_id = cm.id
@@ -520,12 +534,27 @@ def _render_variation_name(cur, variant_id: str, template_id: str = None) -> str
     )
     row = cur.fetchone()
 
-    name_format = "{number}/{set_total} {name} {suffix}"
+    NUMBERED_DEFAULT = "{number}/{set_total} {name} {suffix}"
+
+    name_format = None
     if template_id:
         cur.execute("SELECT name_format FROM listing_templates WHERE id = %s", (template_id,))
         t = cur.fetchone()
         if t and t.get("name_format"):
             name_format = t["name_format"]
+
+    # Every template created via the web UI's form gets NUMBERED_DEFAULT
+    # written into name_format verbatim unless a user explicitly typed
+    # something else (confirmed live: all 3 real templates carry this
+    # exact string) — so it's never actually NULL in practice, and a
+    # plain "is None" check would never catch the promo case. Treat
+    # "still equal to the literal default" the same as "no override" —
+    # a genuine user customization (anything else) is always respected.
+    if name_format is None or name_format == NUMBERED_DEFAULT:
+        if row["set_prefix"] and not row["total_cards"]:
+            name_format = "{prefix} {number} {name} {suffix}"
+        else:
+            name_format = NUMBERED_DEFAULT
 
     suffix_parts = []
     if row["foil_pattern"]:
@@ -544,6 +573,7 @@ def _render_variation_name(cur, variant_id: str, template_id: str = None) -> str
         .replace("{number:pad}", padded)
         .replace("{number}", number)
         .replace("{set_total}", str(set_total) if set_total else "")
+        .replace("{prefix}", row["set_prefix"] or "")
         .replace("{name}", row["name"])
         .replace("{suffix}", suffix)
     ).strip()

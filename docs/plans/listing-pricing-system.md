@@ -819,6 +819,58 @@ swapped out).
 Not tested against live eBay — same standing limitation as every other
 piece of this feature.
 
+### Custom variation name + promo set-prefix fix (2026-07-22, session 5)
+Fei clarified the Charcadet #22 situation was never a wrong-card bug —
+it's a real, correctly-added promo card, intentionally bundled into the
+Mega Evolution base-set listing since it came with that product. The
+actual problem: the rendered eBay variation name was broken
+("22/ Charcadet" — dangling slash, no denominator), because
+`card_sets.set_prefix` (already correctly populated: `'MEP'` for Mega
+Evolution Black Star Promos, `'SVP'` for Scarlet & Violet Black Star
+Promos) was never read by `_render_variation_name()` at all — it only
+ever knew `{number}`, `{number:pad}`, `{set_total}`, `{name}`, `{suffix}`.
+Promo sets normally have a prefix but no `total_cards` (unlike numbered
+main sets), which is why the numbered format broke specifically for them.
+
+Two-part fix:
+1. **`_render_variation_name()`** (`ebay_listing_sync.py`): added a
+   `{prefix}` token, and defaults to `"{prefix} {number} {name}
+   {suffix}"` when a card's set has `set_prefix` but no `total_cards`.
+   **Caught a real bug while testing this against the live listing**: my
+   first attempt gated the promo-format switch on the template's
+   `name_format` being `NULL` — but confirmed live that all 3 existing
+   templates have `name_format` explicitly set to the literal string
+   `"{number}/{set_total} {name} {suffix}"` (the web UI's create/edit
+   form writes this exact default verbatim unless a user types something
+   else — never actually `NULL`), so the `NULL` check never fired.
+   Fixed by treating "still equal to that literal default string" the
+   same as "no override" — a genuine customization (anything else) is
+   still respected. Verified via a real `--ebay-push-card --dry-run`
+   against the live Charcadet row: went from `'22/ Charcadet'` to the
+   correct `'MEP 22 Charcadet'`.
+2. **`custom_name` column** (migration 012) on `listing_card_assignments`
+   — a genuine per-card override, same pin pattern as
+   `manual_price`/`low_stock_qty`/`quantity_limit`. Format-string tokens
+   can't cover every real convention Fei described (word order flips for
+   alpha-sorted listings, literal "Black Star Promo" wording that isn't
+   a computed value) — `custom_name`, when set, is used verbatim by
+   `_stage_promotion()` instead of calling `_render_variation_name()` at
+   all, so it's honored by both the per-card push and the general push's
+   promotion path identically. Exposed via `resolve_listing_prices()` as
+   a new raw passthrough output column (same convention as
+   `manual_price` etc.). Web UI: only queued rows show an editable
+   "custom name" input (in place of the plain label) — active rows keep
+   showing `platform_listings.external_id` as before, since renaming an
+   already-live variation is a separate, deliberate action
+   (`rename_variation.py`) outside this feature's scope.
+
+Where names are stored, for reference (came up mid-conversation): the
+format template lives in `listing_templates.name_format`; the source
+data (`card_master`, `card_sets`, `card_variants`) is read fresh every
+render, nothing cached; the final rendered name only persists once a
+card actually goes live, as `platform_listings.external_id`, set once at
+push/promotion time and treated as sticky afterward.
+
 **Real bug found immediately after Fei tested this live**: the "Import
 into roster" banner ("N existing platform_listings row(s) for this Item
 # aren't on the roster yet") counted ALL `platform_listings` rows for the
