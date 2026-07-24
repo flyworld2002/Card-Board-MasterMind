@@ -985,5 +985,19 @@ click deep behind "Edit" rather than promoting it to a direct list
 button — matches the extra-friction pattern used for other
 now-consequential actions this session.
 
+### Bulk sync enable/disable (2026-07-23, session 6)
+Came out of a "no response" report on the general Push button — turned
+out to be correct behavior, not a bug: every row on the listings Fei
+tested has `sync_enabled=false` (the staged-rollout kill switch from the
+original design), so nothing was gated in to push, and 0-changes reads
+as no visible response. Fei's ask in response: a way to bulk-toggle
+`sync_enabled` for a multi-selection. Added "Enable sync"/"Disable sync"
+buttons next to the existing "Assign selected to group" control, reusing
+the same `state.selected` set. `sync_enabled` lives on
+`platform_listings`, only meaningful for `'active'` rows (queued rows
+have no `platform_listings` row at all) — a mixed selection silently
+skips the queued ones rather than erroring, same tolerance the Push
+button already has for a mixed roster.
+
 Commit message convention so far has been one commit per logical
 fix/feature, matching this doc's dated sections.
