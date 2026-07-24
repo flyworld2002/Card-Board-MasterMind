@@ -1134,3 +1134,16 @@ aren't rendered in this table, so there's nothing to patch for them;
 the current listing's row is the only one that needed a rendered patch.
 The Cancel button no longer calls `loadListing()` at all — cancelling
 makes no changes, so there is nothing to refresh.
+
+### Duplicate pricing profile (2026-07-24, session 8)
+Added a "Duplicate" button next to Edit/Tiers on the pricing profiles
+table in the config page (`configuration.js`). Unlike duplicating a
+listing template — where the roster is deliberately left empty because
+it's large, specific per-card data — a duplicated pricing profile also
+copies every tier. Confirmed with Fei: tiers ARE a profile's actual
+pricing rules, so an empty duplicate would just fall back to the
+market×2+1 default and be useless as a starting point. `duplicateProfile()`
+inserts a new `pricing_profiles` row (name suffixed `(copy)`, auto-
+incrementing to `(copy 2)`, `(copy 3)`... if that name's already taken)
+with the same notes/default_low_stock_qty, then bulk-inserts copies of
+every row in `source.tiers` against the new profile's id.
