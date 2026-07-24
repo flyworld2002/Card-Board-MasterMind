@@ -43,6 +43,7 @@ from pydantic import BaseModel
 from importer.ebay_picking import pull_picking
 from importer.ebay_pushprices import (
     push_prices, push_single_card_live, remove_single_card_live, stage_card_picture,
+    revise_single_variation_qty,
 )
 
 load_dotenv()
@@ -84,6 +85,12 @@ _remove_card_lock = threading.Lock()
 # queue behind any of the other actions.
 _stage_picture_lock = threading.Lock()
 
+# Balance Qty fires several of these in a row (one per listing being
+# rebalanced) — its own lock so it doesn't contend with unrelated pushes,
+# but each individual revise call still serializes against any other
+# concurrent qty revision.
+_revise_qty_lock = threading.Lock()
+
 
 class PushPricesRequest(BaseModel):
     listing_id: str
@@ -107,6 +114,13 @@ class StagePictureRequest(BaseModel):
     row_id: str
     image_url: str
     account_num: int = 1
+
+
+class ReviseQtyRequest(BaseModel):
+    platform_listing_id: str
+    new_qty: int
+    account_num: int = 1
+    dry_run: bool = False
 
 
 @app.post("/api/picking/refresh")
@@ -233,6 +247,29 @@ async def stage_card_picture_file_endpoint(
                                          account_num=account_num, quiet=True)
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"picture upload failed: {e}")
+
+    return result
+
+
+@app.post("/api/revise-variation-qty")
+def revise_variation_qty_endpoint(body: ReviseQtyRequest, x_picking_token: str = Header(default="")):
+    """
+    Directly revises ONE existing live variation's quantity, no template
+    required — built for "Balance Qty" (redistributing a card's shared
+    inventory across every listing that currently offers it, including
+    ones never onboarded into a listing_templates row). Same auth as the
+    other endpoints, own lock.
+    """
+    if x_picking_token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="bad token")
+
+    with _revise_qty_lock:
+        try:
+            result = revise_single_variation_qty(platform_listing_id=body.platform_listing_id,
+                                                  new_qty=body.new_qty, account_num=body.account_num,
+                                                  dry_run=body.dry_run, quiet=True)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"revise failed: {e}")
 
     return result
 

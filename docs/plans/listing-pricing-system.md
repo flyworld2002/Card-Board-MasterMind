@@ -999,5 +999,74 @@ have no `platform_listings` row at all) — a mixed selection silently
 skips the queued ones rather than erroring, same tolerance the Push
 button already has for a mixed roster.
 
+### Available_qty didn't account for the same card being shared across listings (2026-07-24, session 7)
+Fei flagged this directly: "Available" was computed as pure total unsold
+inventory, with no awareness that the same card can be (and commonly
+is) listed on more than one eBay listing at once — eBay caps a single
+listing at 250 variations, so any set bigger than that gets split
+across several listings, all drawing on the same physical stock.
+Checked live before touching anything: confirmed widespread, not an
+edge case — many variants already sit active on 2-3 different
+`listing_id`s simultaneously. Every one of those listings was
+independently treating the full inventory count as available to it
+alone, meaning pushing quantity to more than one could push a combined
+total exceeding actual stock.
+
+Fix (migration 014): `available_qty` for the listing being resolved is
+now total unsold inventory **minus** `quantity_listed` already committed
+on *other* active `platform_listings` rows for the same variant (same
+platform, any other `listing_id`), floored at 0. Confirmed with Fei:
+counts ALL active listings regardless of `sync_enabled` — an ungated
+listing's quantity is still genuinely live on eBay right now,
+`sync_enabled` only gates whether *this* system keeps pushing further
+updates to it. Queued (not-yet-pushed) rows elsewhere don't count —
+nothing's actually claimed on eBay for those yet. This lives in
+`resolve_listing_prices()`, the single place both the web grid and every
+push path (`push_prices`, `push_single_card_live`, 250-cap promotion)
+get quantity from, so the fix applies everywhere at once.
+
+Verified against real shared data (not just a rollback test): variant
+`0070c079-...` has 24 in total inventory, split 12/12 across listing
+`336691613250` (no template) and `336691917730` (Pitch Black Common
+Listing, has a template). Before this fix, the Pitch Black listing would
+have shown 24 available (the full pool, ignoring the other listing's
+claim); confirmed live it now correctly returns 12 — the actual
+remaining amount, after accounting for what the other listing already
+has out. Regression-checked the Mega Evolution listing (140 rows,
+unaffected — no other listing shares those cards) to confirm the
+non-shared case is untouched.
+
+### Balance Qty across listings (2026-07-24, session 7)
+Direct follow-up to the shared-inventory fix: given a card is already
+fully claimed by one listing, how do you free some of it up for a new
+listing? Fei's spec: a modal showing every listing (including ones with
+no `listing_templates` row) that currently offers the card, an "evenly
+split" option, per-listing editable qty, and a trigger to revise each
+one on eBay directly.
+
+Confirmed the key technical question live before building: revising one
+existing variation's quantity needs nothing from the template/roster
+system — `platform_listings.listing_id` + `external_id` + `account` +
+`platform` is everything required to find the matching `<Variation>` and
+update `<Quantity>`. New `revise_single_variation_qty()`
+(`ebay_pushprices.py`) works identically for both cases; verified with
+real dry-runs against both listings from the earlier shared-inventory
+example (`336691917730`, which has a template, and `336691613250`, which
+has none) — same code path, same result. CLI:
+`--ebay-revise-qty --platform-listing-id <uuid> --qty <n>`. API:
+`POST /api/revise-variation-qty`.
+
+Web UI: a small "Balance" link next to the Available number (not the
+Actions column — it's tied to the exact number it explains, and applies
+regardless of row status) opens a modal that queries `platform_listings`
+directly for every active row sharing that `variant_id` (LEFT-JOIN-style
+lookup against `listing_templates` just for a display name, falling back
+to "(no template)"), shows total inventory, lets you evenly split or
+hand-edit each listing's quantity, blocks applying if the entered total
+exceeds actual stock, confirms once with a plain-text summary of every
+change before sending anything live, then applies only the listings that
+actually changed — sequentially, with a per-listing ✓/✗ result so one
+failure doesn't hide whether the others succeeded.
+
 Commit message convention so far has been one commit per logical
 fix/feature, matching this doc's dated sections.

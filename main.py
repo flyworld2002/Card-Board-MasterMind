@@ -315,6 +315,17 @@ def cmd_ebay_stage_picture(args):
     if result.get("error"):
         raise SystemExit(f"--ebay-stage-picture failed: {result['error']}")
 
+def cmd_ebay_revise_qty(args):
+    from importer.ebay_pushprices import revise_single_variation_qty
+    if not args.platform_listing_id:
+        raise SystemExit("--ebay-revise-qty requires --platform-listing-id")
+    if args.qty is None:
+        raise SystemExit("--ebay-revise-qty requires --qty")
+    result = revise_single_variation_qty(platform_listing_id=args.platform_listing_id, new_qty=args.qty,
+                                          account_num=args.account, dry_run=args.dry_run, quiet=args.quiet)
+    if result.get("error"):
+        raise SystemExit(f"--ebay-revise-qty failed: {result['error']}")
+
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main():
@@ -416,6 +427,13 @@ def main():
              "— attached automatically the next time that row is pushed live. "
              "Requires --row-id and --image-url. See "
              "docs/plans/listing-pricing-system.md.")
+    group.add_argument("--ebay-revise-qty", action="store_true",
+        help="Directly revise ONE existing live variation's quantity (price "
+             "untouched) — works with or without a listing_templates row, since "
+             "it only needs data already on the platform_listings row itself. "
+             "Built for balancing a card's shared inventory across listings. "
+             "Requires --platform-listing-id and --qty. Use --dry-run to "
+             "preview. See docs/plans/listing-pricing-system.md.")
 
     # ── Shared optional flags ─────────────────────────────────────────────────
     parser.add_argument("--dry-run", action="store_true",
@@ -478,6 +496,11 @@ def main():
     parser.add_argument("--image-url", metavar="URL",
         help="Source image URL to fetch and upload to eBay's EPS "
              "(for --ebay-stage-picture).")
+    parser.add_argument("--platform-listing-id", metavar="UUID",
+        help="platform_listings.id of the live variation to revise "
+             "(for --ebay-revise-qty).")
+    parser.add_argument("--qty", type=int,
+        help="New quantity to set (for --ebay-revise-qty).")
 
     args = parser.parse_args()
 
@@ -533,5 +556,7 @@ def main():
         cmd_ebay_remove_card(args)
     elif args.ebay_stage_picture:
         cmd_ebay_stage_picture(args)
+    elif args.ebay_revise_qty:
+        cmd_ebay_revise_qty(args)
 if __name__ == "__main__":
     main()

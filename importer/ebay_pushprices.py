@@ -728,3 +728,79 @@ def stage_card_picture(row_id: str, source_url: str = None, image_bytes: bytes =
 
     p(f"Staged picture for row {row_id}: {eps_url}")
     return {"row_id": row_id, "staged": True, "eps_picture_url": eps_url}
+
+
+def revise_single_variation_qty(platform_listing_id: str, new_qty: int, account_num: int = 1,
+                                 dry_run: bool = False, quiet: bool = False) -> dict:
+    """
+    Directly revises ONE existing live variation's quantity — price
+    untouched, only <Quantity>. Deliberately works whether or not the
+    listing has a listing_templates row: everything needed
+    (listing_id, external_id, account, platform) already lives on the
+    platform_listings row itself, so this never touches
+    listing_card_assignments/resolve_listing_prices() at all. Built for
+    "Balance Qty" — redistributing a card's shared inventory across
+    every listing that currently offers it, including ones never
+    onboarded into a template.
+    """
+    def p(msg):
+        if not quiet:
+            print(msg)
+
+    if new_qty < 0:
+        return {"platform_listing_id": platform_listing_id, "revised": False, "dry_run": dry_run,
+                 "error": "quantity can't be negative"}
+
+    with db_cursor() as cur:
+        cur.execute(
+            "SELECT id, platform, listing_id, external_id, account, quantity_listed "
+            "FROM platform_listings WHERE id = %s",
+            (platform_listing_id,),
+        )
+        pl_row = cur.fetchone()
+        if pl_row is None:
+            return {"platform_listing_id": platform_listing_id, "revised": False, "dry_run": dry_run,
+                     "error": "no such platform_listings row"}
+        if not pl_row["external_id"]:
+            return {"platform_listing_id": platform_listing_id, "revised": False, "dry_run": dry_run,
+                     "error": "no external_id on this row — can't locate the live variation"}
+
+        listing_id = pl_row["listing_id"]
+        external_id = pl_row["external_id"]
+
+        item = fetch_item(listing_id, account_num=account_num)
+        variations_node = _find(item, "Variations")
+        if variations_node is None:
+            return {"platform_listing_id": platform_listing_id, "revised": False, "dry_run": dry_run,
+                     "error": "live listing has no <Variations> block — not a multi-variation listing"}
+
+        variations = deep_copy_variations(item)
+        strip_selling_status(variations)
+
+        specifics_set = get_specifics_set(variations)
+        specific_name = next(iter(specifics_set), None)
+        var_el = find_variation_by_specifics(variations, specific_name, external_id) if specific_name else None
+        if var_el is None:
+            return {"platform_listing_id": platform_listing_id, "revised": False, "dry_run": dry_run,
+                     "error": f"variation {external_id!r} not found live — mismatch, needs manual reconcile in Seller Hub"}
+
+        if dry_run:
+            p(f"[DRY-RUN] would revise {external_id!r} on {listing_id}: "
+              f"qty {pl_row['quantity_listed']} -> {new_qty}")
+            return {"platform_listing_id": platform_listing_id, "external_id": external_id,
+                     "old_qty": pl_row["quantity_listed"], "new_qty": new_qty,
+                     "revised": False, "dry_run": True}
+
+        set_variation_price_qty(var_el, quantity=new_qty)
+
+        xml = build_revise_xml(listing_id, variations, "ReviseFixedPriceItem", account_num=account_num)
+        _post("ReviseFixedPriceItem", xml, account_num=account_num)
+
+        cur.execute(
+            "UPDATE platform_listings SET quantity_listed = %s, pushed_qty = %s, pushed_at = now() WHERE id = %s",
+            (new_qty, new_qty, platform_listing_id),
+        )
+
+    p(f"[{listing_id}] revised {external_id!r} quantity {pl_row['quantity_listed']} -> {new_qty}")
+    return {"platform_listing_id": platform_listing_id, "external_id": external_id,
+            "old_qty": pl_row["quantity_listed"], "new_qty": new_qty, "revised": True, "dry_run": False}
