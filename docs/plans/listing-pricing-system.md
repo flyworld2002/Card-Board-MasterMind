@@ -819,6 +819,25 @@ swapped out).
 Not tested against live eBay — same standing limitation as every other
 piece of this feature.
 
+**Real bug found immediately after Fei tested this live**: the "Import
+into roster" banner ("N existing platform_listings row(s) for this Item
+# aren't on the roster yet") counted ALL `platform_listings` rows for the
+listing_id minus whatever the roster currently points to — including
+`status='delisted'` rows that Remove-from-listing intentionally leaves
+behind as history. Since a removed card's roster row clears
+`platform_listing_id` to `NULL`, its old delisted row stops being
+"pointed at" and got miscounted as newly-unimported, even though the
+card was already correctly represented as a `queued` roster row.
+Confirmed live against Fei's test case (`336204674240`, Charcadet #22):
+delisted row with no roster row pointing at it, roster row correctly
+`queued` with `platform_listing_id=NULL` — the underlying remove logic
+was fine, only the banner's count was wrong. Worse, `importExisting()`
+had the same blind spot — clicking "Import into roster" on that phantom
+count would have inserted a NEW `active` roster row pointing at the dead
+delisted listing, creating a duplicate entry for a card that isn't
+actually live. Fixed both queries (the count and the import candidate
+list) to exclude `status='delisted'` rows.
+
 ### Custom variation name + promo set-prefix fix (2026-07-22, session 5)
 Fei clarified the Charcadet #22 situation was never a wrong-card bug —
 it's a real, correctly-added promo card, intentionally bundled into the
@@ -946,23 +965,25 @@ logic, `listing_card_groups`/`listing_card_assignments` untouched so the
 new template starts with a genuinely empty roster). "Duplicate" button
 added next to "Edit" in the templates list.
 
-**Real bug found immediately after Fei tested this live**: the "Import
-into roster" banner ("N existing platform_listings row(s) for this Item
-# aren't on the roster yet") counted ALL `platform_listings` rows for the
-listing_id minus whatever the roster currently points to — including
-`status='delisted'` rows that Remove-from-listing intentionally leaves
-behind as history. Since a removed card's roster row clears
-`platform_listing_id` to `NULL`, its old delisted row stops being
-"pointed at" and got miscounted as newly-unimported, even though the
-card was already correctly represented as a `queued` roster row.
-Confirmed live against Fei's test case (`336204674240`, Charcadet #22):
-delisted row with no roster row pointing at it, roster row correctly
-`queued` with `platform_listing_id=NULL` — the underlying remove logic
-was fine, only the banner's count was wrong. Worse, `importExisting()`
-had the same blind spot — clicking "Import into roster" on that phantom
-count would have inserted a NEW `active` roster row pointing at the dead
-delisted listing, creating a duplicate entry for a card that isn't
-actually live. Fixed both queries (the count and the import candidate
-list) to exclude `status='delisted'` rows. Commit
-message convention so far has been one commit per logical fix/feature,
-matching this doc's dated sections.
+### Fixed template deletion — the existing Delete button never actually worked (2026-07-23, session 6)
+Fei asked for "a way to remove listing templates" — a Delete button
+already existed (behind Edit), but a plain `DELETE` on
+`listing_templates` was silently doomed for any template that had ever
+been used: both `listing_card_assignments.template_id` and
+`platform_listings.template_id` are `NO ACTION` FKs (only
+`listing_card_groups.template_id` cascades). Confirmed live: **all 3**
+of the app's real templates already have active roster rows, so the old
+button had never actually succeeded for anything but a brand-new,
+never-touched template. Fixed by having the delete handler show the
+real counts (active/queued/sold_out_retained roster rows + referencing
+`platform_listings` rows) in the confirm dialog, then clean up in the
+correct order on confirm: detach `platform_listings` rows (kept as
+history — `template_id` set to `NULL`, not deleted, since they're real
+past-eBay-sync records) → delete the roster (`listing_card_groups`
+still cascades on its own) → delete the template. Left "Delete" one
+click deep behind "Edit" rather than promoting it to a direct list
+button — matches the extra-friction pattern used for other
+now-consequential actions this session.
+
+Commit message convention so far has been one commit per logical
+fix/feature, matching this doc's dated sections.
