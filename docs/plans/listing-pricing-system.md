@@ -1068,5 +1068,69 @@ change before sending anything live, then applies only the listings that
 actually changed — sequentially, with a per-listing ✓/✗ result so one
 failure doesn't hide whether the others succeeded.
 
+### Targeted row refresh instead of full-table reload on pin edits (2026-07-24, session 7)
+Fei flagged that every pin edit (low-stock qty, manual price, qty
+limit, market price, custom name) felt like "the whole screen
+refreshes" — every one of those handlers called `loadListing()` after
+saving, which re-fetches everything and rebuilds the entire 140+-row
+table from scratch, losing scroll position and input focus each time.
+
+Weighed two fixes with Fei before building: (1) delay the reload
+(debounce/blur) — small change, but doesn't help since each pin is a
+separate input, so editing several in a row still means several
+reloads; (2) fully optimistic local update — instant, but risks
+duplicating `resolve_listing_prices()`'s derived-value logic (tier
+lookups, floors, the shared-inventory subtraction) in JS, exactly the
+kind of drift this whole system has been built to avoid. Landed on a
+third option: still re-resolve from the server after every save (so
+derived values are always server-computed, never duplicated in JS), but
+only patch that one row's already-rendered `<td>` cells in place
+instead of tearing down and rebuilding the whole table.
+
+New `refreshRowDerivedCells(container, rowId)`: re-runs
+`resolve_listing_prices()`, updates `state.resolvedRows` in place, then
+patches only the derived/non-input cells of that one `<tr>` (resolved
+price, source badge, available qty, resolved qty, synced yes/no/n/a,
+stale-row highlight, market-price-pin styling) by class hook
+(`.lp-resolved-price-cell` etc., added to `rowHTML()`). Deliberately
+touches no input's own DOM node and re-wires nothing — since only text/
+attribute content changes, every existing event listener on that row
+stays attached untouched. All 5 pin handlers now call this instead of
+`loadListing()`. Known, accepted gap: the top "N need push" banner and
+Push button's enabled state go slightly stale until the next full-page
+action — left as-is since it's purely cosmetic; the actual push always
+re-checks fresh via its own dry-run before doing anything, so nothing
+unsafe can happen from a stale display count.
+
 Commit message convention so far has been one commit per logical
 fix/feature, matching this doc's dated sections.
+
+### Extended targeted refresh to Balance Qty and Stage Picture modals (2026-07-24, session 7)
+Fei asked whether the same full-reload issue applied to the other two
+places that mutate a row and then close a modal: Balance Qty and the
+picture-staging thumbnail upload. Both did — each ended its success
+path with `root.innerHTML = ''; await loadListing(container);`,
+same as the pin inputs before the fix above.
+
+Stage Picture: `openStagePictureModal()` already received `rowId` as a
+parameter, so its `loadListing()` call was swapped directly for
+`refreshRowDerivedCells(container, rowId)`. To make the thumbnail
+itself patchable, the thumbnail cell's markup (image + green "staged"
+checkmark badge) was extracted out of `rowHTML()` into two shared
+helpers, `thumbTitle(r)` and `thumbInnerHTML(r)`, and
+`refreshRowDerivedCells()` now also patches `.lp-thumb-upload`'s
+`title`/`innerHTML` using those same helpers — so a successful EPS
+upload updates the thumbnail in place instead of needing a reload to
+show the checkmark.
+
+Balance Qty: the `<a class="lp-balance-qty-link">` in `rowHTML()` and
+its click handler in `wireControls()` now carry `data-row-id`, threaded
+through `openBalanceQtyModal(container, body, variantId, cardLabelText,
+rowId)` into `renderBalanceQtyBody(...)`. The apply-success handler's
+`loadListing()` call became `refreshRowDerivedCells(container, rowId)`.
+Note this only patches the row for the *currently viewed* listing —
+Balance Qty can revise quantities on other listings too, but those
+aren't rendered in this table, so there's nothing to patch for them;
+the current listing's row is the only one that needed a rendered patch.
+The Cancel button no longer calls `loadListing()` at all — cancelling
+makes no changes, so there is nothing to refresh.
