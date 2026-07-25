@@ -45,6 +45,8 @@ from importer.ebay_pushprices import (
     push_prices, push_single_card_live, remove_single_card_live, stage_card_picture,
     revise_single_variation_qty,
 )
+from importer.job_runner import start_job, get_job, list_jobs
+from importer.market_price_refresh import refresh_market_prices
 
 load_dotenv()
 
@@ -121,6 +123,11 @@ class ReviseQtyRequest(BaseModel):
     new_qty: int
     account_num: int = 1
     dry_run: bool = False
+
+
+class MarketPriceRefreshRequest(BaseModel):
+    set_name: str | None = None
+    card_id: str | None = None
 
 
 @app.post("/api/picking/refresh")
@@ -272,6 +279,53 @@ def revise_variation_qty_endpoint(body: ReviseQtyRequest, x_picking_token: str =
             raise HTTPException(status_code=502, detail=f"revise failed: {e}")
 
     return result
+
+
+@app.post("/api/jobs/market-price-refresh")
+def market_price_refresh_endpoint(body: MarketPriceRefreshRequest, x_picking_token: str = Header(default="")):
+    """
+    Starts a market-price refresh job (docs/plans/listing-pricing-system.md)
+    on a background thread and returns immediately with a job_id — the
+    underlying Pokemon TCG API call is slow (per-card round trips, up to
+    15 in flight at once), so this is not meant to be awaited like the
+    other endpoints in this file. Poll GET /api/jobs/{job_id} for
+    progress. No lock: unlike the eBay-write endpoints above, concurrent
+    refresh jobs (e.g. for two different sets) don't contend with
+    anything and are fine to run at once.
+    """
+    if x_picking_token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="bad token")
+
+    if not body.set_name and not body.card_id:
+        raise HTTPException(status_code=400, detail="set_name or card_id is required")
+    if body.set_name and body.card_id:
+        raise HTTPException(status_code=400, detail="pass set_name or card_id, not both")
+
+    label = f"Market prices — {body.set_name}" if body.set_name else "Market prices — 1 card"
+    job_id = start_job(
+        "market_price_refresh", label, refresh_market_prices,
+        set_name=body.set_name, card_id=body.card_id,
+    )
+    return {"job_id": job_id}
+
+
+@app.get("/api/jobs")
+def list_jobs_endpoint(x_picking_token: str = Header(default="")):
+    """Generic job list for the Jobs page — every job type started via
+    start_job() shows up here automatically."""
+    if x_picking_token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="bad token")
+    return {"jobs": list_jobs()}
+
+
+@app.get("/api/jobs/{job_id}")
+def get_job_endpoint(job_id: str, x_picking_token: str = Header(default="")):
+    if x_picking_token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="bad token")
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+    return job
 
 
 @app.get("/api/picking/health")

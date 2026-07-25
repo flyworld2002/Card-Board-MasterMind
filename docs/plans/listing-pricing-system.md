@@ -1147,3 +1147,78 @@ inserts a new `pricing_profiles` row (name suffixed `(copy)`, auto-
 incrementing to `(copy 2)`, `(copy 3)`... if that name's already taken)
 with the same notes/default_low_stock_qty, then bulk-inserts copies of
 every row in `source.tiers` against the new profile's id.
+
+### Market price refresh — background jobs + Jobs page (2026-07-24, session 9)
+CLAUDE.md's TODO list had an open, undecided item: a market-price refresh
+command hitting the Pokemon TCG API for existing inventory, "still
+deciding whether the CLI trigger should refresh all cards or be scoped
+per-card/set." Resolved with Fei this session: scoped to one set or one
+card, run as a background job (the API is slow — per-card round trips,
+`timeout=30` — so a whole-set refresh can't block an HTTP request), and
+Fei explicitly asked for this to be the first job on a general-purpose
+**Jobs page**, not a one-off feature bolted onto Inventory.
+
+**Backend — generic job registry.** `importer/job_runner.py` is new: an
+in-memory `dict` of job_id → `{status, progress, result, error,
+started_at, finished_at}`, `start_job(job_type, label, target, **kwargs)`
+spins up a daemon thread and returns immediately, `update_job(job_id,
+**progress)` lets the running job push progress, `get_job`/`list_jobs`
+back the polling endpoints. State is in-memory only (lost on a
+`picking_api.py` restart) — same accepted tradeoff as everything else in
+that process; only the most recent 50 jobs are kept. Adding a future job
+type is one more `target` function plus one more `POST` endpoint that
+calls `start_job()` — it shows up in the generic job list automatically,
+no frontend changes needed beyond that job's own "start" form.
+
+**Backend — the actual work.** `importer/market_price_refresh.py`:
+`refresh_market_prices(job_id, set_name, card_id, dry_run)`. Key design
+point from Fei, caught before building: **the Pokemon TCG API returns
+pricing for every foil-type variant of a card (normal/holofoil/
+reverseHolofoil) in ONE response** (`get_card_by_id`), so the unit of
+work is one `card_master` row (one `external_id`), not one
+`card_variants` row — a card with holo + reverse-holo variants costs one
+API call, not two; `extract_market_price(api_card, foil_type)` then
+picks the right price out of that single cached response per variant.
+Concurrency: `ThreadPoolExecutor(max_workers=15)` per Fei's ask — safe
+because `db_cursor()` opens its own connection per call, no shared-state
+locking needed for the concurrent upserts. Daily-freshness gate (Fei's
+ask): a set-scoped refresh only includes a card if at least one of its
+variants' `market_prices` row (`condition='Near Mint'`) is missing or
+`updated_at::date < CURRENT_DATE` — a card is skipped only if ALL its
+variants are already fresh today, since the underlying API call is
+per-card and would refresh every variant anyway. A single explicit
+`--card-id`/card-scoped refresh always calls the API regardless of
+freshness — an explicit one-card click is a "do it now" action, not a
+batch sweep. A per-card failure is caught inside `_refresh_one_card` and
+reported, not raised — one bad card doesn't abort the batch, and
+re-running the set refresh is itself the retry mechanism (only
+still-stale cards get re-attempted).
+
+**CLI**: `--refresh-market-prices --set NAME` or `--refresh-market-prices
+--card-id UUID` (`--dry-run` lists which cards would be refreshed without
+calling the API or writing anything).
+
+**picking_api.py**: `POST /api/jobs/market-price-refresh` (body
+`{set_name}` or `{card_id}`) starts the job and returns `{job_id}`
+immediately — deliberately has NO lock, unlike every other endpoint in
+this file, since concurrent refresh jobs for different sets don't
+contend with anything. `GET /api/jobs` (list, for the Jobs page) and
+`GET /api/jobs/{job_id}` (single job) are generic reads over
+`job_runner`, not specific to this job type.
+
+**Frontend — new Jobs page.** `jobs.js` + nav entry in `index.html`
+(`#jobs`). Two "start" controls (set dropdown sourced from `card_sets`;
+card search-as-you-type against `card_master.name ILIKE`), and a
+"Recent jobs" table polling `GET /api/jobs` every 2.5s — polling
+self-stops once no listed job is still `status: 'running'`, so this
+isn't a permanent background timer (the codebase had no polling loop
+anywhere before this; every other refresh action was manual-only).
+
+**Inventory page quick-access entry points**, both firing the same
+`POST /api/jobs/market-price-refresh` and just pointing the user at the
+Jobs page for progress rather than duplicating a progress UI: a
+"↻ Refresh prices for `<set>`" button next to the set filter (shown
+only when a set is selected, mirroring the existing "Enable sync for
+`<set>`" button), and a "↻ Refresh" link next to the Market price
+display in the "List on platform" modal (`openListModal`), scoped to
+that one card via `row.lots[0].card_id`.

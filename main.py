@@ -21,6 +21,10 @@ Images:
 
 Reports:
   python3 main.py --stock         # current inventory summary
+
+Market prices:
+  python3 main.py --refresh-market-prices --set "Pitch Black"
+  python3 main.py --refresh-market-prices --card-id UUID
 """
 
 import argparse
@@ -326,6 +330,15 @@ def cmd_ebay_revise_qty(args):
     if result.get("error"):
         raise SystemExit(f"--ebay-revise-qty failed: {result['error']}")
 
+def cmd_refresh_market_prices(args):
+    from importer.market_price_refresh import refresh_market_prices
+    if not args.set and not args.card_id:
+        raise SystemExit("--refresh-market-prices requires --set or --card-id")
+    if args.set and args.card_id:
+        raise SystemExit("--refresh-market-prices takes --set or --card-id, not both")
+    result = refresh_market_prices(set_name=args.set, card_id=args.card_id, dry_run=args.dry_run)
+    print(result)
+
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main():
@@ -434,6 +447,12 @@ def main():
              "Built for balancing a card's shared inventory across listings. "
              "Requires --platform-listing-id and --qty. Use --dry-run to "
              "preview. See docs/plans/listing-pricing-system.md.")
+    group.add_argument("--refresh-market-prices", action="store_true",
+        help="Refresh market_prices from the Pokemon TCG API, scoped to one "
+             "set (--set NAME) or one card (--card-id UUID). Set-scoped runs "
+             "skip any card whose variants were all already refreshed today. "
+             "Use --dry-run to list which cards would be refreshed without "
+             "calling the API. See docs/plans/listing-pricing-system.md.")
 
     # ── Shared optional flags ─────────────────────────────────────────────────
     parser.add_argument("--dry-run", action="store_true",
@@ -474,7 +493,7 @@ def main():
     parser.add_argument("--variant", metavar="VARIANT",
         help="Correct variant for --fix-variant")
     parser.add_argument("--card-id", metavar="UUID",
-        help="Card UUID (for --upload-image)")
+        help="Card UUID (for --upload-image / --refresh-market-prices)")
     parser.add_argument("--search", metavar="NAME",
         help="Card name search (for --upload-image)")
     parser.add_argument("--account", metavar="N", type=int, default=1,
@@ -501,6 +520,8 @@ def main():
              "(for --ebay-revise-qty).")
     parser.add_argument("--qty", type=int,
         help="New quantity to set (for --ebay-revise-qty).")
+    parser.add_argument("--set", metavar="NAME",
+        help="Set name to scope to (for --refresh-market-prices).")
 
     args = parser.parse_args()
 
@@ -558,5 +579,7 @@ def main():
         cmd_ebay_stage_picture(args)
     elif args.ebay_revise_qty:
         cmd_ebay_revise_qty(args)
+    elif args.refresh_market_prices:
+        cmd_refresh_market_prices(args)
 if __name__ == "__main__":
     main()
