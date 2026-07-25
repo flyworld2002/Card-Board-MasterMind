@@ -1222,3 +1222,43 @@ only when a set is selected, mirroring the existing "Enable sync for
 `<set>`" button), and a "↻ Refresh" link next to the Market price
 display in the "List on platform" modal (`openListModal`), scoped to
 that one card via `row.lots[0].card_id`.
+
+### Push-live now populates ebay_listing_map (2026-07-25, session 10)
+Fei hit a real "unmatched" order issue in the Issues tab (`item ...
+has 100 variations; none named '114/086 Surfing Beach'`) and asked
+whether adding the variation on eBay would auto-resolve it. Traced the
+full chain in `importer/ebay_orders.py`: `_match_line()` (line 233)
+matches a sold line's variation name **purely against our own
+`ebay_listing_map` table** (`item_id + variation_name -> variant_id,
+condition`) — it never calls eBay live, so adding a variation to the
+live listing does nothing for this by itself.
+
+Bigger finding: grepped the whole repo and **nothing wrote to
+`ebay_listing_map`** — every reference was a `SELECT`. It's a
+live-DB-only table (absent from `schema.sql`, per
+`docs/plans/ebay-listing-sync.md`) that predates the roster/push
+system; the newer push engine (`_stage_promotion()` in
+`importer/ebay_pushprices.py`) writes new variations to
+`platform_listings` instead, so any card promoted live through the
+Listing Pricing System since the roster pivot would hit this exact
+"unmatched" issue the first time it sold, with no path to auto-resolve.
+
+Fixed at the source: `_stage_promotion()` (the one function both
+`push_prices()`'s 250-cap promotion and `push_single_card_live()` call
+to add a new `<Variation>`) now stages a third `pending_writes` entry —
+an `ebay_listing_map` upsert (`ON CONFLICT (item_id, variation_name) DO
+UPDATE`) keyed on the exact `promoted_name` string just written into
+the live `<Variation>`, so it's guaranteed to match whatever eBay later
+echoes back on a sale. `condition` is hardcoded `'Near Mint'`, matching
+every other real row in this project. Verified the SQL directly against
+the live DB (insert + re-run to exercise the `ON CONFLICT` path, then
+rolled back — no residue). Like every other write in `_stage_promotion`,
+this only lands after a successful live eBay Revise call, never on
+`--dry-run` or a failed push.
+
+This closes the gap going forward only — it does not backfill
+`ebay_listing_map` for cards already pushed live before this fix, and
+it doesn't resolve the specific Surfing Beach issue Fei hit (that card
+isn't in the catalog at all yet — a different, uncatalogued card from
+"Chaos Rising" (`me4`), not the same-named card already on file from
+"Mega Evolution" — cataloging it is a separate, still-open task).

@@ -164,6 +164,15 @@ def _stage_promotion(cur, template, platform: str, listing_id: str, promote, pro
     function's docstring for why: <Pictures> must land after every
     <Variation>, and this function may be called several times in a loop
     for one batch).
+
+    Also stages an ebay_listing_map upsert (item_id, variation_name) ->
+    variant_id — that table is what importer/ebay_orders.py's sale
+    matcher reads on every order pull, and NOTHING else in this codebase
+    writes to it, so without this a card pushed live here would silently
+    fail to match its own future sale ("unmatched" issue) even though it
+    really is live. Condition is always 'Near Mint', matching every other
+    real row in this project (market_prices, inventory) — see
+    docs/plans/listing-pricing-system.md.
     """
     promoted_name = promote.get("custom_name") or _render_variation_name(cur, promote["variant_id"], template["id"])
     position = _compute_insert_position(cur, variations, specific_name, listing_id,
@@ -199,6 +208,19 @@ def _stage_promotion(cur, template, platform: str, listing_id: str, promote, pro
             "UPDATE listing_card_assignments SET status = 'active', platform_listing_id = %s, updated_at = now() "
             "WHERE id = %s",
             (new_platform_listing_id, promote["id"]),
+        ),
+        (
+            """
+            INSERT INTO ebay_listing_map
+                (item_id, listing_id, variation_name, variant_id, condition, source, last_synced_at)
+            VALUES (%s, %s, %s, %s, 'Near Mint', 'push', now())
+            ON CONFLICT (item_id, variation_name) DO UPDATE
+                SET variant_id = EXCLUDED.variant_id,
+                    condition = EXCLUDED.condition,
+                    source = EXCLUDED.source,
+                    last_synced_at = now()
+            """,
+            (listing_id, listing_id, promoted_name, promote["variant_id"]),
         ),
     ]
 
