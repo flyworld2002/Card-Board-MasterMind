@@ -62,7 +62,7 @@ app = FastAPI(title="CBM Picking API", docs_url=None, redoc_url=None)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["POST"],
+    allow_methods=["GET", "POST"],
     allow_headers=["x-picking-token", "content-type"],
 )
 
