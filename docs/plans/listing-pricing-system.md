@@ -1320,3 +1320,43 @@ now requires Listing Price whenever "Link to an eBay listing" is
 checked (same validation pattern as the Item ID/variation name check),
 and the field's label shows a red `*` while the checkbox is checked so
 it's clear before submitting, not just after a failed save.
+
+### Extended Add Mapping to also fix "listing_gap" issues (2026-07-26, session 11)
+Fixing an `unmatched` issue via Add Mapping surfaced a second issue
+type right behind it: `listing_gap` — "sale recorded, but no
+platform_listings row for item X / variation Y". Traced in
+`importer/ebay_orders.py:394-405`: the sale itself recorded fine
+(inventory correctly deducted), but `record_sale()` also tries to
+decrement `platform_listings.quantity_listed` for that exact
+`(listing_id, external_id)`, and there was no row to decrement — this
+variant was never pushed live through our roster/push pipeline, it
+sold straight off a pre-existing eBay listing. Confirmed live (checked
+by `variant_id` across ALL of `platform_listings`, not just scoped to
+one listing): zero rows for any of the affected variants, even though
+the parent listings themselves are heavily tracked (83 and 129 other
+`platform_listings` rows respectively) — so it's specifically these
+sold-but-never-onboarded variants that are missing, not a general
+tracking gap on those listings.
+
+Fei's first instinct ("add inventory before mapping") wasn't quite the
+issue — inventory was already correct in every case here (that's why
+the sale itself succeeded). The real gap: Add Mapping was deliberately
+scoped to touch only `ebay_listing_map`, never `platform_listings`.
+Also important: `listing_gap` is explicitly NOT auto-retried by
+anything (per the code comment in `ebay_orders.py` — a retry would just
+hit the sale's own dedup check and never actually create the row), so
+unlike `unmatched` these don't clear themselves.
+
+Added `openFixListingGapModal()` / a "Create listing" button for open
+`listing_gap` rows in `issues.js`. Looks up the already-resolved
+variant via `ebay_listing_map` (matching already succeeded — that's
+why it's `listing_gap` and not `unmatched`), shows the card for
+confirmation, and creates the missing `platform_listings` row (list
+price pre-filled from the issue's own `sale_price`, quantity defaults
+to the sold quantity, account pre-filled from the issue's own
+`account` column — no extra lookups needed, `sync_enabled` defaults
+false so this doesn't silently opt the card into active price-sync
+management). Unlike Add Mapping, this modal explicitly marks the issue
+`resolved` itself on success — since nothing else in the system ever
+will for `listing_gap`, leaving status alone here would mean it stays
+"open" forever even after the real fix landed.
