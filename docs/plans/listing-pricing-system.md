@@ -1294,3 +1294,28 @@ row in `issues.js`, opening a modal pre-filled with that issue's
 write. Neither tool touches the issue's own `status` — matches the
 existing bookkeeping-only philosophy; `retry_open_issues()` on the next
 `--ebay-pullorders` run is what actually re-matches and resolves it.
+
+### Fixed push_staging_row_to_inventory() referencing a dropped column (2026-07-26, session 11)
+Fei hit "Push failed: column 'quantity_limit' of relation
+'platform_listings' does not exist" trying to push the Drakloak Master
+Ball card through the new eBay-link checkbox. Root cause: migration 010
+earlier this session moved `quantity_limit` off `platform_listings`
+onto `listing_card_assignments`, but `push_staging_row_to_inventory`
+(the Staging Review page's approval RPC — unrelated to
+`resolve_listing_prices()`, so this slipped past every check made at
+the time) still hardcoded `quantity_limit` (value `18`) in its
+`platform_listings` INSERT and was never updated. Nothing had exercised
+that code path since migration 010 landed, so it went unnoticed until
+now. Fixed via `listing_pricing_migration_015_fix_push_staging_rpc.sql`
+— dropped the column and its value from the INSERT, function otherwise
+unchanged. Verified live: ran the RPC against a real staging row inside
+a transaction, confirmed it now completes and returns
+inventory_id/variant_id/purchase_id with no error, then rolled back
+(no residue).
+
+Separate, not-yet-reported risk noticed while fixing this:
+`platform_listings.list_price` is `NOT NULL`, but the New Local
+Purchase form's "Listing Price" field is optional — if left blank on a
+card with "Link to an eBay listing" checked, this same INSERT would
+fail on that constraint instead. Not fixed yet since it hasn't actually
+bitten anyone; flagging here in case it does.
