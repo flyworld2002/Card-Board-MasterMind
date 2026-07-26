@@ -1360,3 +1360,22 @@ management). Unlike Add Mapping, this modal explicitly marks the issue
 `resolved` itself on success — since nothing else in the system ever
 will for `listing_gap`, leaving status alone here would mean it stays
 "open" forever even after the real fix landed.
+
+### Duplicate listing template now copies groups + pricing profile links (2026-07-26, session 11)
+Fei asked for grouping and pricing profile to carry over when
+duplicating a template — previously deliberately config-only (roster
+AND groups both empty). Revisited: the roster staying empty is still
+right (it's genuinely per-listing, physical-card-specific data), but
+leaving groups empty meant recreating the same rarity-tier
+groups + pricing profile links by hand for every new listing built off
+an existing one — usually the exact structure you want to keep.
+
+`listing_card_groups(template_id, name, profile_id)` has no roster
+dependency (roster rows point AT a group via `group_id`, not the
+reverse), so copying is just: after the new template insert returns its
+id, copy every `listing_card_groups` row from the source template with
+the same `name`/`profile_id` but the new `template_id`. Groups land
+empty (no roster rows reference them yet) — cards get assigned into
+them normally as they're added to the new listing. Confirmed RLS
+("authenticated only", `FOR ALL`) allows this insert directly from the
+frontend.
