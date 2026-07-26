@@ -1262,3 +1262,35 @@ it doesn't resolve the specific Surfing Beach issue Fei hit (that card
 isn't in the catalog at all yet — a different, uncatalogued card from
 "Chaos Rising" (`me4`), not the same-named card already on file from
 "Mega Evolution" — cataloging it is a separate, still-open task).
+
+### Two ways to close an "unmatched" Issue, from opposite ends (2026-07-26, session 11)
+Follow-up to the ebay_listing_map work above. Two real "unmatched" issues
+this session needed different fixes — one card (Surfing Beach) didn't
+exist in the catalog at all, the other (Drakloak) existed but was
+missing one specific variant (Master Ball reverse holo) — and both
+needed new inventory added, not just a mapping row. That's now covered:
+found that the Staging Review page's approval RPC
+(`push_staging_row_to_inventory`, live in Supabase) already inserts into
+`ebay_listing_map` automatically whenever a staging row has
+`source='ebay'` with `order_number`/`variation_name` set — nothing
+exposed that from the "New Local Purchase" modal, which always
+hardcoded `source: 'local'`. Added a "Link to an eBay listing" checkbox
+per card in that form (`staging-review.js`); checked, it flows the
+item ID/variation name into the staging row so approving it also maps
+the variant — unchecked, behavior is unchanged.
+
+That covers "needs new inventory too." The other half — a variant and
+its inventory are ALREADY correct, and the gap is purely a missing or
+wrong mapping (e.g. pushed live before this project's mapping-on-push
+fix existed, or eBay's variation text got edited after the fact) —
+doesn't belong in a purchase-entry form at all (would create a bogus
+extra purchase just to sneak in a mapping). Added a second, narrower
+tool for exactly that: an "Add mapping" button on each open `unmatched`
+row in `issues.js`, opening a modal pre-filled with that issue's
+`item_id`/`variation_name`, a card-name search against `v_card_variants`
+(same pattern as Staging Review's autocomplete), and a Save that upserts
+`ebay_listing_map` directly — no inventory/purchase touched. Confirmed
+`ebay_listing_map`'s RLS ("authenticated only", `FOR ALL`) allows this
+write. Neither tool touches the issue's own `status` — matches the
+existing bookkeeping-only philosophy; `retry_open_issues()` on the next
+`--ebay-pullorders` run is what actually re-matches and resolves it.
