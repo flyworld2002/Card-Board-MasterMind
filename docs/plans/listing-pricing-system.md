@@ -1313,9 +1313,10 @@ a transaction, confirmed it now completes and returns
 inventory_id/variant_id/purchase_id with no error, then rolled back
 (no residue).
 
-Separate, not-yet-reported risk noticed while fixing this:
-`platform_listings.list_price` is `NOT NULL`, but the New Local
-Purchase form's "Listing Price" field is optional — if left blank on a
-card with "Link to an eBay listing" checked, this same INSERT would
-fail on that constraint instead. Not fixed yet since it hasn't actually
-bitten anyone; flagging here in case it does.
+The flagged `list_price NOT NULL` risk did bite immediately after —
+Fei hit the exact predicted error leaving Listing Price blank while
+linking. Fixed in `staging-review.js`: the "Add to purchase" handler
+now requires Listing Price whenever "Link to an eBay listing" is
+checked (same validation pattern as the Item ID/variation name check),
+and the field's label shows a red `*` while the checkbox is checked so
+it's clear before submitting, not just after a failed save.
