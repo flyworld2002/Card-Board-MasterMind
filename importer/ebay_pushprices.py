@@ -818,9 +818,17 @@ def revise_single_variation_qty(platform_listing_id: str, new_qty: int, account_
         xml = build_revise_xml(listing_id, variations, "ReviseFixedPriceItem", account_num=account_num)
         _post("ReviseFixedPriceItem", xml, account_num=account_num)
 
+        # status must track new_qty (same active/out_of_stock convention as
+        # every other writer of this column — push_staging_row_to_inventory,
+        # _stage_promotion) — resolve_listing_prices()'s shared-inventory
+        # subtraction only counts an OTHER listing's claimed quantity when
+        # its status='active', so leaving a stale 'out_of_stock' here after
+        # reviving it with real stock would make every other listing
+        # sharing this variant silently overcount what's actually available.
         cur.execute(
-            "UPDATE platform_listings SET quantity_listed = %s, pushed_qty = %s, pushed_at = now() WHERE id = %s",
-            (new_qty, new_qty, platform_listing_id),
+            "UPDATE platform_listings SET quantity_listed = %s, pushed_qty = %s, pushed_at = now(), "
+            "status = %s WHERE id = %s",
+            (new_qty, new_qty, 'active' if new_qty > 0 else 'out_of_stock', platform_listing_id),
         )
 
     p(f"[{listing_id}] revised {external_id!r} quantity {pl_row['quantity_listed']} -> {new_qty}")

@@ -1379,3 +1379,31 @@ empty (no roster rows reference them yet) — cards get assigned into
 them normally as they're added to the new listing. Confirmed RLS
 ("authenticated only", `FOR ALL`) allows this insert directly from the
 frontend.
+
+### Balance Qty silently dropped out-of-stock listings from the pool (2026-07-31, session 12)
+Fei reported "Evenly split" not actually splitting evenly for Morpeko
+ex #55 (one Holo variant genuinely shared across two listings — Fei
+confirmed that's intentional, not a cataloging gap). Root cause:
+`openBalanceQtyModal()`'s `platform_listings` query filtered
+`.eq('status', 'active')` — a listing that had already sold out
+(`status='out_of_stock'`) was excluded from the modal entirely, so
+"Evenly split" only ever divided inventory across whatever listings
+were STILL active, permanently squeezing out any listing that had ever
+hit zero. Fixed: query now uses `.in('status', ['active',
+'out_of_stock'])` — confirmed live only three status values exist
+(`active` 9212, `out_of_stock` 175, `delisted` 1) — `delisted` stays
+excluded since that variation isn't live on eBay at all anymore for
+`revise_single_variation_qty` to find. OOS rows now show a small
+"(out of stock)" tag in the modal.
+
+Found and fixed a related follow-on bug while in this code:
+`revise_single_variation_qty()` (`importer/ebay_pushprices.py`) updated
+`quantity_listed` but never touched `status` — so reviving an OOS
+listing back to a positive quantity via Balance Qty left `status`
+stuck at `'out_of_stock'`. Since `resolve_listing_prices()`'s
+shared-inventory subtraction (migration 014) only counts an OTHER
+listing's claimed quantity when its `status='active'`, a stale
+`out_of_stock` status would make every OTHER listing sharing that
+variant silently overcount how much was actually available. Now sets
+`status = 'active' if new_qty > 0 else 'out_of_stock'` on every
+revise, same convention as every other writer of that column.
