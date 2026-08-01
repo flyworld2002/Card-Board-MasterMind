@@ -1,35 +1,58 @@
 r"""
-picking_api.py — tiny local HTTP endpoint so the Picking tab's Refresh
-button can trigger a live eBay pull from the browser.
+picking_api.py — tiny local HTTP endpoint so the web frontend can
+trigger live eBay actions (picking pull, price/qty pushes, market price
+refresh jobs) from the browser.
 
-Runs on the always-on Windows desktop, bound to the LAN. The frontend
-calls it with a shared-secret header; the endpoint runs pull_picking()
-(same function as `python main.py --ebay-pullpicking`) and returns the
-summary. The frontend then reads the fresh snapshot from Supabase as
-usual — this endpoint never serves card data itself.
+Runs on the always-on Windows desktop. As of 2026-08, reachable over
+Tailscale (not just the home LAN) at the desktop's stable Tailscale
+hostname, and served over HTTPS using a Tailscale-issued cert — the
+frontend itself is now hosted on Cloudflare Pages over HTTPS
+(https://card-board-mastermind-webinvmanagement.pages.dev), and browsers
+block an HTTPS page from calling a plain-HTTP endpoint (mixed content),
+so this can no longer serve plain HTTP. The frontend calls it with a
+shared-secret header; each endpoint runs the corresponding importer
+function and returns a summary — this service never serves card data
+itself, everything else still goes through Supabase directly.
 
 .env additions:
     PICKING_API_TOKEN=<any long random string>   # required
     PICKING_API_PORT=8765                        # optional, default 8765
+    PICKING_API_SSL_CERTFILE=<path to .crt>      # optional, only used by
+    PICKING_API_SSL_KEYFILE=<path to .key>       # `python picking_api.py` directly —
+                                                  # the real scheduled-task launch
+                                                  # (run_picking_api.bat) passes
+                                                  # --ssl-certfile/--ssl-keyfile on
+                                                  # the uvicorn command line instead.
 
 Run (from the project root, same venv as main.py):
-    uvicorn picking_api:app --host 0.0.0.0 --port 8765
+    uvicorn picking_api:app --host 0.0.0.0 --port 8765 \
+        --ssl-certfile desktop-tu1m2fc.tail2c58d7.ts.net.crt \
+        --ssl-keyfile desktop-tu1m2fc.tail2c58d7.ts.net.key
 
 Windows one-time setup:
   1. Add PICKING_API_TOKEN to the desktop's .env (generate one, e.g.:
        python -c "import secrets; print(secrets.token_urlsafe(32))"
-     — the SAME value goes into the frontend's picking.js config).
+     — the SAME value goes into the frontend's PICKING_API_TOKEN config).
   2. Firewall rule (admin PowerShell):
        netsh advfirewall firewall add rule name="CBM Picking API" dir=in action=allow protocol=TCP localport=8765
   3. Auto-start on logon — run_picking_api.bat + Task Scheduler:
        schtasks /create /tn "CBMPickingAPI" /tr "C:\path\to\run_picking_api.bat" /sc onlogon /ru "%USERNAME%"
-  4. Reserve the desktop's IP in your router so the frontend's endpoint
-     URL doesn't rot.
+  4. Install Tailscale on the desktop (`winget install Tailscale.Tailscale`),
+     log in, enable "HTTPS Certificates" for the tailnet at
+     https://login.tailscale.com/admin/dns, then provision the cert:
+       tailscale cert desktop-tu1m2fc.tail2c58d7.ts.net
+     Re-run that command to renew if the cert ever expires (Tailscale
+     auto-renews in the background while tailscaled is running, so this
+     should rarely be needed by hand). NEVER commit the resulting .crt/.key
+     files — *.crt and *.key are gitignored project-wide for this reason.
 
-Security model (deliberate, home-LAN appropriate): shared-secret header
-over plain HTTP on a private LAN. The endpoint takes no parameters and
-can only do one thing — refresh the snapshot — so the worst an attacker
-on your LAN could do with the token is refresh your pick list.
+Security model: shared-secret header over HTTPS on a private Tailscale
+network (not the public internet) — only devices logged into this
+specific tailnet can even reach the hostname at all. The endpoints do
+real writes now (price/qty pushes, market price refresh), so this is a
+step up from the original "read-only refresh" threat model the shared-
+secret-only design first assumed — worth keeping in mind if more
+destructive actions get added later.
 """
 
 import os
@@ -337,4 +360,8 @@ def health():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PICKING_API_PORT", "8765")))
+    uvicorn.run(
+        app, host="0.0.0.0", port=int(os.getenv("PICKING_API_PORT", "8765")),
+        ssl_certfile=os.getenv("PICKING_API_SSL_CERTFILE"),
+        ssl_keyfile=os.getenv("PICKING_API_SSL_KEYFILE"),
+    )

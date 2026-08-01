@@ -1407,3 +1407,103 @@ listing's claimed quantity when its `status='active'`, a stale
 variant silently overcount how much was actually available. Now sets
 `status = 'active' if new_qty > 0 else 'out_of_stock'` on every
 revise, same convention as every other writer of that column.
+
+### picking_api.py now reachable via Tailscale, not just the home LAN (2026-08-01, session 13)
+Fei's pain point: every feature built this whole session (Picking
+refresh, push-live, Balance Qty, market price refresh Jobs) routes
+through `picking_api.py`, which only ever listened on the home LAN
+(`http://192.168.1.186:8765`) — meaning every one of those actions
+required physically being on the home WiFi. Discussed the standard
+options for exposing a home-hosted service (mesh VPN like Tailscale,
+Cloudflare Tunnel, classic port-forward+DDNS, or just moving the
+service to a small VPS) and picked Tailscale: no public exposure at
+all (unlike port-forwarding or Cloudflare Tunnel), no code changes
+beyond swapping one constant, and free for personal use.
+
+Installed via `winget install Tailscale.Tailscale` on the desktop,
+logged in (account: flyworld2002), then installed + logged into the
+same account on Fei's Mac and phone. Confirmed the existing Windows
+Firewall rule for port 8765 (`netsh advfirewall firewall show rule
+name="CBM Picking API"`) already allows Any/Any across all profiles,
+so no firewall change was needed — end-to-end reachability verified
+live from the Mac (`curl http://desktop-tu1m2fc.tail2c58d7.ts.net:8765/api/picking/health`
+→ `{"ok":true}`).
+
+Updated `PICKING_API_URL` in all four files that each keep their own
+copy of it (`picking.js`, `listing-pricing.js`, `inventory.js`,
+`jobs.js`) from the LAN IP to the desktop's stable Tailscale hostname
+(`desktop-tu1m2fc.tail2c58d7.ts.net`) — this hostname never changes
+even if the desktop's home IP does. The old LAN IP is kept as a
+commented-out fallback line in `picking.js`/`jobs.js` (matching the
+existing `localhost` fallback convention already there). Any device
+triggering an action (browser tab, whatever) needs Tailscale running
+and logged into the same account — this isn't a public URL, so a
+device that was never added to the tailnet still can't reach it,
+which is the intended security model (same "shared-secret header, no
+public exposure" posture as before, just extended past the LAN).
+
+### Frontend hosted on Cloudflare Pages + picking_api.py moved to HTTPS (2026-08-01, session 13 cont'd)
+Followed the Tailscale work by hosting the frontend itself so Fei can
+reach the whole app from anywhere, not just trigger picking_api.py
+remotely while still running the SPA locally. Deployed
+`card-board-mastermind-WebInvManagement` to Cloudflare Pages (git-
+connected to the private repo via Cloudflare's GitHub App, auto-
+redeploys on every push to `main`) — no build step, framework preset
+"None", output directory `/`. Live at
+https://card-board-mastermind-webinvmanagement.pages.dev.
+
+Two real bugs surfaced going live, both fixed:
+1. **Google sign-in redirected to `localhost` and failed.** Root
+   cause wasn't the app code — `shared.js`'s `signInWithGoogle()`
+   already computed `redirectTo` dynamically from
+   `window.location.origin`, so it correctly requested the Cloudflare
+   URL. The problem was Supabase Auth's **Redirect URLs allow-list**
+   (Authentication → URL Configuration) only had `localhost` on it
+   from prior local-only development — Supabase silently ignores an
+   unlisted `redirectTo` and falls back to the default Site URL.
+   Fixed by adding the Cloudflare Pages URL to that allow-list in the
+   Supabase dashboard (no code change).
+2. **Picking refresh failed with a generic "NetworkError."** The
+   Cloudflare-hosted frontend is HTTPS; `picking_api.py` was still
+   plain HTTP (even after the Tailscale-hostname swap) — browsers
+   silently block an HTTPS page from calling an HTTP endpoint (mixed
+   content), surfacing as an opaque fetch NetworkError rather than a
+   clear "mixed content" message in most browsers. Confirmed via the
+   browser's own console message ("Blocked loading mixed active
+   content") once Fei checked it.
+
+   Fixed by getting `picking_api.py` onto real HTTPS: enabled "HTTPS
+   Certificates" for the tailnet (https://login.tailscale.com/admin/dns,
+   one-time toggle), then `tailscale cert
+   desktop-tu1m2fc.tail2c58d7.ts.net` provisions a genuine Let's-
+   Encrypt-backed cert for the device's Tailscale hostname (trusted by
+   browsers out of the box — no self-signed-cert warnings). Added
+   `*.key`/`*.crt` to `.gitignore` immediately, before anything could
+   accidentally stage the private key. `run_picking_api.bat` (what
+   Task Scheduler actually launches — confirmed `picking_api.py`'s own
+   `if __name__ == "__main__":` block is dead code for the real
+   deployment) now passes `--ssl-certfile`/`--ssl-keyfile` on the
+   uvicorn command line; `picking_api.py`'s own `__main__` block got
+   the equivalent `PICKING_API_SSL_CERTFILE`/`PICKING_API_SSL_KEYFILE`
+   env-var support too, for anyone running it directly. All four
+   frontend files' `PICKING_API_URL` updated from `http://` to
+   `https://` on the same Tailscale hostname. Verified end-to-end:
+   `curl https://desktop-tu1m2fc.tail2c58d7.ts.net:8765/api/picking/health`
+   succeeds with no `-k`/insecure flag needed (proves the cert chain
+   is genuinely trusted, not self-signed), and the picking_api.py log
+   confirms `Uvicorn running on https://0.0.0.0:8765` after restart.
+
+   Also caught mid-fix: the earlier Tailscale-hostname edits to the
+   four `PICKING_API_URL` constants (from the LAN-IP session) had
+   never actually been committed/pushed — Cloudflare was still
+   serving the old LAN-IP code the whole time, which is what the
+   mixed-content error was actually reporting (`http://192.168.1.186`,
+   not the Tailscale hostname). Both the stale LAN IP and the
+   http-vs-https mismatch needed fixing together before this worked.
+
+Cert renewal note: Tailscale auto-renews certs obtained via
+`tailscale cert` in the background while `tailscaled` keeps running,
+so manual re-provisioning should rarely be needed — but if
+`picking_api.py` ever starts failing TLS handshakes, re-run
+`tailscale cert desktop-tu1m2fc.tail2c58d7.ts.net` from the project
+root and restart the `CBMPickingAPI` scheduled task.

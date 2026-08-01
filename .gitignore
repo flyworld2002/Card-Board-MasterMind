@@ -1,6 +1,8 @@
 .env
 .env.local
 .env.production
+*.key
+*.crt
 __pycache__/
 *.py[cod]
 *.pyo
