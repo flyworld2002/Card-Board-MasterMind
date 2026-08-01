@@ -28,7 +28,7 @@ from db.connection import db_cursor
 from importer.ebay_auth import get_account_name, get_user_token
 from importer.ebay import _post, _find, _findall
 from importer.ebay_variations_xml import (
-    fetch_item, deep_copy_variations, strip_selling_status, get_quantity_sold,
+    fetch_item, deep_copy_variations, strip_selling_status, normalize_quantities,
     find_variation_by_specifics, set_variation_price_qty, get_specifics_set,
     insert_specifics_value, mark_variation_deleted, add_variation_row,
     set_variation_picture, build_revise_xml,
@@ -52,10 +52,14 @@ def _compute_roster_changes(cur, platform: str, listing_id: str):
     """
     Returns (resolved_rows, changes, skipped_ungated) — same contract as
     before the roster pivot, except row_id is now
-    listing_card_assignments.id, and only rows with status='active' (a
-    live platform_listings row) are ever eligible for `changes` — queued
-    rows show up in `resolved` for preview but are never pushed directly
-    (only relevant via 250-cap promotion).
+    listing_card_assignments.id, and only rows with a live
+    platform_listings row (status 'active' or 'out_of_stock') are ever
+    eligible for `changes` — queued rows show up in `resolved` for
+    preview but are never pushed directly (only relevant via 250-cap
+    promotion). An 'out_of_stock' row is always pushed with
+    qty_to_push forced to 0 (see below) rather than skipped, so eBay's
+    stored quantity actually reflects zero instead of a stale leftover
+    value.
     """
     cur.execute("SELECT * FROM resolve_listing_prices(%s, %s)", (platform, listing_id))
     resolved = cur.fetchall()
@@ -91,14 +95,27 @@ def _compute_roster_changes(cur, platform: str, listing_id: str):
         if r["quantity_limit"] is not None:
             qty_to_push = min(qty_to_push, r["quantity_limit"])
 
-        price_changed = (
-            cur_row["pushed_price"] is None
-            or abs(float(cur_row["pushed_price"]) - float(r["resolved_price"])) >= 0.005
-        )
-        qty_changed = cur_row["pushed_qty"] is None or cur_row["pushed_qty"] != qty_to_push
-        if not (price_changed or qty_changed):
-            continue
+        # An out_of_stock platform_listings row can still have a stale
+        # raw <Quantity> sitting on eBay from before it went OOS — eBay's
+        # Trading API folds QuantitySold into whatever <Quantity> a
+        # revise sends (see docs/plans/listing-pricing-system.md), so
+        # that leftover value can read as real available stock to a live
+        # buyer even though our own system correctly considers it dead.
+        # Force qty_to_push to 0 here so a push actively zeroes eBay's
+        # stored quantity instead of silently skipping the row and
+        # leaving the stale number in place.
+        if cur_row["status"] == "out_of_stock":
+            qty_to_push = 0
 
+        # Always recompute and resend every gated-in row's price/qty fresh
+        # from what's currently resolved, rather than only sending rows
+        # that differ from our own last-recorded pushed_price/pushed_qty.
+        # That diff-against-our-own-history approach is exactly what let
+        # eBay-side drift go undetected tonight (2026-08) — our own
+        # records said a row was already correct, so it silently never
+        # got resent even after eBay's live quantity drifted away from
+        # what we last told it. Always pushing the current truth is
+        # self-healing against that kind of drift, whatever the cause.
         change = {
             "row_id": r["row_id"],
             "platform_listing_id": r["platform_listing_id"],
@@ -109,9 +126,12 @@ def _compute_roster_changes(cur, platform: str, listing_id: str):
             "qty_to_push": qty_to_push,
         }
 
+        # out_of_stock is gated in same as active (see the qty_to_push
+        # override above) — it's only 'delisted' (no longer live on eBay
+        # at all, nothing to revise) that's excluded on status now.
         gated_in = (
             cur_row["sync_enabled"]
-            and cur_row["status"] == "active"
+            and cur_row["status"] in ("active", "out_of_stock")
             and kill_switch_ok.get(cur_row["account"], True)
             and kill_switch_ok.get(None, True)
         )
@@ -239,7 +259,7 @@ def _stage_promotion(cur, template, platform: str, listing_id: str, promote, pro
 
 
 def _do_promotions(cur, template, platform: str, listing_id: str, account_num: int,
-                    resolved: list, variations, quantity_sold_by_var: dict, quiet: bool):
+                    resolved: list, variations, quiet: bool):
     """
     Adds new <Variation> rows for queued cards, two cases:
       1. Room under eBay's 250-variation cap (active count < 250):
@@ -293,6 +313,14 @@ def _do_promotions(cur, template, platform: str, listing_id: str, account_num: i
             promoted_resolved = resolved_by_row_id.get(promote["id"])
             if promoted_resolved is None:
                 continue
+            if not promoted_resolved["available_qty"]:
+                # eBay silently drops a variation added at quantity 0
+                # (Ack=Warning, "Variations with quantity '0' will be
+                # removed" — see push_single_card_live()) — leave it
+                # queued rather than record a phantom promotion.
+                p(f"    [SKIP] {promoted_resolved['derived_label']}: 0 available quantity, "
+                  f"leaving queued")
+                continue
             promotion, writes = _stage_promotion(
                 cur, template, platform, listing_id, promote, promoted_resolved,
                 variations, specific_name, display_sort, account,
@@ -328,6 +356,12 @@ def _do_promotions(cur, template, platform: str, listing_id: str, account_num: i
             promote = queued.pop(0)
             promoted_resolved = resolved_by_row_id.get(promote["id"])
             if promoted_resolved is None:
+                continue
+            if not promoted_resolved["available_qty"]:
+                # Same as Case 1 — don't burn a sold-out slot's deletion
+                # on a card eBay would just reject at quantity 0.
+                p(f"    [SKIP] {promoted_resolved['derived_label']}: 0 available quantity, "
+                  f"leaving queued")
                 continue
 
             mark_variation_deleted(var_el)
@@ -401,12 +435,9 @@ def push_prices(listing_id: str, account_num: int = 1, platform: str = "ebay",
                 p(f"[{listing_id}] single listing, no gated changes — nothing to push.")
                 return summary
             change = changes[0]
-            item = fetch_item(listing_id, account_num=account_num)
-            qty_sold = get_quantity_sold(item)
-            qty_to_set = qty_sold + change["qty_to_push"]
 
             p(f"  [single] {change['derived_label']}: ${change['resolved_price']:.2f}, "
-              f"qty -> {qty_to_set} (sold={qty_sold} + push={change['qty_to_push']}) [{change['price_source']}]")
+              f"qty -> {change['qty_to_push']} [{change['price_source']}]")
 
             if dry_run:
                 p(f"[DRY-RUN] would push 1 change to {listing_id}")
@@ -421,7 +452,7 @@ def push_prices(listing_id: str, account_num: int = 1, platform: str = "ebay",
   <Item>
     <ItemID>{listing_id}</ItemID>
     <StartPrice>{change['resolved_price']:.2f}</StartPrice>
-    <Quantity>{qty_to_set}</Quantity>
+    <Quantity>{change['qty_to_push']}</Quantity>
   </Item>
 </ReviseFixedPriceItemRequest>"""
             _post("ReviseFixedPriceItem", xml, account_num=account_num)
@@ -443,7 +474,7 @@ def push_prices(listing_id: str, account_num: int = 1, platform: str = "ebay",
             return summary
 
         variations = deep_copy_variations(item)
-        quantity_sold_by_var = {id(v): get_quantity_sold(v) for v in _findall(variations, "Variation")}
+        normalize_quantities(variations)
         strip_selling_status(variations)
 
         specifics_set = get_specifics_set(variations)
@@ -463,12 +494,10 @@ def push_prices(listing_id: str, account_num: int = 1, platform: str = "ebay",
                 p(f"  [WARN] {msg}")
                 continue
 
-            qty_sold = quantity_sold_by_var.get(id(var_el), 0)
-            qty_to_set = qty_sold + change["qty_to_push"]
-            set_variation_price_qty(var_el, start_price=change["resolved_price"], quantity=qty_to_set)
+            set_variation_price_qty(var_el, start_price=change["resolved_price"], quantity=change["qty_to_push"])
             changes_pushed.append(change)
-            p(f"  {change['external_id']}: ${change['resolved_price']:.2f}, qty -> {qty_to_set} "
-              f"(sold={qty_sold} + push={change['qty_to_push']}) [{change['price_source']}]")
+            p(f"  {change['external_id']}: ${change['resolved_price']:.2f}, qty -> {change['qty_to_push']} "
+              f"[{change['price_source']}]")
 
         # promotions' DB writes (pending_writes) are deferred — mutating
         # `variations` here is always safe (in-memory only), but nothing
@@ -478,7 +507,7 @@ def push_prices(listing_id: str, account_num: int = 1, platform: str = "ebay",
         # --dry-run — or a POST that later failed — would still leave the
         # DB believing a card had gone live when eBay never received it.
         promotions, pending_writes = _do_promotions(cur, template, platform, listing_id, account_num,
-                                                      resolved, variations, quantity_sold_by_var, quiet)
+                                                      resolved, variations, quiet)
         for promo in promotions:
             p(f"  {promo['external_id']}: ${promo['resolved_price']:.2f}, qty -> {promo['qty_to_push']} "
               f"(newly promoted) [{promo['price_source']}]")
@@ -491,7 +520,7 @@ def push_prices(listing_id: str, account_num: int = 1, platform: str = "ebay",
 
         if dry_run:
             p(f"[DRY-RUN] would push {len(pushed)} of {len(resolved)} row(s) to {listing_id} "
-              f"({len(promotions)} via 250-cap promotion) — not re-sending all {len(resolved)}")
+              f"({len(promotions)} via 250-cap promotion)")
             summary["pushed"] = len(pushed)
             summary["promoted"] = len(promotions)
             return summary
@@ -560,6 +589,22 @@ def push_single_card_live(row_id: str, account_num: int = 1, platform: str = "eb
             return {"row_id": row_id, "pushed": False, "dry_run": dry_run,
                      "error": "row not found in resolve_listing_prices() output"}
 
+        # eBay silently drops any variation added at quantity 0 — it
+        # returns Ack=Warning (not Failure), with "Variations with
+        # quantity '0' will be removed" buried in the Errors block, which
+        # nothing here inspects. Without this check we'd record a
+        # confident "pushed live" in our own DB for a variation that
+        # never actually existed on eBay — confirmed live, 2026-08.
+        # available_qty is the ceiling every downstream qty_to_push
+        # computation in _stage_promotion() only ever narrows further
+        # (low_stock/quantity_limit both only reduce), so if it's already
+        # 0 there's no path to a nonzero push regardless of those.
+        if not promoted_resolved["available_qty"]:
+            return {"row_id": row_id, "pushed": False, "dry_run": dry_run,
+                     "error": "0 available quantity — eBay silently rejects a new variation "
+                              "added at quantity 0, so there's nothing to push until this card "
+                              "has real inventory"}
+
         item = fetch_item(listing_id, account_num=account_num)
         variations_node = _find(item, "Variations")
         if variations_node is None:
@@ -567,6 +612,7 @@ def push_single_card_live(row_id: str, account_num: int = 1, platform: str = "eb
                      "error": "live listing has no <Variations> block — not a multi-variation listing"}
 
         variations = deep_copy_variations(item)
+        normalize_quantities(variations)
         strip_selling_status(variations)
 
         live_variation_count = len(_findall(variations, "Variation"))
@@ -669,6 +715,7 @@ def remove_single_card_live(row_id: str, account_num: int = 1, platform: str = "
                      "error": "live listing has no <Variations> block — not a multi-variation listing"}
 
         variations = deep_copy_variations(item)
+        normalize_quantities(variations)
         strip_selling_status(variations)
 
         specifics_set = get_specifics_set(variations)
@@ -797,6 +844,7 @@ def revise_single_variation_qty(platform_listing_id: str, new_qty: int, account_
                      "error": "live listing has no <Variations> block — not a multi-variation listing"}
 
         variations = deep_copy_variations(item)
+        normalize_quantities(variations)
         strip_selling_status(variations)
 
         specifics_set = get_specifics_set(variations)

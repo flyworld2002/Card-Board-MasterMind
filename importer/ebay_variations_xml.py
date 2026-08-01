@@ -124,6 +124,43 @@ def set_variation_price_qty(variation: ET.Element, start_price: float = None,
         qty_el.text = str(quantity)
 
 
+def normalize_quantities(variations: ET.Element) -> None:
+    """
+    Rewrites every <Variation>'s <Quantity> to its true current available
+    amount (Quantity - QuantitySold), in place. Callers MUST run this
+    after deep_copy_variations() and BEFORE strip_selling_status() (needs
+    to read QuantitySold, which that call removes) — and before applying
+    any of this batch's own intentional quantity changes, so those aren't
+    immediately re-normalized away.
+
+    Why this exists (confirmed live, 2026-08): eBay's ReviseItem /
+    ReviseFixedPriceItem folds each variation's CURRENT QuantitySold into
+    whatever raw <Quantity> is present in the request — for EVERY
+    <Variation> element sent, not just the one(s) whose value actually
+    changed. Since this codebase's revise pattern is "deep-copy the whole
+    <Variations> block, mutate only what you mean to change, resend the
+    rest byte-for-byte" (see module docstring), every untouched
+    variation's stale raw <Quantity> — which already has ITS old sold
+    count baked in from a previous revise — gets eBay's sold-folding
+    applied to it AGAIN on every single revise call, silently
+    re-inflating every variation on the listing, not just the one(s)
+    actually being pushed. Confirmed with an exact reproduction: four
+    sequential single-variation revises, each resending the other three
+    untouched, inflated their stored Quantity by exactly one extra
+    QuantitySold per subsequent revise pass. Normalizing every
+    variation's Quantity down to its true available count before every
+    revise — touched or not — means eBay's own sold-folding reconstructs
+    the SAME true value instead of compounding a new one on top.
+    """
+    for var in _findall(variations, "Variation"):
+        sold = get_quantity_sold(var)
+        if sold <= 0:
+            continue
+        qty_el = _find(var, "Quantity")
+        current = int(qty_el.text) if qty_el is not None and qty_el.text else 0
+        set_variation_price_qty(var, quantity=max(current - sold, 0))
+
+
 def mark_variation_deleted(variation: ET.Element) -> None:
     """
     Flag a <Variation> row for deletion on the next Revise call

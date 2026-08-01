@@ -1507,3 +1507,118 @@ so manual re-provisioning should rarely be needed — but if
 `picking_api.py` ever starts failing TLS handshakes, re-run
 `tailscale cert desktop-tu1m2fc.tail2c58d7.ts.net` from the project
 root and restart the `CBMPickingAPI` scheduled task.
+
+### Major eBay quantity-corruption bug found and fixed (2026-08-01, session 13 cont'd)
+While preparing to push the "Pitch Black Reverse Holo - Ultra Rare"
+listing, Fei asked for a stock reconciliation against live eBay data
+first. That turned into finding and fixing the biggest bug of the
+project so far — a root cause that had been silently inflating live
+eBay quantities on every push, for as long as this listing/push
+pipeline has existed. Two distinct bugs, both real, both fixed:
+
+**Bug 1 — double-counting QuantitySold.** eBay's Trading API has an
+undocumented-in-this-codebase (but real, per eBay's own dev KB —
+articles 1525/1526) behavior: whatever raw `<Quantity>` value you send
+in *any* `ReviseItem`/`ReviseFixedPriceItem` call, eBay's backend adds
+the variation's *current* `QuantitySold` on top before storing it. To
+set "9 available," you send exactly `9` — eBay does the rest.
+`push_prices()` didn't know this and was manually computing
+`qty_sold + desired_available` before sending, so eBay added sold
+*again* on receipt — every push stored `desired + 2×sold`, compounding
+worse with every subsequent push. `revise_single_variation_qty()`
+(Balance Qty) had never had this bug — it already sent the raw desired
+value directly. Proved this empirically rather than trusting the KB
+article's wording alone: sent a known raw value via
+`revise_single_variation_qty`, then had Fei confirm eBay's Seller Hub
+"Available quantity" column matched exactly. Fix: removed the manual
+`qty_sold +` addition from both the "single" and multi-variation paths
+in `push_prices()` — now sends `change["qty_to_push"]` directly, same
+convention Balance Qty already used correctly. Also removed the now-fully-
+unused `quantity_sold_by_var` threading through `_do_promotions()`/
+`_stage_promotion()` and the `get_quantity_sold` import that went with it.
+
+**Bug 2 — pass-through corruption (the bigger one).** This
+codebase's revise pattern (documented in `ebay_variations_xml.py`'s
+module docstring) is "deep-copy the whole `<Variations>` block, mutate
+only what you mean to change, resend the rest byte-for-byte" — needed
+because eBay treats an omitted `<Variation>` as a deletion. Turns out
+eBay's sold-folding behavior from Bug 1 applies to *every* `<Variation>`
+element in a revise call, not just the one(s) with an intentionally new
+value — so every untouched, byte-for-byte-resent variation's stale raw
+`<Quantity>` (which already had ITS old sold count baked in from a
+previous revise) got sold-folded *again*, every single revise,
+regardless of whether that variation was ever meant to be touched.
+Proved this with an exact reproduction: revised 4 out-of-stock
+variations to 0 one at a time; each one resent the others-not-yet-fixed
+unchanged, and their stored quantity grew by exactly one more
+`QuantitySold` per subsequent revise pass (1+1+1+1=4, 3+3+3=9, 1+1=2,
+and the last one fixed had zero subsequent passes and came out
+correct at 0 — an exact numeric match, not a coincidence). This also
+explained why 51 of the 119 rows from an earlier "correctly fixed"
+push looked wrong again minutes later: test/diagnostic revises run
+*after* that push but *before* this fix existed had re-corrupted them
+as collateral damage.
+
+Fix: new `normalize_quantities(variations)` in `ebay_variations_xml.py` —
+walks *every* `<Variation>` in the deep-copied block and rewrites its
+`<Quantity>` to `existing_quantity - existing_sold` (true available),
+run right after `deep_copy_variations()` and before
+`strip_selling_status()` (needs to read `QuantitySold`, which that call
+removes) and before any of the caller's own intentional mutations.
+Wired into all 4 call sites in `ebay_pushprices.py` (`push_prices()`,
+`revise_single_variation_qty()`, `push_single_card_live()`,
+`remove_single_card_live()`). Re-verified the same 4-row sequence with
+the fix in place — the first-fixed row now stayed correct through 3
+subsequent unrelated revises, no re-inflation.
+
+**Two follow-on design changes, both requested by Fei once the root
+cause was clear:**
+- `out_of_stock` platform_listings rows are no longer skipped by a
+  push — they're gated in the same as `active` rows, with
+  `qty_to_push` forced to `0`. Previously a listing that went OOS kept
+  whatever stale (possibly corrupted) raw `<Quantity>` it last had,
+  which a live buyer could still see as real stock. Only `'delisted'`
+  (not live on eBay at all) is excluded now.
+- `push_prices()` no longer skips rows whose resolved price/qty match
+  what we last recorded as pushed (`pushed_price`/`pushed_qty`) — it
+  now always resends every synced, live-status row's current true
+  value on every push. That diff-against-our-own-history logic is
+  exactly what let the 51-row corruption go undetected: our own
+  records said those rows were already correct, so nothing ever
+  re-checked them against eBay's actual live state. Always overwriting
+  with current truth is self-healing against drift from *any* cause,
+  not just this specific bug.
+
+Both listings (`336691613250` "Reverse Holo - Ultra Rare" and
+`336691917730` "Common") were fully re-pushed with the fix in place and
+verified clean: every live eBay quantity checked against what was
+intended, zero mismatches on both (124/124 and 84/84 rows respectively).
+
+### Separate bug: pushing a new variation at 0 available quantity silently no-ops (2026-08-01)
+Found while Fei was testing add/remove-variation flows. Pushed a queued
+card (`Charcadet`, a promo) live via `push_single_card_live()` while it
+had 0 available inventory — the call returned success, `platform_listings`
+recorded it as `active` and pushed, but the variation was never actually
+live on eBay. Removing it then failed with "not found live — mismatch,
+needs manual reconcile in Seller Hub", since there was nothing there to
+remove.
+
+Root cause: `_post()` (`importer/ebay.py`) only raises on
+`Ack=Failure`; eBay returned `Ack=Warning` with two messages our code
+never inspects: "SKU missing in variation" and, critically,
+**"Variations with quantity '0' will be removed."** — eBay silently
+drops any variation added at quantity 0, no hard error, just a warning
+our code discarded. Confirmed by bypassing `_post()`'s Ack check and
+printing the raw `<Errors>` block directly against a real revise call.
+
+Fix: `push_single_card_live()` now checks `promoted_resolved
+["available_qty"]` up front and refuses with a clear error before
+attempting anything, if it's 0 — `_stage_promotion()`'s downstream
+low_stock/quantity_limit math only ever narrows qty_to_push further, so
+0 available_qty can never produce a nonzero push regardless. Added the
+same guard to both promotion paths in `_do_promotions()` (250-cap
+auto-promotion) — a 0-qty queued card is now skipped (left queued for
+a future run) rather than "successfully" promoted into a phantom
+platform_listings row. Verified live: the same Charcadet push now
+fails immediately with a clear message, no DB writes, roster row stays
+cleanly `queued`.
