@@ -86,7 +86,7 @@ def _pick_card_interactive(search_name: str = None) -> str | None:
 
     if len(results) == 1:
         c = results[0]
-        print(f"  Found: {c['name']} #{c['card_number']} — {c['set_name']} ({c['variant'] or 'Standard'})")
+        print(f"  Found: {c['name']} #{c['card_number']} — {c['set_name']}")
         confirm = input("  Use this card? (y/n) [y]: ").strip().lower()
         return str(c["id"]) if confirm != "n" else None
 
@@ -94,7 +94,7 @@ def _pick_card_interactive(search_name: str = None) -> str | None:
     for i, c in enumerate(results, 1):
         own = "★ has own photo" if c["image_url_own"] else ""
         print(f"    {i}. {c['name']} #{c['card_number']} | "
-              f"{c['set_name']} | {c['variant'] or 'Standard'} {own}")
+              f"{c['set_name']} {own}")
 
     choice = input(f"  Pick a number (1-{len(results)}) or 's' to skip: ").strip()
     if choice.isdigit() and 1 <= int(choice) <= len(results):
@@ -106,7 +106,7 @@ def _search_cards(name: str) -> list[dict]:
     with db_cursor() as cur:
         cur.execute("""
             SELECT
-                cm.id, cm.name, cm.card_number, cm.variant,
+                cm.id, cm.name, cm.card_number,
                 cm.image_url, cm.image_url_own,
                 cs.name AS set_name
             FROM card_master cm
@@ -122,7 +122,7 @@ def _get_card(card_id: str) -> dict | None:
     with db_cursor() as cur:
         cur.execute("""
             SELECT
-                cm.id, cm.name, cm.card_number, cm.variant,
+                cm.id, cm.name, cm.card_number,
                 cm.image_url, cm.image_url_own,
                 cs.name AS set_name
             FROM card_master cm

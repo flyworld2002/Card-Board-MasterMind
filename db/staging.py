@@ -80,7 +80,6 @@ def get_staging_rows(batch_id: str = None,
                 cm.name         AS matched_card_name,
                 cm.card_number  AS matched_card_number,
                 cm.rarity,
-                cm.variant,
                 cs.name         AS matched_set_name,
                 cs.set_code
             FROM staging s
