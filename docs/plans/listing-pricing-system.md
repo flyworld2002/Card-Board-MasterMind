@@ -1622,3 +1622,192 @@ a future run) rather than "successfully" promoted into a phantom
 platform_listings row. Verified live: the same Charcadet push now
 fails immediately with a clear message, no DB writes, roster row stays
 cleanly `queued`.
+
+## PLANNING (2026-08-02, session 14) — genuinely new listings, spreadsheet
+## import, per-copy photo library. Nothing in this section is built yet;
+## all three items below were confirmed with Fei in conversation before
+## any code/schema work starts.
+
+### 1. Create a genuinely new eBay listing (not just add to an existing one)
+Everything built so far — `push_prices()`, `push_single_card_live()`,
+`_do_promotions()` — only ever **revises** a listing that already exists
+on eBay (`ReviseItem`/`ReviseFixedPriceItem`). Confirmed via a repo-wide
+grep: zero references to `AddFixedPriceItem`/`AddItem`/`CategoryID`/
+`ListingDuration`/business-policy fields anywhere. `listing_templates`
+only ever stored pricing/naming config for variations added to a listing
+that already existed — it has no columns for the listing-level metadata
+(category, description, item location, duration, shipping/return/payment
+policy) that `AddFixedPriceItem` requires, because nothing has ever had
+to submit that metadata before.
+
+**Confirmed with Fei:**
+- Listing-level metadata can come from **either** cloning an existing
+  listing **or** manual entry, chosen per new listing (not an either/or
+  architecture decision — both paths need to exist, manual is explicitly
+  the fallback "for when the type of listing doesn't already exist to
+  clone from").
+- Fei's eBay account uses **Business Policies** (shipping/return/payment
+  are account-level named profiles referenced by ID, not raw per-listing
+  blocks). Cloning copies the profile IDs straight off the source
+  listing's `GetItem` response. Manual entry needs a profile **picker**
+  (sourced from `GetUserPreferences` /
+  `ShowSellerProfilePreferences=true`, which lists the account's
+  configured profiles), not free-text policy entry.
+- First push is a **batch**, not a one-card bootstrap: "Create listing"
+  submits every *ready* queued roster row as the initial `<Variations>`
+  set in one `AddFixedPriceItem` call, rather than creating the listing
+  with one card and adding the rest through the existing add-variation
+  path afterward.
+- Partial readiness is allowed and expected: dry-run first (matches the
+  existing Push button's confirm-dialog convention), show which queued
+  rows are ready vs. excluded and why (no resolved price, 0 available
+  qty, etc.), let Fei choose to push just the ready subset. Excluded rows
+  stay `queued` — once the listing has a real `listing_id`, they go live
+  later through the **already-built** `push_single_card_live()` /
+  250-cap-promotion paths unchanged. No new "top-up" mechanism needed —
+  this feature only replaces the bootstrap (first-ever) push for a
+  listing that doesn't exist yet.
+
+**New schema** — `listing_templates` gains (only populated while
+`listing_id` is still blank, i.e. before the first successful create
+push):
+- `source` (`'cloned'` | `'manual'`)
+- `cloned_from_listing_id` (nullable, the eBay ItemID cloned from)
+- `category_id`
+- `title`
+- `description_html`
+- `item_location`
+- `listing_duration`
+- `payment_policy_id` / `return_policy_id` / `shipping_policy_id`
+  (Business Policy profile IDs)
+
+**New Trading API surface needed:**
+- Extend the existing `GetItem` call/parsing in `importer/ebay.py`
+  (already used for listings-import) to also pull `CategoryID`,
+  `ItemLocation` (`Location`/`PostalCode`/`Country`), `ListingDuration`,
+  `Description`, and `SellerProfiles` (the Business Policy IDs) — today
+  it only extracts variation/title data.
+- New `GetUserPreferences` call (`ShowSellerProfilePreferences=true`) to
+  list the account's configured shipping/return/payment profiles for the
+  manual-entry picker.
+- New `AddFixedPriceItem` call: builds a fresh `<Item>` — the listing-
+  level XML (category/description/location/duration/`SellerProfiles`)
+  plus a `<Variations>` block built from every ready queued row, reusing
+  the existing `add_variation_row`/naming/picture helpers in
+  `ebay_variations_xml.py`. Returns the new `ItemID`.
+
+**DB writes only after a successful `AddFixedPriceItem`** (same
+"never write before a confirmed eBay success" convention already used by
+`_do_promotions()`):
+- `listing_templates.listing_id` = the returned `ItemID`
+- one `platform_listings` row per included card (`status='active'`,
+  `pushed_price`/`pushed_qty`/`pushed_at` set — same pattern as the
+  existing promotion `INSERT`)
+- `listing_card_assignments.status='active'` + `platform_listing_id` per
+  included card
+- `ebay_listing_map` upsert per included card (same as `_stage_promotion`
+  already does for existing-listing promotions)
+
+**Still open, to resolve once this is actually picked up:** the exact
+full field list `AddFixedPriceItem` needs beyond what's listed above
+(`ConditionID`, item specifics beyond `VariationSpecifics`, payment
+method assumptions) — needs checking against a real `GetItem` response
+from one of Fei's live listings while building, not guessed at now. Also
+where "Create new listing" lives in the UI — likely extends the existing
+"offer to create a template if none exists for the typed Item #" flow on
+the Listing pricing page, replacing the Item#-required assumption with a
+clone-vs-manual choice up front.
+
+### 2. Excel-to-staging importer (separate feature — build independently,
+### not in the same pass as new-listing-creation, per Fei's explicit call)
+New cards do **not** get created from inside the Listing Pricing System
+at all. Instead: import a spreadsheet directly into the existing
+`staging` table, through the same review/approve pipeline every other
+importer already uses. Once a spreadsheet-sourced card clears
+`--approve` into real inventory, it's just an existing card as far as
+listing creation is concerned — it's found through the
+**already-built** "Add card to listing" search on the Listing pricing
+page. This removes the need for any new-card-creation UI inside the
+listing feature itself.
+
+**Confirmed with Fei:**
+- Matching is **automatic** — same name+set lookup convention every
+  other importer already uses (`find_card_by_name_set`-style), not a
+  separate manual mapping table Fei maintains by hand.
+- If a row doesn't match anything, it becomes a **manual** `card_master`
+  creation directly from the spreadsheet's own columns — no PokemonTCG
+  API lookup attempted for this path (unlike the general "API first,
+  manual fallback" convention discussed earlier — for this importer
+  specifically, an unmatched row goes straight to manual creation).
+- Wrong auto-matches get fixed by hand afterward, reusing the existing
+  `--review` flow's card-match fixup (the same tool already used for
+  ambiguous matches today) — no new correction UI needed.
+
+**Not yet designed** (deliberately deferred until this is picked up on
+its own): expected spreadsheet column layout, which fields are required
+vs. optional, and whether this ships as a new `importer/` module + a new
+`main.py` flag (matching the `tcgplayer_html.py` convention) or gets a
+web-side upload path. Scope this fully when the work actually starts.
+
+### 3. Per-copy photo library (header/detail), separate from
+### `card_master.image_url_own`
+**Problem:** `card_master.image_url_own` is a single, app-wide "own
+photo" per card — built as `--upload-image`
+(`importer/image_upload.py`), CLI-only (interactive search + local file
+path), **and currently broken**: its card-lookup queries still select
+`card_master.variant`, a column dropped when the seven-axis
+`card_variants` model replaced it (per `find_card_by_name_set`'s own
+comment in `db/connection.py`) — running `--upload-image` today errors
+on that missing column. Separately, `listing_card_assignments.
+eps_picture_url` (built session 6) already supports one eBay-hosted
+picture per queued roster row.
+
+Neither fits what Fei actually needs: pricy cards get photographed front
+**and** back, and Fei often holds multiple physical copies of the same
+`card_id` at once, split across different listings (the existing Balance
+Qty feature already assumes this is common) — each copy needs its own
+distinct photo set, which a single `image_url_own` column or a single
+`eps_picture_url` string can't represent.
+
+**Confirmed design (header/detail, Fei's explicit preference over a flat
+ordered list of photos):**
+- `card_photos` (header — one row per physical copy's photo set): `id`,
+  `card_id`, `front_eps_url`, `label` (free text so Fei can tell copies
+  apart, e.g. "Copy A — NM"), optional `has_additional` flag (redundant
+  with detail-row existence — zero detail rows already means
+  single-image — kept anyway per Fei's ask), `created_at`.
+- `card_photo_details`: `id`, `card_photo_id` (FK to the header), `eps_url`,
+  `label`, `sort_order` — one row per photo beyond the front (back,
+  close-up, etc.).
+- Deliberately separate from `card_master.image_url_own`, which keeps
+  acting as the generic fallback shown wherever no listing-specific group
+  is staged (same fallback behavior the current single-`eps_picture_url`
+  mechanism already has).
+- Staging a queued roster row's picture(s) becomes: pick one
+  `card_photos` group for that card (not individual photos) — the front
+  plus every `card_photo_details` row, in `sort_order`, gets staged/
+  pushed together for that row.
+
+**Real gap found while designing this:** `set_variation_picture()`
+(`ebay_variations_xml.py`) only ever writes **one** `<PictureURL>` per
+variation today (finds-or-creates a single entry, overwrites it) — eBay's
+Trading API natively supports multiple `<PictureURL>` entries per
+`VariationSpecificPictureSet`, this codebase just never exercised it
+since no feature needed more than one picture per variation before now.
+Needs extending to accept an ordered list of URLs and write all of them,
+or front+back never actually reaches eBay. `listing_card_assignments.
+eps_picture_url` (currently one raw URL column) also needs to become a
+reference to a `card_photos` group instead, so a row can carry more than
+one staged picture.
+
+**Not yet designed:** the upload flow for building a new group (upload
+front, optionally add more via `card_photo_details`, label it) —
+presumably a new modal replacing/extending the current single-URL/
+single-file "stage picture" modal.
+
+### Known bug surfaced during this planning conversation, not yet fixed
+`importer/image_upload.py` (`--upload-image`) queries `card_master.
+variant`, a column that no longer exists — the command is currently
+broken. Needs fixing regardless of the photo-library work above, since
+it's the only existing path (even if CLI-only) that touches
+`card_master.image_url_own`.
