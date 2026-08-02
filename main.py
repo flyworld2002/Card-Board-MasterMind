@@ -7,6 +7,7 @@ Import:
   python3 main.py --tcgplayer-html order.html   # import HTML to staging
   python3 main.py --tcgplayer-html ~/orders/ --dry-run  # dry run a folder
   python3 main.py --manual                      # manual purchase entry
+  python3 main.py --excel-staging cards.xlsx     # spreadsheet → staging (see docs/plans/card_import_template.xlsx)
   python3 main.py --ebay-import                 # import active eBay listings → staging
   python3 main.py --ebay-import --dry-run       # preview without writing to DB
   python3 main.py --ebay-verify                 # verify eBay credentials only
@@ -38,6 +39,10 @@ def cmd_tcgplayer_html(args):
 def cmd_manual(args):
     from importer.manual import manual_import
     manual_import()
+
+def cmd_excel_staging(args):
+    from importer.excel_staging import import_from_excel
+    import_from_excel(args.excel_staging, dry_run=args.dry_run)
 
 def cmd_review(args):
     from importer.staging_workflow import review_staging
@@ -354,6 +359,11 @@ def main():
         help="Import TCGPlayer saved HTML file or folder → staging")
     group.add_argument("--manual", action="store_true",
         help="Manually enter a purchase")
+    group.add_argument("--excel-staging", metavar="PATH",
+        help="Import a filled-out spreadsheet (see "
+             "docs/plans/card_import_template.xlsx) → staging. Auto-matches "
+             "by set + card number; creates a new card_master row directly "
+             "(no API call) when nothing matches. Use --dry-run to preview.")
     group.add_argument("--review", action="store_true",
         help="Review and fix staged items interactively")
     group.add_argument("--approve", action="store_true",
@@ -529,6 +539,8 @@ def main():
         cmd_tcgplayer_html(args)
     elif args.manual:
         cmd_manual(args)
+    elif args.excel_staging:
+        cmd_excel_staging(args)
     elif args.review:
         cmd_review(args)
     elif args.approve:

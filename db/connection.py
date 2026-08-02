@@ -101,6 +101,27 @@ def find_card_by_name_set(name: str, set_id: str, variant: str = None) -> list[d
         return cur.fetchall()
 
 
+def find_card_by_number_set(set_id: str, card_number: str) -> list[dict]:
+    """Match on the set + printed card number — the reliable natural key
+    within a set (used by the Excel-to-staging importer's auto-match)."""
+    with db_cursor() as cur:
+        cur.execute("""
+            SELECT * FROM card_master
+            WHERE set_id = %s
+              AND LOWER(card_number) = LOWER(%s)
+        """, (set_id, card_number))
+        return cur.fetchall()
+
+
+def find_set_by_name(name: str) -> dict | None:
+    with db_cursor() as cur:
+        cur.execute(
+            "SELECT * FROM card_sets WHERE LOWER(name) = LOWER(%s)",
+            (name,)
+        )
+        return cur.fetchone()
+
+
 def insert_card_master(set_id: str, name: str, card_number: str,
                        rarity: str = None, variant: str = None,
                        finish: str = None, is_promo: bool = False,

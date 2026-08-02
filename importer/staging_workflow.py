@@ -186,6 +186,26 @@ def _resolve_ambiguous(row: dict):
         raw = row["match_options"]
         options = json.loads(raw) if isinstance(raw, str) else raw
 
+    # Local-catalog candidates (e.g. from the Excel importer, which matches
+    # against card_master directly rather than the PokemonTCG API) are
+    # tagged with "card_id" instead of an API "id" — resolve those without
+    # ever calling the API.
+    if options and "card_id" in options[0]:
+        print(f"\n  Found {len(options)} matching card(s) already in the catalog:")
+        for i, o in enumerate(options, 1):
+            print(f"    {i}. {o['name']} #{o.get('card_number','?')} | "
+                  f"{o.get('rarity') or '—'}")
+        choice = input(f"\n  Pick number (1-{len(options)}) or 's' to skip: ").strip()
+        if choice.lower() == "s" or not choice.isdigit():
+            update_staging_row(str(row["id"]), status="skipped", notes="Could not resolve")
+            print("  Skipped.\n")
+            return
+        idx = int(choice) - 1
+        card_id = options[idx]["card_id"]
+        update_staging_row(str(row["id"]), card_id=card_id, match_status="matched")
+        print(f"  ✓ Resolved to: {options[idx]['name']} #{options[idx].get('card_number','?')}\n")
+        return
+
     if not options:
         search_name = input(f"  Search name [{row['card_name']}]: ").strip() or row["card_name"]
         set_name    = input(f"  Set name [{row.get('set_name','')}]: ").strip() or row.get("set_name", "")
