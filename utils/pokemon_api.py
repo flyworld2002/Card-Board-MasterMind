@@ -255,7 +255,7 @@ def lookup_card_for_ebay(card_name: str, card_number: str,
     if cache_key in _ebay_lookup_cache:
         cached = _ebay_lookup_cache[cache_key]
         if not cached["matched"]:
-            print(f"    ⚠️  CACHE HIT not_found: {cache_key}")
+            print(f"    ! CACHE HIT not_found: {cache_key}")
         return cached
 
     from db.connection import (
@@ -308,7 +308,7 @@ def lookup_card_for_ebay(card_name: str, card_number: str,
                 result["card_name"] = row["name"]
                 result["rarity"]    = row.get("rarity")
                 result["image_url"] = row.get("image_url")
-                print(f"    ✅ Found in local DB — skipping API lookup: "
+                print(f"    + Found in local DB — skipping API lookup: "
                       f"{row['name']} #{row.get('card_number')} ({set_name})")
 
                 try:
@@ -324,12 +324,12 @@ def lookup_card_for_ebay(card_name: str, card_number: str,
                     )
                     result["variant_id"] = variant_id
                 except Exception as e:
-                    print(f"    ⚠️  Could not create variant for {card_name}: {e}")
+                    print(f"    ! Could not create variant for {card_name}: {e}")
 
                 _ebay_lookup_cache[cache_key] = result
                 return result
             elif len(local_matches) > 1:
-                print(f"    ⚠️  Multiple local DB matches for {card_name} #{card_number} "
+                print(f"    ! Multiple local DB matches for {card_name} #{card_number} "
                       f"({set_name}) — falling back to API to disambiguate")
 
     # ── Step 1: Search the Pokemon TCG API ───────────────────────────────────
@@ -380,7 +380,7 @@ def lookup_card_for_ebay(card_name: str, card_number: str,
     )
 
     if not api_results:
-        print(f"    ⚠️  Not found in Pokemon TCG API: {card_name} #{card_number} ({set_name})")
+        print(f"    ! Not found in Pokemon TCG API: {card_name} #{card_number} ({set_name})")
         return result
 
     api_card = api_results[0]
@@ -434,7 +434,7 @@ def lookup_card_for_ebay(card_name: str, card_number: str,
             result["source"]  = "api"
 
         except Exception as e:
-            print(f"    ❌ Error creating card_master for {card_name}: {e}")
+            print(f"    x Error creating card_master for {card_name}: {e}")
             return result
 
     # ── Step 4: Get or create card_variant (seven-axis model) ────────────────
@@ -451,7 +451,7 @@ def lookup_card_for_ebay(card_name: str, card_number: str,
         )
         result["variant_id"] = variant_id
     except Exception as e:
-        print(f"    ⚠️  Could not create variant for {card_name}: {e}")
+        print(f"    ! Could not create variant for {card_name}: {e}")
 
     _ebay_lookup_cache[cache_key] = result
     return result
@@ -652,7 +652,7 @@ def _api_search(q: str, page_size: int = 20) -> list[dict]:
             # Retry once or twice before trusting an empty result, unless
             # this is already our last attempt.
             if not data and attempt < max_retries:
-                print(f"    ⏳ Empty result (attempt {attempt}/{max_retries}), "
+                print(f"    ... Empty result (attempt {attempt}/{max_retries}), "
                       f"retrying in {retry_delay}s in case it's transient...")
                 time.sleep(retry_delay)
                 continue
@@ -661,10 +661,10 @@ def _api_search(q: str, page_size: int = 20) -> list[dict]:
 
         except Exception as e:
             if attempt < max_retries:
-                print(f"    ⏳ API timeout (attempt {attempt}/{max_retries}), retrying in {retry_delay}s...")
+                print(f"    ... API timeout (attempt {attempt}/{max_retries}), retrying in {retry_delay}s...")
                 time.sleep(retry_delay)
             else:
-                print(f"    ❌ API failed after {max_retries} attempts: {e}")
+                print(f"    x API failed after {max_retries} attempts: {e}")
                 raise
 
 
