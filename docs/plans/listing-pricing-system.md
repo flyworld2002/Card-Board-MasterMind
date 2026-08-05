@@ -2014,3 +2014,42 @@ up afterward regardless of outcome. `jobs.js` gained a third "start" box
 `jobProgressText()` case for `excel_import`'s progress/result shape —
 the existing Recent Jobs table and polling needed no changes at all,
 exactly as `job_runner.py`'s own docstring promises for a new job type.
+
+### Revise metadata on an already-live listing (2026-08, session 16)
+Fei's follow-up: the clone/manual metadata flow only ever covered a
+listing at creation time — once a draft's `create_listing()` succeeds
+and `listing_id` is set, there was no way to touch title/description/
+category/policies/etc. again. New `revise_listing_metadata()`
+(`ebay_create_listing.py`) — the mirror image of the create-time step,
+via `ReviseFixedPriceItem` instead of `AddFixedPriceItem`. Only
+top-level `<Item>` fields are touched, no `<Variations>` at all — unlike
+the variations block, eBay only requires sending the fields you're
+actually changing for a plain top-level revise, confirmed by reusing
+the same partial-revise pattern `push_prices()`'s single-listing path
+already established. `fields` is merged with the template's current DB
+values so every call is a complete, consistent request even from a
+partial diff — verified live via `--dry-run` against a real listing
+(`336204674240`/template `01d68e72-...`): correctly sent only `<Title>`
+alongside `<ItemID>`, leaving every other real eBay field untouched
+rather than blanking anything not yet captured locally.
+
+Not everything is necessarily revisable once a listing has real
+activity — eBay commonly restricts `ListingDuration`/`ConditionID`
+post-listing — deliberately not pre-validated; a rejection surfaces as
+a normal eBay error via `_post()`, same as the still-open
+category-specific-Item-Specifics unknown from the create flow.
+
+CLI: `--ebay-revise-listing-metadata --template-id X --metadata-json
+'{...}' [--dry-run]`. API: `POST /api/listing-metadata/revise` (own
+lock). Web UI: the "Listing metadata" panel (previously draft-only) now
+also shows for already-live templates, with just an "Edit fields"
+button (no clone/preview/create — not applicable once live) —
+`metadataPanelHTML(isDraft)`/`wireMetadataControls(...)` replace the
+earlier draft-only versions. The shared "Edit fields" modal
+(`openManualMetadataModal`, now takes `isDraft`) works identically
+either way since it always pre-fills from whatever's currently on the
+template — cloned, manually set, or already-live — but its Save
+button branches: DB-only write for a draft, or a dry-run-then-confirm-
+then-real revise for a live listing (same UX pattern as the Push
+button), with an explicit warning in the modal that saving on a live
+template is a real eBay write, not just a local edit.

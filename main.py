@@ -365,6 +365,20 @@ def cmd_ebay_set_listing_metadata(args):
     result = set_manual_listing_metadata(template_id=args.template_id, **fields)
     print(result)
 
+def cmd_ebay_revise_listing_metadata(args):
+    import json
+    from importer.ebay_create_listing import revise_listing_metadata
+    if not args.template_id:
+        raise SystemExit("--ebay-revise-listing-metadata requires --template-id")
+    if not args.metadata_json:
+        raise SystemExit("--ebay-revise-listing-metadata requires --metadata-json")
+    fields = json.loads(args.metadata_json)
+    result = revise_listing_metadata(template_id=args.template_id, account_num=args.account,
+                                      dry_run=args.dry_run, **fields)
+    if result.get("error"):
+        raise SystemExit(f"--ebay-revise-listing-metadata failed: {result['error']}")
+    print(result)
+
 def cmd_ebay_preview_new_listing(args):
     from importer.ebay_create_listing import preview_new_listing
     if not args.template_id:
@@ -534,6 +548,16 @@ def main():
              "payment_policy_id, return_policy_id, shipping_policy_id — see "
              "--ebay-list-policies for valid policy IDs). No eBay call, "
              "writes only listing_templates.")
+    group.add_argument("--ebay-revise-listing-metadata", action="store_true",
+        help="Revise listing-level metadata on a listing that's ALREADY LIVE, "
+             "via ReviseFixedPriceItem — the mirror image of "
+             "--ebay-set-listing-metadata for after the fact instead of before "
+             "creation. Requires --template-id (must already have a "
+             "listing_id) and --metadata-json (same fields as "
+             "--ebay-set-listing-metadata). eBay commonly restricts changing "
+             "ListingDuration/ConditionID post-listing — not pre-validated "
+             "here, a rejection surfaces as a normal eBay error. Use "
+             "--dry-run to build and inspect the request without sending it.")
     group.add_argument("--ebay-preview-new-listing", action="store_true",
         help="Show which of a template's queued cards are ready to go into a "
              "brand-new listing right now vs. not (and why), plus any missing "
@@ -698,6 +722,8 @@ def main():
         cmd_ebay_clone_listing_metadata(args)
     elif args.ebay_set_listing_metadata:
         cmd_ebay_set_listing_metadata(args)
+    elif args.ebay_revise_listing_metadata:
+        cmd_ebay_revise_listing_metadata(args)
     elif args.ebay_preview_new_listing:
         cmd_ebay_preview_new_listing(args)
     elif args.ebay_create_listing:

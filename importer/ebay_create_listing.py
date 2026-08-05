@@ -406,3 +406,111 @@ def create_listing(template_id: str, account_num: int = 1, platform: str = "ebay
     p(f"[{new_item_id}] created new listing with {len(ready)} card(s) ({len(not_ready)} left queued).")
     return {"template_id": template_id, "created": True, "dry_run": False,
              "listing_id": new_item_id, "ready_count": len(ready), "not_ready_count": len(not_ready)}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Revise metadata on an ALREADY-LIVE listing — the mirror image of
+# create_listing()'s metadata step, for after the fact instead of before.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def revise_listing_metadata(template_id: str, account_num: int = 1, dry_run: bool = False,
+                             **fields) -> dict:
+    """
+    Revises listing-level metadata (title/description/category/location/
+    business policies/etc.) on a listing that's ALREADY live, via
+    ReviseFixedPriceItem — only top-level <Item> fields, no <Variations>
+    touched at all. Unlike create_listing()'s <Variations> block, eBay
+    only requires sending the fields you're actually changing here — no
+    deep-copy-and-resend needed for a plain top-level revise.
+
+    `fields` is a partial set of REQUIRED_METADATA_FIELDS keys (only
+    what the caller actually wants to change) — merged with the
+    template's current values so every revise call is a complete,
+    consistent request even though the caller only supplied a diff.
+
+    Not every field is necessarily revisable once a listing has real
+    activity — eBay commonly restricts ListingDuration and ConditionID
+    changes post-listing, for example. This doesn't pre-validate that;
+    a rejection surfaces as a normal eBay error via _post(), same as any
+    other unsupported revise elsewhere in this codebase.
+
+    DB (listing_templates) is only updated after a confirmed successful
+    revise — same "never write before a confirmed eBay success" rule
+    every other push in this feature follows.
+    """
+    with db_cursor() as cur:
+        template = _load_template(cur, template_id)
+        if template is None:
+            return {"template_id": template_id, "revised": False, "dry_run": dry_run,
+                     "error": "no such template"}
+        if not template["listing_id"]:
+            return {"template_id": template_id, "revised": False, "dry_run": dry_run,
+                     "error": "template has no live listing_id yet — use create_listing() instead"}
+
+        changed_cols = [k for k in REQUIRED_METADATA_FIELDS if k in fields]
+        if not changed_cols:
+            return {"template_id": template_id, "revised": False, "dry_run": dry_run,
+                     "error": "no metadata fields provided to revise"}
+
+        merged = {k: fields.get(k, template.get(k)) for k in REQUIRED_METADATA_FIELDS}
+
+        token = "***DRY-RUN-TOKEN-REDACTED***" if dry_run else get_user_token(account_num)
+
+        item = ET.Element(f"{{{NS}}}Item")
+        ET.SubElement(item, f"{{{NS}}}ItemID").text = template["listing_id"]
+
+        def add(tag, text):
+            if text is None:
+                return
+            el = ET.SubElement(item, f"{{{NS}}}{tag}")
+            el.text = text
+
+        add("Title", merged["title"])
+        add("Description", merged["description_html"])
+        if merged["category_id"]:
+            category = ET.SubElement(item, f"{{{NS}}}PrimaryCategory")
+            ET.SubElement(category, f"{{{NS}}}CategoryID").text = merged["category_id"]
+        add("Country", merged["item_country"])
+        add("Location", merged["item_location"])
+        add("PostalCode", merged["item_postal_code"])
+        add("ConditionID", merged["condition_id"])
+        add("ListingDuration", merged["listing_duration"])
+
+        policy_fields = ("payment_policy_id", "return_policy_id", "shipping_policy_id")
+        if any(merged[k] for k in policy_fields):
+            seller_profiles = ET.SubElement(item, f"{{{NS}}}SellerProfiles")
+            if merged["payment_policy_id"]:
+                node = ET.SubElement(seller_profiles, f"{{{NS}}}SellerPaymentProfile")
+                ET.SubElement(node, f"{{{NS}}}PaymentProfileID").text = merged["payment_policy_id"]
+            if merged["return_policy_id"]:
+                node = ET.SubElement(seller_profiles, f"{{{NS}}}SellerReturnProfile")
+                ET.SubElement(node, f"{{{NS}}}ReturnProfileID").text = merged["return_policy_id"]
+            if merged["shipping_policy_id"]:
+                node = ET.SubElement(seller_profiles, f"{{{NS}}}SellerShippingProfile")
+                ET.SubElement(node, f"{{{NS}}}ShippingProfileID").text = merged["shipping_policy_id"]
+
+        ET.register_namespace("", NS)
+        item_xml = ET.tostring(item, encoding="unicode")
+        xml = f"""<?xml version="1.0" encoding="utf-8"?>
+<ReviseFixedPriceItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials>
+    <eBayAuthToken>{token}</eBayAuthToken>
+  </RequesterCredentials>
+  {item_xml}
+</ReviseFixedPriceItemRequest>"""
+
+        if dry_run:
+            return {"template_id": template_id, "revised": False, "dry_run": True,
+                     "listing_id": template["listing_id"], "xml": xml}
+
+        _post("ReviseFixedPriceItem", xml, account_num=account_num)
+
+        set_clause = ", ".join(f"{c} = %s" for c in changed_cols)
+        values = [merged[c] for c in changed_cols]
+        cur.execute(
+            f"UPDATE listing_templates SET {set_clause}, updated_at = now() WHERE id = %s",
+            values + [template_id],
+        )
+
+    return {"template_id": template_id, "revised": True, "dry_run": False,
+             "listing_id": template["listing_id"], "fields": changed_cols}

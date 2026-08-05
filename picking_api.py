@@ -72,7 +72,7 @@ from importer.ebay_pushprices import (
 )
 from importer.ebay_create_listing import (
     list_business_policies, clone_listing_metadata, set_manual_listing_metadata,
-    preview_new_listing, create_listing, REQUIRED_METADATA_FIELDS,
+    revise_listing_metadata, preview_new_listing, create_listing, REQUIRED_METADATA_FIELDS,
 )
 from importer.job_runner import start_job, get_job, list_jobs
 from importer.market_price_refresh import refresh_market_prices
@@ -127,6 +127,9 @@ _revise_qty_lock = threading.Lock()
 # own lock, same reasoning as every other write endpoint here.
 _create_listing_lock = threading.Lock()
 
+# Revising an already-live listing's metadata — own lock, same reasoning.
+_revise_metadata_lock = threading.Lock()
+
 
 class PushPricesRequest(BaseModel):
     listing_id: str
@@ -172,6 +175,23 @@ class CloneListingMetadataRequest(BaseModel):
 
 class SetListingMetadataRequest(BaseModel):
     template_id: str
+    category_id: str | None = None
+    title: str | None = None
+    description_html: str | None = None
+    item_location: str | None = None
+    item_country: str | None = None
+    item_postal_code: str | None = None
+    listing_duration: str | None = None
+    condition_id: str | None = None
+    payment_policy_id: str | None = None
+    return_policy_id: str | None = None
+    shipping_policy_id: str | None = None
+
+
+class ReviseListingMetadataRequest(BaseModel):
+    template_id: str
+    account_num: int = 1
+    dry_run: bool = False
     category_id: str | None = None
     title: str | None = None
     description_html: str | None = None
@@ -392,6 +412,34 @@ def set_listing_metadata_endpoint(body: SetListingMetadataRequest,
     fields = {k: v for k, v in body.model_dump().items()
               if k in REQUIRED_METADATA_FIELDS and v is not None}
     return set_manual_listing_metadata(template_id=body.template_id, **fields)
+
+
+@app.post("/api/listing-metadata/revise")
+def revise_listing_metadata_endpoint(body: ReviseListingMetadataRequest,
+                                      x_picking_token: str = Header(default="")):
+    """
+    Revises listing-level metadata on a listing that's ALREADY LIVE, via
+    ReviseFixedPriceItem — the mirror image of /api/listing-metadata/manual
+    for after the fact instead of before creation. Own lock, same
+    reasoning as every other write endpoint here. body.dry_run builds and
+    returns the request without sending it.
+    """
+    if x_picking_token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="bad token")
+
+    fields = {k: v for k, v in body.model_dump().items()
+              if k in REQUIRED_METADATA_FIELDS and v is not None}
+
+    with _revise_metadata_lock:
+        try:
+            result = revise_listing_metadata(template_id=body.template_id, account_num=body.account_num,
+                                              dry_run=body.dry_run, **fields)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"revise failed: {e}")
+
+    if result.get("error"):
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
 
 
 @app.get("/api/preview-new-listing/{template_id}")
