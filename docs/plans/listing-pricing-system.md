@@ -1731,23 +1731,63 @@ page. This removes the need for any new-card-creation UI inside the
 listing feature itself.
 
 **Confirmed with Fei:**
-- Matching is **automatic** — same name+set lookup convention every
-  other importer already uses (`find_card_by_name_set`-style), not a
-  separate manual mapping table Fei maintains by hand.
-- If a row doesn't match anything, it becomes a **manual** `card_master`
-  creation directly from the spreadsheet's own columns — no PokemonTCG
-  API lookup attempted for this path (unlike the general "API first,
-  manual fallback" convention discussed earlier — for this importer
-  specifically, an unmatched row goes straight to manual creation).
+- Matching is **automatic** — set + card number against our own catalog,
+  not a separate manual mapping table Fei maintains by hand.
+- If a row doesn't match locally, it falls back to a live PokemonTCG API
+  search (revised after initial build — see build log below) before
+  ever resorting to manual creation.
 - Wrong auto-matches get fixed by hand afterward, reusing the existing
   `--review` flow's card-match fixup (the same tool already used for
   ambiguous matches today) — no new correction UI needed.
 
-**Not yet designed** (deliberately deferred until this is picked up on
-its own): expected spreadsheet column layout, which fields are required
-vs. optional, and whether this ships as a new `importer/` module + a new
-`main.py` flag (matching the `tcgplayer_html.py` convention) or gets a
-web-side upload path. Scope this fully when the work actually starts.
+### Built (2026-08-02/04)
+`importer/excel_staging.py` + `--excel-staging PATH [--dry-run]` in
+`main.py`, plus a generated sample workbook at
+`docs/plans/card_import_template.xlsx` (headers + a Field Guide sheet —
+`docs/plans/build_card_import_template.py` is the one-off generator
+script). Column layout: `card_name`, `set_name`, `set_code` (only needed
+for a genuinely new set), `card_number`, `rarity`, the seven variant
+axes, `is_promo`/`is_first_edition`, `image_url`, `condition`,
+`quantity`, `price`, `purchase_date`, `source`, `reference_id`, `notes`.
+
+**Resolution order ended up three-tier, not two** (Fei revised this
+after the first version): local `card_master` match by set + card
+number first (no network call) → PokemonTCG API search for anything not
+found locally, fired **in parallel** across every such row in one
+import (`ThreadPoolExecutor(max_workers=15)`, same pattern as
+`market_price_refresh.py` — only the HTTP searches run concurrently,
+the DB writes that finalize each match happen sequentially afterward to
+avoid any concurrent-insert race on `get_or_create_set`) → manual
+creation straight from the row's own spreadsheet columns only as the
+final fallback, when neither the local catalog nor the API has the
+card. A row matching more than one candidate (locally or via the API)
+is left `ambiguous` for `--review` — extended
+`_resolve_ambiguous()` in `importer/staging_workflow.py` to handle
+locally-sourced candidates (tagged `card_id`) alongside its existing
+API-search-result candidates, so a local duplicate-match collision can
+be resolved without an API call.
+
+Also fixed two real bugs surfaced while building/testing this against
+live data:
+- `db/staging.py`'s `get_staging_rows()` and `importer/image_upload.py`
+  both still selected the long-dropped `card_master.variant` column —
+  **`--review` itself was completely broken**, not just
+  `--upload-image` as first suspected. Confirmed live (ran the exact
+  query, got `column cm.variant does not exist`) before fixing both.
+- `utils/pokemon_api.py`'s retry-message `print()`s used emoji that
+  crash on Windows' cp1252 console — only surfaced once this importer's
+  parallel API path actually exercised a live retry for the first time
+  in this environment.
+
+Verified via dry-runs against live data (no writes): local match, API
+fallback + create-from-API, and manual-fallback-after-both-fail all
+confirmed correct on the real template plus a throwaway edge-case
+workbook (missing fields, bad condition, non-numeric qty/price,
+unresolvable set) — all skip cleanly with a clear reason, no crash.
+
+**Not yet done**: Fei hasn't run this against a real filled-out
+spreadsheet yet (only the sample template + synthetic edge cases so
+far) — worth a real pass before trusting it for a bulk import.
 
 ### 3. Per-copy photo library (header/detail), separate from
 ### `card_master.image_url_own`
@@ -1805,9 +1845,126 @@ front, optionally add more via `card_photo_details`, label it) —
 presumably a new modal replacing/extending the current single-URL/
 single-file "stage picture" modal.
 
-### Known bug surfaced during this planning conversation, not yet fixed
-`importer/image_upload.py` (`--upload-image`) queries `card_master.
-variant`, a column that no longer exists — the command is currently
-broken. Needs fixing regardless of the photo-library work above, since
-it's the only existing path (even if CLI-only) that touches
-`card_master.image_url_own`.
+### Known bug surfaced during this planning conversation — fixed same session
+`importer/image_upload.py` (`--upload-image`) and `db/staging.py`'s
+`get_staging_rows()` (i.e. **`--review` itself, not just
+`--upload-image`**) both queried the long-dropped `card_master.variant`
+column — confirmed live (`column cm.variant does not exist`) before
+fixing both by dropping the dead references. Verified both queries run
+clean afterward.
+
+## BUILT (2026-08, session 15) — item 1: create a genuinely new eBay listing
+Backend only, per Fei's call (this session's repo access is CBMM-only —
+the web UI is a separate session with `card-board-mastermind-WebInvManagement`
+open). Everything below is real, tested against live data (dry-runs and
+read-only calls only — no `AddFixedPriceItem` has actually been sent for
+real yet, deliberately, since that publishes a real live listing).
+
+**Migrations 016-018** (`docs/plans/listing_pricing_migration_01{6,7,8}_*.sql`):
+- 016: `resolve_listing_prices()` gains an optional `p_template_id uuid`
+  parameter — looks up the template by `id` when provided, by
+  `(platform, listing_id)` otherwise (fully backward compatible,
+  verified live: old 2-arg call and new template_id call return
+  byte-identical row counts/prices for the same template). Fixes the
+  actual blocker (`WHERE listing_id = p_listing_id` can never match a
+  NULL `p_listing_id`) plus a real correctness bug it exposed: the
+  "claimed by other listings" quantity subtraction used to silently
+  count nothing when `p_listing_id` was NULL (three-valued NULL logic),
+  which would have over-promised quantity on a new listing's first
+  push — fixed with `(p_listing_id IS NULL OR pl2.listing_id <>
+  p_listing_id)`, verified live via a real variant whose stock is
+  already fully committed to an existing listing (correctly resolves to
+  0 available for a hypothetical new listing, not the full pool).
+- 016 also adds `listing_templates.source` / `cloned_from_listing_id` /
+  `category_id` / `title` / `description_html` / `item_location` /
+  `item_country` / `listing_duration` / `payment_policy_id` /
+  `return_policy_id` / `shipping_policy_id`. 017 and 018 are small
+  same-day follow-ups for two fields found missing only once a real
+  `GetItem` response was inspected: `item_postal_code` (distinct from
+  `item_location`, needed for shipping calc) and `condition_id`.
+
+**Every eBay field name was confirmed against a real live response
+before being used** — pulled an actual `GetItem` (item `336204674240`)
+and `GetUserPreferences` (`ShowSellerProfilePreferences=true`) response
+and inspected them directly rather than guessing from eBay's docs.
+Concrete findings that shaped the build: `SellerProfiles/
+SellerPaymentProfile/PaymentProfileID` (+ Return/Shipping siblings) is
+how Business Policies actually appear on a real item; `PrimaryCategory/
+CategoryID`; `ConditionID` (`4000` = "Ungraded" for this account's
+cards); a real variation listing still carries a top-level `Quantity`/
+`StartPrice` even though the real values live per-variation; this
+account's `VariationSpecificsSet` name is consistently `"PokeCards"`
+across every existing listing (a discovered convention, not a hard
+requirement — defaulted, not hardcoded, in the new code); `GetUserPreferences`'
+real shape is `SellerProfilePreferences/SupportedSellerProfiles/
+SupportedSellerProfile` with `ProfileID`/`ProfileType` (`PAYMENT`/
+`RETURN_POLICY`/`SHIPPING`)/`ProfileName` — not the
+`SupportedSellerProfiles`-flat shape assumed before checking.
+
+**New module `importer/ebay_create_listing.py`:**
+- `list_business_policies(account_num)` — `GetUserPreferences` wrapper
+  for the manual-entry picker.
+- `fetch_listing_metadata(item_id, account_num)` /
+  `clone_listing_metadata(template_id, source_listing_id, account_num)` —
+  `GetItem`-based clone, snapshots onto the template row (not re-fetched
+  live at create time).
+- `set_manual_listing_metadata(template_id, **fields)` — same columns,
+  hand-entered, partial updates allowed.
+- `preview_new_listing(template_id, account_num)` — dry-run-first
+  readiness check (ready vs. not-ready-and-why, missing metadata),
+  pure DB read via migration 016's `p_template_id` path.
+- `create_listing(template_id, account_num, dry_run, specific_name)` —
+  the actual batch `AddFixedPriceItem`. Builds one `<Item>` with a fresh
+  `<Variations>` block (reusing `add_variation_row`/
+  `insert_specifics_value`/`set_variation_picture` from
+  `ebay_variations_xml.py`, and `_render_variation_name` from
+  `ebay_listing_sync.py` — no new naming logic). 0-qty queued rows are
+  excluded and stay queued, same "skip, don't block the batch" rule
+  `_do_promotions()` already uses. DB (`listing_templates.listing_id`,
+  `platform_listings`, `listing_card_assignments.status`,
+  `ebay_listing_map`) is only written after a confirmed successful
+  `AddFixedPriceItem` response — same rule every other push in this
+  feature already follows, now applied to a first-ever create instead
+  of a revise.
+
+**Real bug caught via self-testing, fixed same session**: `create_listing()`'s
+`--dry-run` path returns the full built request XML for inspection —
+the first push in this feature whose dry-run output includes the raw
+request rather than just a summary. That XML embeds the live Auth'n'Auth
+token (needed for a real send), and the token appeared in plaintext in
+this session's own transcript during testing. Fixed: `dry_run=True` now
+substitutes a placeholder token string instead of calling
+`get_user_token()` at all, so a dry-run can never leak a real
+credential regardless of where its output ends up (log, future web UI,
+pasted transcript). **Fei was advised to rotate that token as a
+precaution** since the real one was genuinely exposed once before the
+fix landed.
+
+**CLI** (`main.py`): `--ebay-list-policies`, `--ebay-clone-listing-metadata
+--template-id X --from-listing-id Y`, `--ebay-set-listing-metadata
+--template-id X --metadata-json '{...}'`, `--ebay-preview-new-listing
+--template-id X`, `--ebay-create-listing --template-id X [--dry-run]`.
+
+**API** (`picking_api.py`, for the future web UI): `GET
+/api/business-policies`, `POST /api/listing-metadata/clone`, `POST
+/api/listing-metadata/manual`, `GET
+/api/preview-new-listing/{template_id}`, `POST /api/create-listing` (own
+lock, same auth as every other endpoint in the file).
+
+**Verified live** (throwaway test template + one real roster row,
+deleted after each test — no residue): `--ebay-list-policies` (real
+read), `--ebay-clone-listing-metadata` (real `GetItem` read + DB write,
+all 11 fields populated correctly), `--ebay-preview-new-listing` (both
+the "0 available, already claimed elsewhere" and "1 available, ready"
+cases), `--ebay-create-listing --dry-run` (built a complete, correctly-
+escaped `AddFixedPriceItem` request against real cloned metadata + a
+real ready card — HTML description's `&`/`<`/`>` escaped correctly via
+ElementTree text-node serialization, token redacted).
+
+**Not yet done**: an actual live `AddFixedPriceItem` send (deliberately
+not attempted — publishes a real listing, Fei's call when ready); the
+web UI (separate session, `card-board-mastermind-WebInvManagement`);
+category-specific Item Specifics beyond `VariationSpecifics` (still
+unknown whether any of Fei's real categories require them — will only
+surface as a real eBay error on first live attempt, surfaced via
+`_post()`'s existing error-raising, not guessed at now).

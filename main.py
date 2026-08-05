@@ -7,8 +7,8 @@ Import:
   python3 main.py --tcgplayer-html order.html   # import HTML to staging
   python3 main.py --tcgplayer-html ~/orders/ --dry-run  # dry run a folder
   python3 main.py --manual                      # manual purchase entry
-  python3 main.py --excel-staging cards.xlsx     # spreadsheet → staging (see docs/plans/card_import_template.xlsx)
-  python3 main.py --ebay-import                 # import active eBay listings → staging
+  python3 main.py --excel-staging cards.xlsx     # spreadsheet -> staging (see docs/plans/card_import_template.xlsx)
+  python3 main.py --ebay-import                 # import active eBay listings -> staging
   python3 main.py --ebay-import --dry-run       # preview without writing to DB
   python3 main.py --ebay-verify                 # verify eBay credentials only
 
@@ -128,7 +128,7 @@ def cmd_fix_variant(args):
         count = cur.rowcount
         print(f"Updated {count} variant row(s) for {name}" +
               (f" #{number}" if number else "") +
-              f" → {col}={v}")
+              f" -> {col}={v}")
 
 def _variant_label(r: dict) -> str:
     """Build a display label from the seven axes (skip blanks)."""
@@ -194,7 +194,7 @@ def cmd_ebay_verify(args):
         sys.exit(1)
 
 def cmd_ebay_import(args):
-    """Fetch all active eBay listings → staging table."""
+    """Fetch all active eBay listings -> staging table."""
     from importer.ebay import import_from_ebay
     import_from_ebay(dry_run=args.dry_run, account_num=args.account)
 
@@ -335,6 +335,63 @@ def cmd_ebay_revise_qty(args):
     if result.get("error"):
         raise SystemExit(f"--ebay-revise-qty failed: {result['error']}")
 
+def cmd_ebay_list_policies(args):
+    from importer.ebay_create_listing import list_business_policies
+    policies = list_business_policies(account_num=args.account)
+    for kind in ("payment", "return", "shipping"):
+        print(f"\n{kind.title()} profiles:")
+        for pr in policies[kind]:
+            print(f"  {pr['profile_id']}  {pr['profile_name']}")
+
+def cmd_ebay_clone_listing_metadata(args):
+    from importer.ebay_create_listing import clone_listing_metadata
+    if not args.template_id:
+        raise SystemExit("--ebay-clone-listing-metadata requires --template-id")
+    if not args.from_listing_id:
+        raise SystemExit("--ebay-clone-listing-metadata requires --from-listing-id")
+    result = clone_listing_metadata(template_id=args.template_id,
+                                     source_listing_id=args.from_listing_id,
+                                     account_num=args.account)
+    print(result)
+
+def cmd_ebay_set_listing_metadata(args):
+    import json
+    from importer.ebay_create_listing import set_manual_listing_metadata
+    if not args.template_id:
+        raise SystemExit("--ebay-set-listing-metadata requires --template-id")
+    if not args.metadata_json:
+        raise SystemExit("--ebay-set-listing-metadata requires --metadata-json")
+    fields = json.loads(args.metadata_json)
+    result = set_manual_listing_metadata(template_id=args.template_id, **fields)
+    print(result)
+
+def cmd_ebay_preview_new_listing(args):
+    from importer.ebay_create_listing import preview_new_listing
+    if not args.template_id:
+        raise SystemExit("--ebay-preview-new-listing requires --template-id")
+    result = preview_new_listing(template_id=args.template_id, account_num=args.account)
+    if result.get("error"):
+        raise SystemExit(f"--ebay-preview-new-listing failed: {result['error']}")
+    print(f"Template: {result['template_name']}")
+    if result["missing_metadata"]:
+        print(f"Missing metadata: {', '.join(result['missing_metadata'])}")
+    print(f"Ready: {len(result['ready'])}")
+    for r in result["ready"]:
+        print(f"  {r['card_name']} #{r['card_number']}: ${r['resolved_price']:.2f} x{r['available_qty']}")
+    print(f"Not ready: {len(result['not_ready'])}")
+    for r in result["not_ready"]:
+        print(f"  {r['card_name']} #{r['card_number']}: {r['reason']}")
+
+def cmd_ebay_create_listing(args):
+    from importer.ebay_create_listing import create_listing
+    if not args.template_id:
+        raise SystemExit("--ebay-create-listing requires --template-id")
+    result = create_listing(template_id=args.template_id, account_num=args.account,
+                             dry_run=args.dry_run, quiet=args.quiet)
+    if result.get("error"):
+        raise SystemExit(f"--ebay-create-listing failed: {result['error']}")
+    print(result)
+
 def cmd_refresh_market_prices(args):
     from importer.market_price_refresh import refresh_market_prices
     if not args.set and not args.card_id:
@@ -356,12 +413,12 @@ def main():
     group = parser.add_mutually_exclusive_group(required=True)
 
     group.add_argument("--tcgplayer-html", metavar="PATH",
-        help="Import TCGPlayer saved HTML file or folder → staging")
+        help="Import TCGPlayer saved HTML file or folder -> staging")
     group.add_argument("--manual", action="store_true",
         help="Manually enter a purchase")
     group.add_argument("--excel-staging", metavar="PATH",
         help="Import a filled-out spreadsheet (see "
-             "docs/plans/card_import_template.xlsx) → staging. Auto-matches "
+             "docs/plans/card_import_template.xlsx) -> staging. Auto-matches "
              "by set + card number; creates a new card_master row directly "
              "(no API call) when nothing matches. Use --dry-run to preview.")
     group.add_argument("--review", action="store_true",
@@ -381,11 +438,11 @@ def main():
 
     # ── New eBay flags ────────────────────────────────────────────────────────
     group.add_argument("--ebay-import", action="store_true",
-        help="Import active eBay listings → staging (use --dry-run to preview)")
+        help="Import active eBay listings -> staging (use --dry-run to preview)")
     group.add_argument("--ebay-verify", action="store_true",
         help="Verify eBay API credentials without importing anything")
     group.add_argument("--ebay-item", metavar="ITEM_ID",
-        help="Import a single eBay listing by item ID → staging")
+        help="Import a single eBay listing by item ID -> staging")
     group.add_argument("--ebay-export", action="store_true",
     help=(
         "Export all active eBay listings to CSV for review. "
@@ -457,6 +514,40 @@ def main():
              "Built for balancing a card's shared inventory across listings. "
              "Requires --platform-listing-id and --qty. Use --dry-run to "
              "preview. See docs/plans/listing-pricing-system.md.")
+    group.add_argument("--ebay-list-policies", action="store_true",
+        help="List the account's configured eBay Business Policies (payment/"
+             "return/shipping profile IDs) via GetUserPreferences — read-only, "
+             "for filling in listing metadata manually. See "
+             "docs/plans/listing-pricing-system.md.")
+    group.add_argument("--ebay-clone-listing-metadata", action="store_true",
+        help="Copy listing-level metadata (category, description, location, "
+             "duration, business policies) from an existing live listing onto "
+             "a template that doesn't have a listing_id yet, via GetItem. "
+             "Requires --template-id and --from-listing-id. Read-only against "
+             "eBay; writes only listing_templates. See "
+             "docs/plans/listing-pricing-system.md.")
+    group.add_argument("--ebay-set-listing-metadata", action="store_true",
+        help="Set listing-level metadata by hand instead of cloning. Requires "
+             "--template-id and --metadata-json (a JSON object with any of: "
+             "category_id, title, description_html, item_location, "
+             "item_country, item_postal_code, listing_duration, condition_id, "
+             "payment_policy_id, return_policy_id, shipping_policy_id — see "
+             "--ebay-list-policies for valid policy IDs). No eBay call, "
+             "writes only listing_templates.")
+    group.add_argument("--ebay-preview-new-listing", action="store_true",
+        help="Show which of a template's queued cards are ready to go into a "
+             "brand-new listing right now vs. not (and why), plus any missing "
+             "required metadata — read-only, no eBay call. Requires "
+             "--template-id. See docs/plans/listing-pricing-system.md.")
+    group.add_argument("--ebay-create-listing", action="store_true",
+        help="Create a genuinely NEW eBay listing (AddFixedPriceItem) from a "
+             "template's ready queued roster in one batch — the template must "
+             "not already have a listing_id (use --ebay-pushprices for an "
+             "existing listing instead) and must have complete metadata (see "
+             "--ebay-clone-listing-metadata / --ebay-set-listing-metadata). "
+             "Requires --template-id. Use --dry-run to build and inspect the "
+             "request without ever sending it to eBay. See "
+             "docs/plans/listing-pricing-system.md.")
     group.add_argument("--refresh-market-prices", action="store_true",
         help="Refresh market_prices from the Pokemon TCG API, scoped to one "
              "set (--set NAME) or one card (--card-id UUID). Set-scoped runs "
@@ -532,6 +623,16 @@ def main():
         help="New quantity to set (for --ebay-revise-qty).")
     parser.add_argument("--set", metavar="NAME",
         help="Set name to scope to (for --refresh-market-prices).")
+    parser.add_argument("--template-id", metavar="UUID",
+        help="listing_templates.id to act on (for --ebay-clone-listing-metadata / "
+             "--ebay-set-listing-metadata / --ebay-preview-new-listing / "
+             "--ebay-create-listing).")
+    parser.add_argument("--from-listing-id", metavar="ITEM_ID",
+        help="Existing eBay ItemID to clone listing metadata from "
+             "(for --ebay-clone-listing-metadata).")
+    parser.add_argument("--metadata-json", metavar="JSON",
+        help="JSON object of listing-metadata fields to set "
+             "(for --ebay-set-listing-metadata).")
 
     args = parser.parse_args()
 
@@ -591,6 +692,16 @@ def main():
         cmd_ebay_stage_picture(args)
     elif args.ebay_revise_qty:
         cmd_ebay_revise_qty(args)
+    elif args.ebay_list_policies:
+        cmd_ebay_list_policies(args)
+    elif args.ebay_clone_listing_metadata:
+        cmd_ebay_clone_listing_metadata(args)
+    elif args.ebay_set_listing_metadata:
+        cmd_ebay_set_listing_metadata(args)
+    elif args.ebay_preview_new_listing:
+        cmd_ebay_preview_new_listing(args)
+    elif args.ebay_create_listing:
+        cmd_ebay_create_listing(args)
     elif args.refresh_market_prices:
         cmd_refresh_market_prices(args)
 if __name__ == "__main__":

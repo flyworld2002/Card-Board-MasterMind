@@ -68,6 +68,10 @@ from importer.ebay_pushprices import (
     push_prices, push_single_card_live, remove_single_card_live, stage_card_picture,
     revise_single_variation_qty,
 )
+from importer.ebay_create_listing import (
+    list_business_policies, clone_listing_metadata, set_manual_listing_metadata,
+    preview_new_listing, create_listing, REQUIRED_METADATA_FIELDS,
+)
 from importer.job_runner import start_job, get_job, list_jobs
 from importer.market_price_refresh import refresh_market_prices
 
@@ -116,6 +120,10 @@ _stage_picture_lock = threading.Lock()
 # concurrent qty revision.
 _revise_qty_lock = threading.Lock()
 
+# Creating a brand-new listing (AddFixedPriceItem) is its own action —
+# own lock, same reasoning as every other write endpoint here.
+_create_listing_lock = threading.Lock()
+
 
 class PushPricesRequest(BaseModel):
     listing_id: str
@@ -151,6 +159,33 @@ class ReviseQtyRequest(BaseModel):
 class MarketPriceRefreshRequest(BaseModel):
     set_name: str | None = None
     card_id: str | None = None
+
+
+class CloneListingMetadataRequest(BaseModel):
+    template_id: str
+    source_listing_id: str
+    account_num: int = 1
+
+
+class SetListingMetadataRequest(BaseModel):
+    template_id: str
+    category_id: str | None = None
+    title: str | None = None
+    description_html: str | None = None
+    item_location: str | None = None
+    item_country: str | None = None
+    item_postal_code: str | None = None
+    listing_duration: str | None = None
+    condition_id: str | None = None
+    payment_policy_id: str | None = None
+    return_policy_id: str | None = None
+    shipping_policy_id: str | None = None
+
+
+class CreateListingRequest(BaseModel):
+    template_id: str
+    account_num: int = 1
+    dry_run: bool = False
 
 
 @app.post("/api/picking/refresh")
@@ -301,6 +336,102 @@ def revise_variation_qty_endpoint(body: ReviseQtyRequest, x_picking_token: str =
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"revise failed: {e}")
 
+    return result
+
+
+@app.get("/api/business-policies")
+def business_policies_endpoint(account_num: int = 1, x_picking_token: str = Header(default="")):
+    """
+    Lists the account's configured eBay Business Policies (payment/return/
+    shipping profile IDs) via GetUserPreferences — for the manual listing-
+    metadata entry path. Read-only against eBay, no lock needed.
+    """
+    if x_picking_token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="bad token")
+
+    try:
+        return list_business_policies(account_num=account_num)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"fetch failed: {e}")
+
+
+@app.post("/api/listing-metadata/clone")
+def clone_listing_metadata_endpoint(body: CloneListingMetadataRequest,
+                                     x_picking_token: str = Header(default="")):
+    """
+    Copies listing-level metadata (category, description, location,
+    duration, business policies) from an existing live listing onto a
+    template that doesn't have a listing_id yet, via GetItem. Read-only
+    against eBay; writes only listing_templates. No lock — a plain DB
+    update after one read, same risk profile as any other Configuration
+    edit elsewhere in this app.
+    """
+    if x_picking_token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="bad token")
+
+    try:
+        return clone_listing_metadata(template_id=body.template_id,
+                                       source_listing_id=body.source_listing_id,
+                                       account_num=body.account_num)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"clone failed: {e}")
+
+
+@app.post("/api/listing-metadata/manual")
+def set_listing_metadata_endpoint(body: SetListingMetadataRequest,
+                                   x_picking_token: str = Header(default="")):
+    """Sets listing-level metadata by hand instead of cloning — same
+    columns the clone endpoint writes. No eBay call, partial updates
+    allowed (only non-null fields in the request are written)."""
+    if x_picking_token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="bad token")
+
+    fields = {k: v for k, v in body.model_dump().items()
+              if k in REQUIRED_METADATA_FIELDS and v is not None}
+    return set_manual_listing_metadata(template_id=body.template_id, **fields)
+
+
+@app.get("/api/preview-new-listing/{template_id}")
+def preview_new_listing_endpoint(template_id: str, account_num: int = 1,
+                                  x_picking_token: str = Header(default="")):
+    """
+    Which of a template's queued cards are ready to go into a brand-new
+    listing right now vs. not (and why), plus any missing required
+    metadata. Read-only, no eBay call — pure DB read via
+    resolve_listing_prices()'s p_template_id path (migration 016).
+    """
+    if x_picking_token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="bad token")
+
+    result = preview_new_listing(template_id=template_id, account_num=account_num)
+    if result.get("error"):
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+
+@app.post("/api/create-listing")
+def create_listing_endpoint(body: CreateListingRequest, x_picking_token: str = Header(default="")):
+    """
+    Creates a genuinely NEW eBay listing (AddFixedPriceItem) from a
+    template's ready queued roster in one batch — the first-ever write
+    to eBay for a listing that doesn't exist yet, as opposed to every
+    other endpoint in this file, which only ever revises one that
+    already does. Own lock, same reasoning as every other write endpoint
+    here. --dry-run (body.dry_run) builds and returns the full request
+    without ever sending it to eBay.
+    """
+    if x_picking_token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="bad token")
+
+    with _create_listing_lock:
+        try:
+            result = create_listing(template_id=body.template_id, account_num=body.account_num,
+                                     dry_run=body.dry_run, quiet=True)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"create failed: {e}")
+
+    if result.get("error"):
+        raise HTTPException(status_code=400, detail=result["error"])
     return result
 
 
