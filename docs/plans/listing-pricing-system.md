@@ -1962,9 +1962,55 @@ real ready card — HTML description's `&`/`<`/`>` escaped correctly via
 ElementTree text-node serialization, token redacted).
 
 **Not yet done**: an actual live `AddFixedPriceItem` send (deliberately
-not attempted — publishes a real listing, Fei's call when ready); the
-web UI (separate session, `card-board-mastermind-WebInvManagement`);
+not attempted — publishes a real listing, Fei's call when ready);
 category-specific Item Specifics beyond `VariationSpecifics` (still
 unknown whether any of Fei's real categories require them — will only
 surface as a real eBay error on first live attempt, surfaced via
 `_post()`'s existing error-raising, not guessed at now).
+
+### Web UI built same session — turns out this session had access after all
+Despite the "separate session" note above, this session's directory
+access unexpectedly reached `card-board-mastermind-WebInvManagement` too
+(confirmed via `ls`/`Glob`/`Read`/a real write test before trusting it) —
+so the web UI landed in the same session instead of needing a handoff.
+
+`listing-pricing.js`: opening a template with no `listing_id` yet no
+longer refuses with an alert — it's a genuine "draft" state now.
+`state.templateId` (set by `openTemplate()`) is the lookup key going
+forward instead of `(platform, listing_id)`, which can never match a
+NULL `listing_id` (same root issue migration 016 fixed on the RPC side).
+Draft templates get a "Listing metadata" panel in place of the Push/
+Dry-run buttons: clone from an existing listing (`GetItem` via the new
+`/api/listing-metadata/clone`), or edit every field by hand with real
+payment/return/shipping dropdowns sourced live from
+`/api/business-policies`; "Preview readiness" and "Create listing"
+(dry-run-confirm, same UX pattern as the existing Push button) call the
+matching new endpoints. Per-row "Push live" is hidden for draft rows —
+it revises an already-live listing, which doesn't exist yet. Existing
+(non-draft) templates take the exact same code path as before, unchanged.
+
+Verified via brace/paren/backtick balance check + manual re-read only —
+no JS runtime in this environment, same standing limitation as every
+prior UI pass on this feature; needs a real browser pass before trusting
+it fully.
+
+### Excel import gets a web front end (2026-08, session 16)
+Fei asked for a front end for `--excel-staging` rather than CLI-only.
+Built as a third job type on the existing Jobs page/`job_runner.py`
+infrastructure (not a synchronous request) since resolution does live
+PokemonTCG API calls per unmatched card and a big sheet could plausibly
+run past a normal request timeout — same reasoning `market_price_refresh`
+already established.
+
+`import_from_excel()` gained an optional `job_id` param, reporting
+progress through `update_job()` at natural phase boundaries (parsing →
+api_lookup, with a live done/total count as each parallel API call
+completes → writing → done with final totals) — CLI usage is unchanged,
+`job_id` just defaults to `None`. New `POST /api/jobs/excel-import` in
+`picking_api.py` (multipart upload, mirrors `/api/stage-card-picture-file`'s
+pattern) saves to a temp file, starts the job, and cleans the temp file
+up afterward regardless of outcome. `jobs.js` gained a third "start" box
+(file input + dry-run checkbox, checked by default) and a
+`jobProgressText()` case for `excel_import`'s progress/result shape —
+the existing Recent Jobs table and polling needed no changes at all,
+exactly as `job_runner.py`'s own docstring promises for a new job type.

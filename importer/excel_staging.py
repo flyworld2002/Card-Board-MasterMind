@@ -42,11 +42,19 @@ TRUE_STRINGS = {"true", "yes", "y", "1"}
 API_WORKERS = 15  # matches market_price_refresh.py's precedent
 
 
-def import_from_excel(path: str, dry_run: bool = False, verbose: bool = True) -> dict:
+def import_from_excel(path: str, dry_run: bool = False, verbose: bool = True,
+                       job_id: str = None) -> dict:
+    """job_id is optional — when run via job_runner.start_job() (the web
+    upload path), progress is reported through update_job() so the Jobs
+    page can show live status; a direct CLI call just omits it."""
+    if job_id:
+        from importer.job_runner import update_job
+        update_job(job_id, phase="parsing")
+
     p = Path(path).expanduser()
     if not p.exists():
         print(f"File not found: {path}")
-        return {}
+        return {"error": f"File not found: {path}"}
 
     wb = load_workbook(p, data_only=True)
     ws = wb["Cards"] if "Cards" in wb.sheetnames else wb.worksheets[0]
@@ -56,8 +64,9 @@ def import_from_excel(path: str, dry_run: bool = False, verbose: bool = True) ->
                for c in header_row]
     missing_cols = [c for c in REQUIRED_COLUMNS if c not in headers]
     if missing_cols:
-        print(f"Missing required column(s) in '{ws.title}': {', '.join(missing_cols)}")
-        return {}
+        msg = f"Missing required column(s) in '{ws.title}': {', '.join(missing_cols)}"
+        print(msg)
+        return {"error": msg}
 
     batch_id = create_batch_id()
     _print(verbose, "\n=== Excel Import ===")
@@ -113,9 +122,13 @@ def import_from_excel(path: str, dry_run: bool = False, verbose: bool = True) ->
         _print(verbose, f"  Checking PokemonTCG API for {len(needs_api)} "
                         f"card(s) not found locally (parallel, {API_WORKERS} "
                         f"workers)...")
-        resolved.update(_resolve_via_api(needs_api, game_id, dry_run))
+        if job_id:
+            update_job(job_id, phase="api_lookup", done=0, total=len(needs_api))
+        resolved.update(_resolve_via_api(needs_api, game_id, dry_run, job_id=job_id))
 
     # ── Pass 3: write to staging + print, in original row order ─────────────
+    if job_id:
+        update_job(job_id, phase="writing")
     totals = {"staged": 0, "matched": 0, "ambiguous": 0, "skipped": skipped,
               "created_api": 0, "created_manual": 0}
 
@@ -188,6 +201,9 @@ def import_from_excel(path: str, dry_run: bool = False, verbose: bool = True) ->
             _print(verbose, "  python3 main.py --review   -> resolve ambiguous matches")
         _print(verbose, "  python3 main.py --approve  -> push approved rows to inventory")
 
+    if job_id:
+        update_job(job_id, phase="done", **totals)
+
     return {**totals, "batch_id": batch_id}
 
 
@@ -219,7 +235,7 @@ def _try_local_match(row: dict):
     return None  # no local match — needs the API fallback
 
 
-def _resolve_via_api(needs_api: list, game_id: str, dry_run: bool) -> dict:
+def _resolve_via_api(needs_api: list, game_id: str, dry_run: bool, job_id: str = None) -> dict:
     """Run the PokemonTCG API search for every row that needs it in
     parallel (each is an independent HTTP call), then finalize each result
     (writes) sequentially — avoids any concurrent-insert race on
@@ -238,9 +254,12 @@ def _resolve_via_api(needs_api: list, game_id: str, dry_run: bool) -> dict:
     api_results_by_row = {}
     with ThreadPoolExecutor(max_workers=API_WORKERS) as pool:
         futures = [pool.submit(_search, e) for e in needs_api]
-        for f in as_completed(futures):
+        for i, f in enumerate(as_completed(futures), start=1):
             row_idx, results = f.result()
             api_results_by_row[row_idx] = results
+            if job_id:
+                from importer.job_runner import update_job
+                update_job(job_id, phase="api_lookup", done=i, total=len(needs_api))
 
     resolved = {}
     for entry in needs_api:

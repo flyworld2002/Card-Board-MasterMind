@@ -56,7 +56,9 @@ destructive actions get added later.
 """
 
 import os
+import tempfile
 import threading
+from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
@@ -74,6 +76,7 @@ from importer.ebay_create_listing import (
 )
 from importer.job_runner import start_job, get_job, list_jobs
 from importer.market_price_refresh import refresh_market_prices
+from importer.excel_staging import import_from_excel
 
 load_dotenv()
 
@@ -460,6 +463,48 @@ def market_price_refresh_endpoint(body: MarketPriceRefreshRequest, x_picking_tok
         "market_price_refresh", label, refresh_market_prices,
         set_name=body.set_name, card_id=body.card_id,
     )
+    return {"job_id": job_id}
+
+
+def _run_excel_import_and_cleanup(job_id, path, dry_run):
+    """job_runner.start_job() target — deletes the temp upload once the
+    import finishes (success or failure) so uploads don't pile up on disk."""
+    try:
+        return import_from_excel(path, dry_run=dry_run, verbose=False, job_id=job_id)
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+@app.post("/api/jobs/excel-import")
+async def excel_import_endpoint(
+    file: UploadFile = File(...),
+    dry_run: bool = Form(False),
+    x_picking_token: str = Header(default=""),
+):
+    """
+    Uploads a filled-out spreadsheet (docs/plans/card_import_template.xlsx
+    format) and runs it through the same Excel-to-staging importer as
+    --excel-staging, on a background thread — resolution does live
+    PokemonTCG API calls for anything not already in the local catalog,
+    which can take a while for a big sheet, so this returns a job_id
+    immediately instead of blocking the request. Poll GET /api/jobs/{job_id}
+    for progress, same convention as /api/jobs/market-price-refresh.
+    """
+    if x_picking_token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="bad token")
+
+    contents = await file.read()
+    suffix = Path(file.filename or "upload.xlsx").suffix or ".xlsx"
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    tmp.write(contents)
+    tmp.close()
+
+    label = f"Excel import — {file.filename or 'upload.xlsx'}"
+    job_id = start_job("excel_import", label, _run_excel_import_and_cleanup,
+                        path=tmp.name, dry_run=dry_run)
     return {"job_id": job_id}
 
 
