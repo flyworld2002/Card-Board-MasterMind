@@ -2053,3 +2053,61 @@ button branches: DB-only write for a draft, or a dry-run-then-confirm-
 then-real revise for a live listing (same UX pattern as the Push
 button), with an explicit warning in the modal that saving on a live
 template is a real eBay write, not just a local edit.
+
+### SKU, Card Condition, and Item Specifics (2026-08, session 17)
+Fei's follow-up from real eBay Sell-form screenshots surfaced three more
+real fields, none guessed — grounded via a live GetItem on a second real
+listing (`336691613250`) plus eBay's own condition-descriptor docs:
+
+- **SKU** — confirmed on `336691613250` ('VarSinglesHolo') as a genuine
+  top-level `<Item><SKU>`, a single free-text "Custom label" for the
+  whole listing (not per-variation — every real `<Variation>` on that
+  listing has no SKU of its own, contrary to the first assumption).
+- **Card Condition** (Near Mint/Lightly Played/etc.) is a field entirely
+  separate from `condition_id` — `ConditionDescriptors/
+  ConditionDescriptor`, `Name=40001` (fixed constant,
+  `CONDITION_DESCRIPTOR_NAME`) with a numeric `Value`. Full code table
+  for category 183454 ("Collectible Card Game", Fei's real category)
+  found via eBay's official docs: `400010`=Near mint or better,
+  `400015`=Lightly played (Excellent), `400016`=Moderately played (Very
+  good), `400017`=Heavily played (Poor) — a different category could use
+  different codes, not handled. Also confirmed `condition_id` itself is
+  `4000` (Ungraded) or `2750` (Graded) — cleaned up from a raw-text
+  input into an actual 2-option dropdown now that both values are known.
+- **Item Specifics** — confirmed live: `ItemSpecifics` is an arbitrary
+  `NameValueList` bag (Game, Set, Language, Manufacturer, Year
+  Manufactured, Card Type, Country/Region of Manufacture, Country of
+  Origin on the real listing checked), plus Fei's ask for a free-text
+  `Character` field ("an array of characters... I don't use it yet").
+  Stored as one `item_specifics jsonb` column rather than one column per
+  specific — the set isn't closed/fixed, matches eBay's own shape
+  directly, and avoids a migration every time a new specific comes up.
+
+**Migration 019**: `listing_templates.sku`, `.condition_descriptor_value`,
+`.item_specifics jsonb default '{}'`. All three added to a new
+`OPTIONAL_METADATA_FIELDS` list (distinct from `REQUIRED_METADATA_FIELDS`,
+which still alone gates "Create listing" readiness) — category-specific/
+not universally required by eBay, so they're included in a request when
+set but never block create/revise readiness the way title/category/
+policies etc. do. `ALL_METADATA_FIELDS = REQUIRED + OPTIONAL` is what
+`set_manual_listing_metadata()`/`revise_listing_metadata()` actually
+accept.
+
+`fetch_listing_metadata()` (clone path), `_build_add_item_xml()`
+(create), and `revise_listing_metadata()`'s XML builder all extended
+identically — `<SKU>`, `<ConditionDescriptors>` (only emitted when a
+value is set), `<ItemSpecifics>` (only emitted when the dict is
+non-empty, skips any blank values). Verified live via `--dry-run`:
+correctly rendered `<SKU>`, `<ConditionDescriptors><ConditionDescriptor>
+<Name>40001</Name><Value>400010</Value></...>`, and two `<ItemSpecifics>
+<NameValueList>` entries against a real listing/template.
+
+Web UI: Country/Postal code reverted from the earlier dropdown-of-
+prior-values back to plain text per Fei's explicit ask (only Category,
+Duration, Location stayed as dropdown-of-prior-values). Condition type
+and Card condition are now real fixed dropdowns (2 and 4 options
+respectively, matching eBay's own Sell-form choices) instead of a raw
+ID text box. Item Specifics render as one labeled text input per known
+name (`ITEM_SPECIFICS_FIELDS`), assembled into one `item_specifics`
+object on save; blank inputs are simply omitted rather than written as
+empty strings.

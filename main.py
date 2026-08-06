@@ -545,9 +545,10 @@ def main():
              "--template-id and --metadata-json (a JSON object with any of: "
              "category_id, title, description_html, item_location, "
              "item_country, item_postal_code, listing_duration, condition_id, "
-             "payment_policy_id, return_policy_id, shipping_policy_id — see "
-             "--ebay-list-policies for valid policy IDs). No eBay call, "
-             "writes only listing_templates.")
+             "payment_policy_id, return_policy_id, shipping_policy_id, sku, "
+             "condition_descriptor_value, item_specifics (an object, e.g. "
+             "{\"Game\": \"Pokemon TCG\"}) — see --ebay-list-policies for "
+             "valid policy IDs. No eBay call, writes only listing_templates.")
     group.add_argument("--ebay-revise-listing-metadata", action="store_true",
         help="Revise listing-level metadata on a listing that's ALREADY LIVE, "
              "via ReviseFixedPriceItem — the mirror image of "

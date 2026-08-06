@@ -21,6 +21,7 @@ from, but it's a discovered convention, not a hard eBay requirement, so
 it's a parameter, not a constant.
 """
 
+import json
 import uuid
 import xml.etree.ElementTree as ET
 
@@ -37,6 +38,36 @@ REQUIRED_METADATA_FIELDS = [
     "item_country", "item_postal_code", "listing_duration", "condition_id",
     "payment_policy_id", "return_policy_id", "shipping_policy_id",
 ]
+
+# Category-specific / not universally required by eBay — included in the
+# request when set, never block "Create listing" readiness the way
+# REQUIRED_METADATA_FIELDS does. sku is a genuine top-level <Item><SKU>
+# (confirmed live on 336691613250, 'VarSinglesHolo' — a free-text label
+# for the whole listing, not per-variation). condition_descriptor_value
+# is eBay's "Card Condition" (Near Mint/Lightly Played/etc.), a field
+# separate from condition_id — see CONDITION_DESCRIPTOR_VALUES below.
+# item_specifics is a free-form {name: value} bag matching eBay's own
+# ItemSpecifics NameValueList shape (confirmed live: Game, Set, Language,
+# Manufacturer, Year Manufactured, Card Type, Country/Region of
+# Manufacture, Country of Origin — plus whatever Fei adds later, e.g.
+# Character).
+OPTIONAL_METADATA_FIELDS = ["sku", "condition_descriptor_value", "item_specifics"]
+ALL_METADATA_FIELDS = REQUIRED_METADATA_FIELDS + OPTIONAL_METADATA_FIELDS
+
+# eBay's fixed descriptor-type ID for "Card Condition" (confirmed live) —
+# only the Value varies, this Name never does.
+CONDITION_DESCRIPTOR_NAME = "40001"
+
+# Confirmed via eBay's official docs for category 183454 (Fei's real
+# category, "Collectible Card Game") — see
+# https://developer.ebay.com/api-docs/user-guides/static/mip-user-guide/mip-enum-condition-descriptor-ids-for-trading-cards.html
+# A different category could use different values; not enforced here.
+CONDITION_DESCRIPTOR_VALUES = {
+    "400010": "Near mint or better",
+    "400015": "Lightly played (Excellent)",
+    "400016": "Moderately played (Very good)",
+    "400017": "Heavily played (Poor)",
+}
 
 DEFAULT_SPECIFIC_NAME = "PokeCards"
 
@@ -99,6 +130,23 @@ def fetch_listing_metadata(item_id: str, account_num: int = 1) -> dict:
         node = _find(seller_profiles, parent_tag)
         return _text(node, id_tag) if node is not None else None
 
+    condition_descriptor_value = None
+    descriptors = _find(item, "ConditionDescriptors")
+    if descriptors is not None:
+        for d in _findall(descriptors, "ConditionDescriptor"):
+            if _text(d, "Name") == CONDITION_DESCRIPTOR_NAME:
+                condition_descriptor_value = _text(d, "Value")
+                break
+
+    item_specifics = {}
+    specifics = _find(item, "ItemSpecifics")
+    if specifics is not None:
+        for nvl in _findall(specifics, "NameValueList"):
+            name = _text(nvl, "Name")
+            value = _text(nvl, "Value")
+            if name:
+                item_specifics[name] = value
+
     return {
         "category_id":        _text(category, "CategoryID") if category is not None else None,
         "title":              _text(item, "Title"),
@@ -111,6 +159,9 @@ def fetch_listing_metadata(item_id: str, account_num: int = 1) -> dict:
         "payment_policy_id":  _profile_id("SellerPaymentProfile", "PaymentProfileID"),
         "return_policy_id":   _profile_id("SellerReturnProfile", "ReturnProfileID"),
         "shipping_policy_id": _profile_id("SellerShippingProfile", "ShippingProfileID"),
+        "sku":                       _text(item, "SKU"),
+        "condition_descriptor_value": condition_descriptor_value,
+        "item_specifics":            item_specifics,
     }
 
 
@@ -129,6 +180,7 @@ def clone_listing_metadata(template_id: str, source_listing_id: str, account_num
                 item_location = %s, item_country = %s, item_postal_code = %s,
                 listing_duration = %s, condition_id = %s,
                 payment_policy_id = %s, return_policy_id = %s, shipping_policy_id = %s,
+                sku = %s, condition_descriptor_value = %s, item_specifics = %s,
                 updated_at = now()
             WHERE id = %s
             """,
@@ -136,6 +188,7 @@ def clone_listing_metadata(template_id: str, source_listing_id: str, account_num
              fields["item_location"], fields["item_country"], fields["item_postal_code"],
              fields["listing_duration"], fields["condition_id"],
              fields["payment_policy_id"], fields["return_policy_id"], fields["shipping_policy_id"],
+             fields["sku"], fields["condition_descriptor_value"], json.dumps(fields["item_specifics"]),
              template_id),
         )
     return {"template_id": template_id, "cloned_from": source_listing_id, **fields}
@@ -143,15 +196,16 @@ def clone_listing_metadata(template_id: str, source_listing_id: str, account_num
 
 def set_manual_listing_metadata(template_id: str, **fields) -> dict:
     """Writes listing-level metadata by hand (source='manual') — same
-    columns clone_listing_metadata() writes, just typed in instead of
-    copied from a live listing. Unknown kwargs are ignored; omitted
-    fields are left untouched (partial updates allowed, e.g. filling in
-    one missing field at a time)."""
-    cols = [f for f in REQUIRED_METADATA_FIELDS if f in fields]
+    columns clone_listing_metadata() writes (required + optional/
+    category-specific ones), just typed in instead of copied from a live
+    listing. Unknown kwargs are ignored; omitted fields are left
+    untouched (partial updates allowed, e.g. filling in one missing
+    field at a time)."""
+    cols = [f for f in ALL_METADATA_FIELDS if f in fields]
     if not cols:
         return {"template_id": template_id, "updated": []}
     set_clause = ", ".join(f"{c} = %s" for c in cols)
-    values = [fields[c] for c in cols]
+    values = [json.dumps(fields[c]) if c == "item_specifics" else fields[c] for c in cols]
     with db_cursor() as cur:
         cur.execute(
             f"UPDATE listing_templates SET source = 'manual', {set_clause}, updated_at = now() "
@@ -257,6 +311,23 @@ def _build_add_item_xml(template: dict, variations: ET.Element, total_qty: int,
     # each <Variation> — a reasonable summary, not otherwise consumed.
     add("Quantity", str(total_qty))
     add("StartPrice", f"{min_price:.2f}")
+    add("SKU", template.get("sku"))
+
+    if template.get("condition_descriptor_value"):
+        descriptors = ET.SubElement(item, f"{{{NS}}}ConditionDescriptors")
+        descriptor = ET.SubElement(descriptors, f"{{{NS}}}ConditionDescriptor")
+        ET.SubElement(descriptor, f"{{{NS}}}Name").text = CONDITION_DESCRIPTOR_NAME
+        ET.SubElement(descriptor, f"{{{NS}}}Value").text = template["condition_descriptor_value"]
+
+    item_specifics = template.get("item_specifics") or {}
+    if item_specifics:
+        specifics_node = ET.SubElement(item, f"{{{NS}}}ItemSpecifics")
+        for name, value in item_specifics.items():
+            if not value:
+                continue
+            nvl = ET.SubElement(specifics_node, f"{{{NS}}}NameValueList")
+            ET.SubElement(nvl, f"{{{NS}}}Name").text = name
+            ET.SubElement(nvl, f"{{{NS}}}Value").text = value
 
     seller_profiles = ET.SubElement(item, f"{{{NS}}}SellerProfiles")
     payment = ET.SubElement(seller_profiles, f"{{{NS}}}SellerPaymentProfile")
@@ -447,12 +518,12 @@ def revise_listing_metadata(template_id: str, account_num: int = 1, dry_run: boo
             return {"template_id": template_id, "revised": False, "dry_run": dry_run,
                      "error": "template has no live listing_id yet — use create_listing() instead"}
 
-        changed_cols = [k for k in REQUIRED_METADATA_FIELDS if k in fields]
+        changed_cols = [k for k in ALL_METADATA_FIELDS if k in fields]
         if not changed_cols:
             return {"template_id": template_id, "revised": False, "dry_run": dry_run,
                      "error": "no metadata fields provided to revise"}
 
-        merged = {k: fields.get(k, template.get(k)) for k in REQUIRED_METADATA_FIELDS}
+        merged = {k: fields.get(k, template.get(k)) for k in ALL_METADATA_FIELDS}
 
         token = "***DRY-RUN-TOKEN-REDACTED***" if dry_run else get_user_token(account_num)
 
@@ -475,6 +546,22 @@ def revise_listing_metadata(template_id: str, account_num: int = 1, dry_run: boo
         add("PostalCode", merged["item_postal_code"])
         add("ConditionID", merged["condition_id"])
         add("ListingDuration", merged["listing_duration"])
+        add("SKU", merged["sku"])
+
+        if merged["condition_descriptor_value"]:
+            descriptors = ET.SubElement(item, f"{{{NS}}}ConditionDescriptors")
+            descriptor = ET.SubElement(descriptors, f"{{{NS}}}ConditionDescriptor")
+            ET.SubElement(descriptor, f"{{{NS}}}Name").text = CONDITION_DESCRIPTOR_NAME
+            ET.SubElement(descriptor, f"{{{NS}}}Value").text = merged["condition_descriptor_value"]
+
+        if merged["item_specifics"]:
+            specifics_node = ET.SubElement(item, f"{{{NS}}}ItemSpecifics")
+            for name, value in merged["item_specifics"].items():
+                if not value:
+                    continue
+                nvl = ET.SubElement(specifics_node, f"{{{NS}}}NameValueList")
+                ET.SubElement(nvl, f"{{{NS}}}Name").text = name
+                ET.SubElement(nvl, f"{{{NS}}}Value").text = value
 
         policy_fields = ("payment_policy_id", "return_policy_id", "shipping_policy_id")
         if any(merged[k] for k in policy_fields):
@@ -506,7 +593,7 @@ def revise_listing_metadata(template_id: str, account_num: int = 1, dry_run: boo
         _post("ReviseFixedPriceItem", xml, account_num=account_num)
 
         set_clause = ", ".join(f"{c} = %s" for c in changed_cols)
-        values = [merged[c] for c in changed_cols]
+        values = [json.dumps(merged[c]) if c == "item_specifics" else merged[c] for c in changed_cols]
         cur.execute(
             f"UPDATE listing_templates SET {set_clause}, updated_at = now() WHERE id = %s",
             values + [template_id],

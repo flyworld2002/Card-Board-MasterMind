@@ -72,7 +72,7 @@ from importer.ebay_pushprices import (
 )
 from importer.ebay_create_listing import (
     list_business_policies, clone_listing_metadata, set_manual_listing_metadata,
-    revise_listing_metadata, preview_new_listing, create_listing, REQUIRED_METADATA_FIELDS,
+    revise_listing_metadata, preview_new_listing, create_listing, ALL_METADATA_FIELDS,
 )
 from importer.job_runner import start_job, get_job, list_jobs
 from importer.market_price_refresh import refresh_market_prices
@@ -186,6 +186,9 @@ class SetListingMetadataRequest(BaseModel):
     payment_policy_id: str | None = None
     return_policy_id: str | None = None
     shipping_policy_id: str | None = None
+    sku: str | None = None
+    condition_descriptor_value: str | None = None
+    item_specifics: dict | None = None
 
 
 class ReviseListingMetadataRequest(BaseModel):
@@ -203,6 +206,9 @@ class ReviseListingMetadataRequest(BaseModel):
     payment_policy_id: str | None = None
     return_policy_id: str | None = None
     shipping_policy_id: str | None = None
+    sku: str | None = None
+    condition_descriptor_value: str | None = None
+    item_specifics: dict | None = None
 
 
 class CreateListingRequest(BaseModel):
@@ -410,7 +416,7 @@ def set_listing_metadata_endpoint(body: SetListingMetadataRequest,
         raise HTTPException(status_code=401, detail="bad token")
 
     fields = {k: v for k, v in body.model_dump().items()
-              if k in REQUIRED_METADATA_FIELDS and v is not None}
+              if k in ALL_METADATA_FIELDS and v is not None}
     return set_manual_listing_metadata(template_id=body.template_id, **fields)
 
 
@@ -428,7 +434,7 @@ def revise_listing_metadata_endpoint(body: ReviseListingMetadataRequest,
         raise HTTPException(status_code=401, detail="bad token")
 
     fields = {k: v for k, v in body.model_dump().items()
-              if k in REQUIRED_METADATA_FIELDS and v is not None}
+              if k in ALL_METADATA_FIELDS and v is not None}
 
     with _revise_metadata_lock:
         try:
