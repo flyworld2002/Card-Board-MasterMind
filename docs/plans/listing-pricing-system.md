@@ -2111,3 +2111,14 @@ ID text box. Item Specifics render as one labeled text input per known
 name (`ITEM_SPECIFICS_FIELDS`), assembled into one `item_specifics`
 object on save; blank inputs are simply omitted rather than written as
 empty strings.
+
+### Roadmap — not started
+- **Proper description composition.** `description_html` is currently a
+  raw HTML textarea — you hand-type/paste actual HTML. Fei wants a real
+  design/description-building experience instead (likely a WYSIWYG
+  editor, or a templated builder with reusable blocks) rather than
+  editing markup by hand. Not scoped or started — needs a follow-up
+  conversation on what "proper" means here (a rich-text editor
+  serializing to the same `description_html` field would be the
+  lowest-risk approach, reusing everything downstream unchanged; a
+  templated/block-based builder would be a bigger, separate design).

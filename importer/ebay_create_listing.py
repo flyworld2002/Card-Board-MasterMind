@@ -311,7 +311,12 @@ def _build_add_item_xml(template: dict, variations: ET.Element, total_qty: int,
     # each <Variation> — a reasonable summary, not otherwise consumed.
     add("Quantity", str(total_qty))
     add("StartPrice", f"{min_price:.2f}")
-    add("SKU", template.get("sku"))
+    # SKU is the one field here that's genuinely optional (not in
+    # REQUIRED_METADATA_FIELDS, so unlike every field above it isn't
+    # guaranteed non-None) — add() has no None-guard, so an unconditional
+    # call would send an empty <SKU/> when it's unset. Only add it when set.
+    if template.get("sku"):
+        add("SKU", template["sku"])
 
     if template.get("condition_descriptor_value"):
         descriptors = ET.SubElement(item, f"{{{NS}}}ConditionDescriptors")
