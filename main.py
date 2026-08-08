@@ -415,6 +415,66 @@ def cmd_refresh_market_prices(args):
     result = refresh_market_prices(set_name=args.set, card_id=args.card_id, dry_run=args.dry_run)
     print(result)
 
+def cmd_ebay_sync_descriptions(args):
+    import os
+    from db.connection import db_cursor
+    from importer.ebay_descriptions import resolve_sync_scope, sync_description
+
+    scopes_given = sum(bool(x) for x in (args.template_id, args.set, args.era, args.all))
+    if scopes_given != 1:
+        raise SystemExit("--ebay-sync-descriptions requires exactly one of "
+                          "--template-id / --set / --era / --all")
+
+    with db_cursor() as cur:
+        template_ids = resolve_sync_scope(cur, template_id=args.template_id, set_name=args.set,
+                                           era=args.era, all_scope=args.all)
+
+    if not template_ids:
+        print("No live templates matched that scope.")
+        return
+
+    if args.dry_run:
+        os.makedirs("dry_run_descriptions", exist_ok=True)
+
+    changed_count = skipped_count = error_count = 0
+    for template_id in template_ids:
+        try:
+            result = sync_description(template_id=template_id, account_num=args.account,
+                                       dry_run=args.dry_run)
+        except Exception as e:
+            error_count += 1
+            print(f"  {template_id}: ERROR — {e}")
+            continue
+
+        if result.get("error"):
+            error_count += 1
+            print(f"  {template_id}: ERROR — {result['error']}")
+        elif not result.get("changed"):
+            skipped_count += 1
+            print(f"  {template_id}: unchanged, skipped")
+        else:
+            changed_count += 1
+            status = "would push" if args.dry_run else "pushed"
+            print(f"  {template_id}: {status}")
+            if args.dry_run:
+                path = os.path.join("dry_run_descriptions", f"{template_id}.html")
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(result["rendered_html"])
+                print(f"    -> {path}")
+
+    print(f"\n{changed_count} changed, {skipped_count} unchanged, {error_count} errors "
+          f"(of {len(template_ids)} templates in scope).")
+
+def cmd_ebay_backfill_nav_images(args):
+    from importer.ebay_descriptions import backfill_nav_images
+    result = backfill_nav_images(account_num=args.account, force=args.force)
+    print(f"Filled: {len(result['filled'])}")
+    print(f"Skipped (no picture found): {len(result['skipped_no_picture'])}")
+    if result["errors"]:
+        print(f"Errors: {len(result['errors'])}")
+        for e in result["errors"]:
+            print(f"  {e['template_id']}: {e['error']}")
+
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main():
@@ -579,6 +639,24 @@ def main():
              "skip any card whose variants were all already refreshed today. "
              "Use --dry-run to list which cards would be refreshed without "
              "calling the API. See docs/plans/listing-pricing-system.md.")
+    group.add_argument("--ebay-sync-descriptions", action="store_true",
+        help="Render each in-scope template's description_html against "
+             "current DB state (family strip / era hub-and-spoke / era "
+             "index nav tokens, migration 020) and push via "
+             "ReviseFixedPriceItem if it differs from what was last pushed "
+             "(sha256 hash-gated — unchanged templates are skipped, not "
+             "re-sent). Exactly one scope: --template-id / --set NAME / "
+             "--era SERIES / --all. --dry-run renders and writes each "
+             "would-be description to ./dry_run_descriptions/, never "
+             "touches eBay or the DB. One template's failure doesn't abort "
+             "the rest of the batch. See docs/plans/listing-pricing-system.md.")
+    group.add_argument("--ebay-backfill-nav-images", action="store_true",
+        help="For every live template with a NULL nav_image_url, fetches "
+             "its listing's first eBay-hosted gallery photo via GetItem and "
+             "saves it — one-time backfill for the description nav system "
+             "(migration 020), re-runnable (only fills NULLs). --force "
+             "re-fetches and overwrites every live template's nav_image_url "
+             "regardless. See docs/plans/listing-pricing-system.md.")
 
     # ── Shared optional flags ─────────────────────────────────────────────────
     parser.add_argument("--dry-run", action="store_true",
@@ -658,6 +736,14 @@ def main():
     parser.add_argument("--metadata-json", metavar="JSON",
         help="JSON object of listing-metadata fields to set "
              "(for --ebay-set-listing-metadata).")
+    parser.add_argument("--era", metavar="SERIES",
+        help="card_sets.series to scope to, e.g. 'Scarlet & Violet' "
+             "(for --ebay-sync-descriptions).")
+    parser.add_argument("--all", action="store_true",
+        help="Scope to every live template (for --ebay-sync-descriptions).")
+    parser.add_argument("--force", action="store_true",
+        help="Re-fetch/overwrite even already-filled values "
+             "(for --ebay-backfill-nav-images).")
 
     args = parser.parse_args()
 
@@ -731,5 +817,9 @@ def main():
         cmd_ebay_create_listing(args)
     elif args.refresh_market_prices:
         cmd_refresh_market_prices(args)
+    elif args.ebay_sync_descriptions:
+        cmd_ebay_sync_descriptions(args)
+    elif args.ebay_backfill_nav_images:
+        cmd_ebay_backfill_nav_images(args)
 if __name__ == "__main__":
     main()

@@ -74,6 +74,7 @@ from importer.ebay_create_listing import (
     list_business_policies, clone_listing_metadata, set_manual_listing_metadata,
     revise_listing_metadata, preview_new_listing, create_listing, ALL_METADATA_FIELDS,
 )
+from importer.ebay_descriptions import preview_description, sync_description, DESCRIPTION_PRESETS
 from importer.job_runner import start_job, get_job, list_jobs
 from importer.market_price_refresh import refresh_market_prices
 from importer.excel_staging import import_from_excel
@@ -213,6 +214,15 @@ class ReviseListingMetadataRequest(BaseModel):
 
 class CreateListingRequest(BaseModel):
     template_id: str
+    account_num: int = 1
+    dry_run: bool = False
+
+
+class DescriptionPreviewRequest(BaseModel):
+    description_html: str | None = None  # draft from the textarea; falls back to the stored source
+
+
+class DescriptionSyncRequest(BaseModel):
     account_num: int = 1
     dry_run: bool = False
 
@@ -486,6 +496,75 @@ def create_listing_endpoint(body: CreateListingRequest, x_picking_token: str = H
                                      dry_run=body.dry_run, quiet=True)
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"create failed: {e}")
+
+    if result.get("error"):
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+
+@app.get("/api/description-presets")
+def description_presets_endpoint(x_picking_token: str = Header(default="")):
+    """
+    Starter skeletons for the "Insert layout" dropdown next to the
+    Description textarea — Spoke/Hub presets with a styled header, the
+    standard condition/shipping blurb, and the correct nav tokens in the
+    correct order for that listing's role. Single-source: the frontend
+    just inserts what it's given, same principle as rendering.
+    """
+    if x_picking_token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="bad token")
+    return DESCRIPTION_PRESETS
+
+
+@app.post("/api/description-preview/{template_id}")
+def description_preview_endpoint(template_id: str, body: DescriptionPreviewRequest,
+                                  x_picking_token: str = Header(default="")):
+    """
+    Renders the description-nav tokens ({{family_nav}}, {{era_hub_link}},
+    {{era_nav}}, {{era_index}}, {{set_name}}, {{series_name}}) against
+    current DB state. Accepting body.description_html lets the UI preview
+    an UNSAVED textarea edit before committing it — falls back to the
+    template's stored source when omitted. Read-only — no DB writes, no
+    eBay call. Deliberately separate from /api/description-sync: this
+    never touches pushed_description_hash or eBay.
+    """
+    if x_picking_token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="bad token")
+
+    result = preview_description(template_id=template_id, source_html=body.description_html)
+    if result.get("error"):
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+
+@app.post("/api/description-sync/{template_id}")
+def description_sync_endpoint(template_id: str, body: DescriptionSyncRequest,
+                                x_picking_token: str = Header(default="")):
+    """
+    Renders the template's description_html against current DB state and,
+    if it differs from what was last pushed (sha256 hash-gated), pushes it
+    live via ReviseFixedPriceItem. body.dry_run returns {changed,
+    rendered_html} without touching eBay or the DB, so the UI confirm
+    dialog can show what's about to go live. Shares _revise_metadata_lock
+    with /api/listing-metadata/revise rather than its own lock — both
+    ultimately call the same ReviseFixedPriceItem XML-build core against
+    the same listing_templates row (build_revise_item_xml()), so they need
+    to be mutually exclusive with EACH OTHER, not just with themselves, to
+    avoid a lost-update race on that row. Deliberately NOT reusing
+    /api/listing-metadata/revise — that endpoint's semantics write
+    description_html back, which is correct for hand-edited fields and
+    wrong for rendered output (description_html is the authored SOURCE,
+    never the rendered result).
+    """
+    if x_picking_token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="bad token")
+
+    with _revise_metadata_lock:
+        try:
+            result = sync_description(template_id=template_id, account_num=body.account_num,
+                                       dry_run=body.dry_run)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"description sync failed: {e}")
 
     if result.get("error"):
         raise HTTPException(status_code=400, detail=result["error"])

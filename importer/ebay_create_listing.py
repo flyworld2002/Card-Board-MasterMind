@@ -147,6 +147,16 @@ def fetch_listing_metadata(item_id: str, account_num: int = 1) -> dict:
             if name:
                 item_specifics[name] = value
 
+    # First gallery photo — eBay-hosted (i.ebayimg.com), public/permanent/
+    # free, unlike R2 signed URLs which expire. Used to backfill
+    # listing_templates.nav_image_url (migration 020) for the description
+    # nav blocks; DetailLevel=ReturnAll on fetch_item() already returns
+    # PictureDetails, so no second GetItem call is needed for this.
+    first_picture_url = None
+    picture_details = _find(item, "PictureDetails")
+    if picture_details is not None:
+        first_picture_url = _text(picture_details, "PictureURL")
+
     return {
         "category_id":        _text(category, "CategoryID") if category is not None else None,
         "title":              _text(item, "Title"),
@@ -162,6 +172,7 @@ def fetch_listing_metadata(item_id: str, account_num: int = 1) -> dict:
         "sku":                       _text(item, "SKU"),
         "condition_descriptor_value": condition_descriptor_value,
         "item_specifics":            item_specifics,
+        "first_picture_url":         first_picture_url,
     }
 
 
@@ -169,14 +180,23 @@ def clone_listing_metadata(template_id: str, source_listing_id: str, account_num
     """Fetches metadata from a real existing listing and writes it onto
     template_id's listing_templates row (source='cloned'). Fei can review/
     edit any field afterward before the actual create push — this is a
-    snapshot taken now, not re-fetched live at create time."""
+    snapshot taken now, not re-fetched live at create time.
+
+    description_html is a special case once it can hold placeholder nav
+    tokens (migration 020): the pulled live description always lands in
+    description_live_html, and only backfills description_html when that
+    column is still NULL (the original bootstrap flow — clone a fresh
+    template to get a starting description). A non-NULL description_html
+    is authored source and must never be silently clobbered by a clone."""
     fields = fetch_listing_metadata(source_listing_id, account_num=account_num)
     with db_cursor() as cur:
         cur.execute(
             """
             UPDATE listing_templates
             SET source = 'cloned', cloned_from_listing_id = %s,
-                category_id = %s, title = %s, description_html = %s,
+                category_id = %s, title = %s,
+                description_live_html = %s,
+                description_html = CASE WHEN description_html IS NULL THEN %s ELSE description_html END,
                 item_location = %s, item_country = %s, item_postal_code = %s,
                 listing_duration = %s, condition_id = %s,
                 payment_policy_id = %s, return_policy_id = %s, shipping_policy_id = %s,
@@ -184,7 +204,8 @@ def clone_listing_metadata(template_id: str, source_listing_id: str, account_num
                 updated_at = now()
             WHERE id = %s
             """,
-            (source_listing_id, fields["category_id"], fields["title"], fields["description_html"],
+            (source_listing_id, fields["category_id"], fields["title"],
+             fields["description_html"], fields["description_html"],
              fields["item_location"], fields["item_country"], fields["item_postal_code"],
              fields["listing_duration"], fields["condition_id"],
              fields["payment_policy_id"], fields["return_policy_id"], fields["shipping_policy_id"],
@@ -489,6 +510,72 @@ def create_listing(template_id: str, account_num: int = 1, platform: str = "ebay
 # create_listing()'s metadata step, for after the fact instead of before.
 # ══════════════════════════════════════════════════════════════════════════════
 
+def build_revise_item_xml(listing_id: str, merged: dict, token: str) -> str:
+    """Builds the full ReviseFixedPriceItemRequest XML from an already-
+    merged ALL_METADATA_FIELDS dict. Shared by revise_listing_metadata()
+    and ebay_descriptions.sync_description() (which overrides only
+    description_html with rendered nav HTML before calling this) so a
+    request-shape fix only ever has to happen in one place."""
+    item = ET.Element(f"{{{NS}}}Item")
+    ET.SubElement(item, f"{{{NS}}}ItemID").text = listing_id
+
+    def add(tag, text):
+        if text is None:
+            return
+        el = ET.SubElement(item, f"{{{NS}}}{tag}")
+        el.text = text
+
+    add("Title", merged["title"])
+    add("Description", merged["description_html"])
+    if merged["category_id"]:
+        category = ET.SubElement(item, f"{{{NS}}}PrimaryCategory")
+        ET.SubElement(category, f"{{{NS}}}CategoryID").text = merged["category_id"]
+    add("Country", merged["item_country"])
+    add("Location", merged["item_location"])
+    add("PostalCode", merged["item_postal_code"])
+    add("ConditionID", merged["condition_id"])
+    add("ListingDuration", merged["listing_duration"])
+    add("SKU", merged["sku"])
+
+    if merged["condition_descriptor_value"]:
+        descriptors = ET.SubElement(item, f"{{{NS}}}ConditionDescriptors")
+        descriptor = ET.SubElement(descriptors, f"{{{NS}}}ConditionDescriptor")
+        ET.SubElement(descriptor, f"{{{NS}}}Name").text = CONDITION_DESCRIPTOR_NAME
+        ET.SubElement(descriptor, f"{{{NS}}}Value").text = merged["condition_descriptor_value"]
+
+    if merged["item_specifics"]:
+        specifics_node = ET.SubElement(item, f"{{{NS}}}ItemSpecifics")
+        for name, value in merged["item_specifics"].items():
+            if not value:
+                continue
+            nvl = ET.SubElement(specifics_node, f"{{{NS}}}NameValueList")
+            ET.SubElement(nvl, f"{{{NS}}}Name").text = name
+            ET.SubElement(nvl, f"{{{NS}}}Value").text = value
+
+    policy_fields = ("payment_policy_id", "return_policy_id", "shipping_policy_id")
+    if any(merged[k] for k in policy_fields):
+        seller_profiles = ET.SubElement(item, f"{{{NS}}}SellerProfiles")
+        if merged["payment_policy_id"]:
+            node = ET.SubElement(seller_profiles, f"{{{NS}}}SellerPaymentProfile")
+            ET.SubElement(node, f"{{{NS}}}PaymentProfileID").text = merged["payment_policy_id"]
+        if merged["return_policy_id"]:
+            node = ET.SubElement(seller_profiles, f"{{{NS}}}SellerReturnProfile")
+            ET.SubElement(node, f"{{{NS}}}ReturnProfileID").text = merged["return_policy_id"]
+        if merged["shipping_policy_id"]:
+            node = ET.SubElement(seller_profiles, f"{{{NS}}}SellerShippingProfile")
+            ET.SubElement(node, f"{{{NS}}}ShippingProfileID").text = merged["shipping_policy_id"]
+
+    ET.register_namespace("", NS)
+    item_xml = ET.tostring(item, encoding="unicode")
+    return f"""<?xml version="1.0" encoding="utf-8"?>
+<ReviseFixedPriceItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials>
+    <eBayAuthToken>{token}</eBayAuthToken>
+  </RequesterCredentials>
+  {item_xml}
+</ReviseFixedPriceItemRequest>"""
+
+
 def revise_listing_metadata(template_id: str, account_num: int = 1, dry_run: bool = False,
                              **fields) -> dict:
     """
@@ -531,65 +618,7 @@ def revise_listing_metadata(template_id: str, account_num: int = 1, dry_run: boo
         merged = {k: fields.get(k, template.get(k)) for k in ALL_METADATA_FIELDS}
 
         token = "***DRY-RUN-TOKEN-REDACTED***" if dry_run else get_user_token(account_num)
-
-        item = ET.Element(f"{{{NS}}}Item")
-        ET.SubElement(item, f"{{{NS}}}ItemID").text = template["listing_id"]
-
-        def add(tag, text):
-            if text is None:
-                return
-            el = ET.SubElement(item, f"{{{NS}}}{tag}")
-            el.text = text
-
-        add("Title", merged["title"])
-        add("Description", merged["description_html"])
-        if merged["category_id"]:
-            category = ET.SubElement(item, f"{{{NS}}}PrimaryCategory")
-            ET.SubElement(category, f"{{{NS}}}CategoryID").text = merged["category_id"]
-        add("Country", merged["item_country"])
-        add("Location", merged["item_location"])
-        add("PostalCode", merged["item_postal_code"])
-        add("ConditionID", merged["condition_id"])
-        add("ListingDuration", merged["listing_duration"])
-        add("SKU", merged["sku"])
-
-        if merged["condition_descriptor_value"]:
-            descriptors = ET.SubElement(item, f"{{{NS}}}ConditionDescriptors")
-            descriptor = ET.SubElement(descriptors, f"{{{NS}}}ConditionDescriptor")
-            ET.SubElement(descriptor, f"{{{NS}}}Name").text = CONDITION_DESCRIPTOR_NAME
-            ET.SubElement(descriptor, f"{{{NS}}}Value").text = merged["condition_descriptor_value"]
-
-        if merged["item_specifics"]:
-            specifics_node = ET.SubElement(item, f"{{{NS}}}ItemSpecifics")
-            for name, value in merged["item_specifics"].items():
-                if not value:
-                    continue
-                nvl = ET.SubElement(specifics_node, f"{{{NS}}}NameValueList")
-                ET.SubElement(nvl, f"{{{NS}}}Name").text = name
-                ET.SubElement(nvl, f"{{{NS}}}Value").text = value
-
-        policy_fields = ("payment_policy_id", "return_policy_id", "shipping_policy_id")
-        if any(merged[k] for k in policy_fields):
-            seller_profiles = ET.SubElement(item, f"{{{NS}}}SellerProfiles")
-            if merged["payment_policy_id"]:
-                node = ET.SubElement(seller_profiles, f"{{{NS}}}SellerPaymentProfile")
-                ET.SubElement(node, f"{{{NS}}}PaymentProfileID").text = merged["payment_policy_id"]
-            if merged["return_policy_id"]:
-                node = ET.SubElement(seller_profiles, f"{{{NS}}}SellerReturnProfile")
-                ET.SubElement(node, f"{{{NS}}}ReturnProfileID").text = merged["return_policy_id"]
-            if merged["shipping_policy_id"]:
-                node = ET.SubElement(seller_profiles, f"{{{NS}}}SellerShippingProfile")
-                ET.SubElement(node, f"{{{NS}}}ShippingProfileID").text = merged["shipping_policy_id"]
-
-        ET.register_namespace("", NS)
-        item_xml = ET.tostring(item, encoding="unicode")
-        xml = f"""<?xml version="1.0" encoding="utf-8"?>
-<ReviseFixedPriceItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
-  <RequesterCredentials>
-    <eBayAuthToken>{token}</eBayAuthToken>
-  </RequesterCredentials>
-  {item_xml}
-</ReviseFixedPriceItemRequest>"""
+        xml = build_revise_item_xml(template["listing_id"], merged, token)
 
         if dry_run:
             return {"template_id": template_id, "revised": False, "dry_run": True,
