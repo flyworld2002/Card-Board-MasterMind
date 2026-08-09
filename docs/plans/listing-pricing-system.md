@@ -2139,3 +2139,26 @@ empty strings.
   tokens family by family, and pushing era by era via
   `--ebay-sync-descriptions`. Blocked behind milestone 4 (block markup
   isn't finalized yet) — deferred until then.
+- **`--ebay-backfill-nav-images` variation-photo fix.** Confirmed real
+  (8/08): both Pitch Black templates (Common + Reverse Holo - Ultra Rare,
+  distinct `listing_id`s) got the identical `nav_image_url`. Root cause:
+  the backfill pulls `PictureDetails/PictureURL` — the listing's top-level
+  gallery photo — which for a variation listing is typically a generic
+  cover/box-art photo, not per-card; if the same cover image was uploaded
+  to both listings, eBay legitimately returns the same hosted URL for
+  both. Fix would mean pulling a representative photo from
+  `Variations/Variation/VariationSpecificPictureSet` instead of the
+  top-level `PictureDetails`. Deferred — manual `nav_image_url` overrides
+  work fine as a stopgap in the meantime.
+- **`description_sections` section library.** A separate uploaded doc
+  (8/08, not from this conversation) describes a DB-backed reusable-
+  section system: new `description_sections` table (`key`, `label`,
+  `html`, `kind` = `'layout'`|`'section'`, `sort_order`), `/api/
+  description-presets` reading from it instead of the hardcoded
+  `DESCRIPTION_PRESETS` constant, `description_sections` CRUD endpoints,
+  a new "Insert section" (insert-at-cursor) dropdown + section-manager UI
+  alongside the existing "Insert layout" (replace) dropdown, seeded from a
+  "Deep Sea" dark-themed mockup (navy/cyan/pink palette, dark-theme
+  sanitizer hardening via `bgcolor` + inline `style` on every container).
+  Not started — explicitly deferred by Fei (8/08): "I'll ask you to build
+  the section [library]" when ready, not now.
