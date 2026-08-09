@@ -25,14 +25,6 @@ from importer.ebay_create_listing import (
 
 TOKEN_PATTERN = re.compile(r"\{\{(\w+)\}\}")
 
-FINISH_LABELS = {
-    "non_holo": "Non-Holo",
-    "reverse_holo": "Reverse Holo",
-    "poke_ball": "Poké Ball",
-    "master_ball": "Master Ball",
-    "ultra_rare": "Ultra Rare",
-}
-
 # Description nav theme (migration 023, description_theme_settings) —
 # colors, sizing, and button/label text for the family_nav/era_nav/
 # era_index renderer. DEFAULT_THEME is the fallback for any key missing
@@ -56,7 +48,20 @@ DEFAULT_THEME = {
     "text_era_list_link": "Shop this set",
     "text_era_nav_subtitle": "Same finish, other sets:",
     "text_youre_here_suffix": "(you're here)",
+    # Finish-kind fallback labels — only used when a template's own
+    # family_label isn't set; per-listing family_label always wins.
+    "finish_label_non_holo": "Non-Holo",
+    "finish_label_reverse_holo": "Reverse Holo",
+    "finish_label_poke_ball": "Poké Ball",
+    "finish_label_master_ball": "Master Ball",
+    "finish_label_ultra_rare": "Ultra Rare",
 }
+
+
+def _finish_label(finish_kind: str | None, theme: dict) -> str | None:
+    if not finish_kind:
+        return None
+    return theme.get(f"finish_label_{finish_kind}", finish_kind)
 
 
 def _load_theme(cur) -> dict:
@@ -290,7 +295,7 @@ def _render_family_nav(cur, template: dict, theme: dict) -> str:
     for s in siblings:
         is_self = s["id"] == template["id"]
         cells.append(_nav_cell_html(
-            label=s["family_label"] or FINISH_LABELS.get(s["finish_kind"], s["finish_kind"] or "Listing"),
+            label=s["family_label"] or _finish_label(s["finish_kind"], theme) or "Listing",
             url=None if is_self else _item_url(s["listing_id"]),
             image_url=s["nav_image_url"],
             theme=theme,
@@ -341,7 +346,7 @@ def _render_era_nav(cur, template: dict, theme: dict) -> str:
     if not cells:
         return ""
 
-    finish_label = FINISH_LABELS.get(template.get("finish_kind"), template.get("finish_kind") or "")
+    finish_label = _finish_label(template.get("finish_kind"), theme)
     title = f"Other {finish_label} sets" if finish_label else f"Other {my_set['series']} era sets"
     return _nav_block_html(title, cells, theme, subtitle=theme["text_era_nav_subtitle"])
 
