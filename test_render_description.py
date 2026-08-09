@@ -138,8 +138,38 @@ def main():
         assert "View listing" not in custom_out, "default Python tile markup leaked in despite override"
         print()
 
-        print("PASS — no exceptions, unchanged-template invariant held, item-template override verified. "
-              "Rolling back seed data now.")
+        print("=== spoke_a_common: {{__standalone_test__}} — item template used standalone, no nav loop ===")
+        # Any non-reserved token now doubles as a standalone item-template
+        # reference (8/09), rendered with the CURRENT template's own
+        # label/image/description and an empty url (self-link) — same
+        # self-view convention the "current" tile already uses inside
+        # family_nav. Lets any hand-built tile be dropped straight into a
+        # description as {{its_key}}, not just the 3 reserved keys.
+        # spoke_a_common has no family_label set, so this also exercises
+        # the finish_kind -> theme fallback label path.
+        cur.execute(
+            """
+            INSERT INTO description_sections (key, label, html, kind)
+            VALUES ('__standalone_test__', 'standalone test',
+                    '<div class="standalone">{{item_label}} | {{item_url}} | {{item_image_url}} | {{item_description}}</div>',
+                    'item_template')
+            """
+        )
+        standalone_out = render_description(rows["spoke_a_common"], cur, source_html="{{__standalone_test__}}")
+        print(standalone_out)
+        assert 'class="standalone"' in standalone_out, "standalone item-template token did not resolve"
+        assert "Non-Holo |  |  | " in standalone_out, \
+            "standalone token should use the template's own finish-label fallback, empty url/image/description"
+        print()
+
+        print("=== unknown token (no matching item_template row) still renders empty, not an error ===")
+        empty_out = render_description(rows["spoke_a_common"], cur, source_html="before[{{__no_such_key__}}]after")
+        assert empty_out == "before[]after", f"expected empty substitution, got: {empty_out!r}"
+        print(empty_out)
+        print()
+
+        print("PASS — no exceptions, unchanged-template invariant held, item-template override verified, "
+              "standalone item-template token verified. Rolling back seed data now.")
     finally:
         conn.rollback()
         cur.close()

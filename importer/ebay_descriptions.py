@@ -493,10 +493,22 @@ def preview_description(template_id: str, source_html: str | None = None) -> dic
 
 def render_description(template: dict, cur, source_html: str | None = None) -> str:
     """Substitutes every {{token}} in source_html (defaults to
-    template['description_html']) against current DB state. Unknown or
-    absent tokens render as empty string; a template with no tokens
-    renders unchanged — the safe default for every template Fei hasn't
-    opted into nav for."""
+    template['description_html']) against current DB state. A template
+    with no tokens renders unchanged — the safe default for every
+    template Fei hasn't opted into nav for.
+
+    Token resolution order: (1) the two plain-text tokens (set_name/
+    series_name), (2) the 4 built-in nav blocks (family_nav/era_nav/
+    era_hub_link/era_index), (3) any OTHER token is tried as a standalone
+    item-template reference (description_sections, kind='item_template',
+    key == the token) — rendered using THIS template's own family_label/
+    nav_image_url/family_description, url left empty (it's a link to
+    itself), same self-view convention the "current" tile already uses
+    inside family_nav. Lets Fei drop any hand-built tile/chip directly
+    into a description as {{its_key}}, not just the 3 reserved keys that
+    auto-apply inside the nav blocks. Genuinely unknown tokens (no
+    matching row either) still render as empty string, not an error —
+    typos/stray {{...}} in freeform HTML shouldn't break the page."""
     source = source_html if source_html is not None else (template.get("description_html") or "")
     if not source:
         return source
@@ -509,10 +521,17 @@ def render_description(template: dict, cur, source_html: str | None = None) -> s
         token = match.group(1)
         if token in simple:
             return simple[token]
-        if token not in TOKEN_RENDERERS:
-            return ""
+        if token in TOKEN_RENDERERS:
+            if token not in cache:
+                cache[token] = TOKEN_RENDERERS[token](cur, template, theme)
+            return cache[token]
         if token not in cache:
-            cache[token] = TOKEN_RENDERERS[token](cur, template, theme)
+            label = template.get("family_label") or _finish_label(template.get("finish_kind"), theme) or "Listing"
+            html = _render_item_template(
+                cur, token, label, None, template.get("nav_image_url"),
+                description=template.get("family_description"),
+            )
+            cache[token] = html if html is not None else ""
         return cache[token]
 
     return TOKEN_PATTERN.sub(substitute, source)
