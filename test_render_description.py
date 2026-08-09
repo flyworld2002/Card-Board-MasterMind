@@ -74,6 +74,21 @@ def seed(cur):
     spoke_b_common = make_template("spoke B common", spoke_set_b_id, "non_holo", "TEST-B-COMMON",
                                     is_set_primary=True)
 
+    # Item-template override: a description_sections row with
+    # kind='item_template' (no schema change needed — kind is a plain
+    # text column) overrides the built-in per-tile markup,
+    # referenced via the {{token:modifier}} syntax. Base key with no
+    # "_current" variant deliberately, to also exercise the fallback path
+    # (current item falls back to the plain key, not the Python default).
+    cur.execute(
+        """
+        INSERT INTO description_sections (key, label, html, kind)
+        VALUES ('__test_tile__', 'test tile',
+                '<div class="custom-tile">{{item_label}} | {{item_url}} | {{item_image_url}}</div>',
+                'item_template')
+        """
+    )
+
     return {
         "hub_common": hub_common, "hub_rh": hub_rh,
         "spoke_a_common": spoke_a_common, "spoke_b_common": spoke_b_common,
@@ -110,7 +125,19 @@ def main():
         print(out)
         print()
 
-        print("PASS — no exceptions, unchanged-template invariant held. Rolling back seed data now.")
+        print("=== hub_rh: {{family_nav:__test_tile__}} — custom item-template override ===")
+        custom_out = render_description(rows["hub_rh"], cur, source_html="{{family_nav:__test_tile__}}")
+        print(custom_out)
+        assert 'class="custom-tile"' in custom_out, "custom item template did not apply"
+        assert "Non-Holo | https://www.ebay.com/itm/TEST-HUB-COMMON |" in custom_out, \
+            "sibling (non-current) tile did not substitute label/url correctly"
+        assert "Reverse Holo |  |" in custom_out, \
+            "current tile (no url, no _current variant) did not fall back to the base key correctly"
+        assert "View listing" not in custom_out, "default Python tile markup leaked in despite override"
+        print()
+
+        print("PASS — no exceptions, unchanged-template invariant held, item-template override verified. "
+              "Rolling back seed data now.")
     finally:
         conn.rollback()
         cur.close()

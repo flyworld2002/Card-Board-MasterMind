@@ -23,7 +23,16 @@ from importer.ebay_create_listing import (
     _load_template, build_revise_item_xml, fetch_listing_metadata, ALL_METADATA_FIELDS,
 )
 
-TOKEN_PATTERN = re.compile(r"\{\{(\w+)\}\}")
+TOKEN_PATTERN = re.compile(r"\{\{(\w+)(?::([\w-]+))?\}\}")
+
+# Item-template placeholder syntax inside a custom {{item_*}} block (a
+# description_sections row with kind='item_template') — deliberately a
+# separate, smaller substitution pass from TOKEN_PATTERN, run BEFORE the
+# item's rendered HTML is embedded into the outer block, never re-entered
+# by the outer re.sub() (replacement text is never re-scanned), so there's
+# no collision risk between the two token namespaces despite sharing {{ }}
+# syntax.
+_ITEM_PLACEHOLDER_PATTERN = re.compile(r"\{\{item_(\w+)\}\}")
 
 # Description nav theme (migration 023, description_theme_settings) —
 # colors, sizing, and button/label text for the family_nav/era_nav/
@@ -158,18 +167,64 @@ def _era_base_set(cur, series: str) -> dict | None:
 # still the gate before wider rollout — see plan doc roadmap.
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _two_col_rows(cells: list[str]) -> str:
-    """Chunks <td> cells into 2-per-row <tr>s, padding a trailing odd cell
-    so the row doesn't collapse lopsided. Shared by family tiles and era
-    list rows — same wrapping behavior, different cell content."""
+def _two_col_rows(cells: list[str], cell_padding: str = "6px") -> str:
+    """Wraps each inner-content string in a 50%-width <td> and chunks them
+    2-per-row, padding a trailing odd cell so the row doesn't collapse
+    lopsided. Shared by family tiles and era list rows — same wrapping
+    behavior, different cell content. The <td>/grid wrapping stays
+    Python's job even when the cell's INNER content comes from a custom
+    item_template — so template authors only ever write "what one tile
+    looks like", never grid mechanics."""
+    wrapped = [f'<td width="50%" valign="top" style="padding:{cell_padding};">{c}</td>' for c in cells]
     rows = []
-    for i in range(0, len(cells), 2):
-        pair = cells[i:i + 2]
+    for i in range(0, len(wrapped), 2):
+        pair = wrapped[i:i + 2]
         if len(pair) == 1:
             pair.append('<td width="50%">&nbsp;</td>')
         rows.append(f"<tr>{''.join(pair)}</tr>")
     return (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
             f'style="border-collapse:collapse;">{"".join(rows)}</table>')
+
+
+def _render_item_template(cur, key: str, label: str, url: str | None, image_url: str | None) -> str | None:
+    """Looks up a custom per-item block (description_sections row,
+    kind='item_template') by key and substitutes {{item_label}}/
+    {{item_url}}/{{item_image_url}} into it. Returns None if no such row
+    exists, so callers can fall back to the built-in Python rendering —
+    the table starts empty for this kind; nothing regresses until Fei
+    deliberately creates one."""
+    cur.execute(
+        "SELECT html FROM description_sections WHERE key = %s AND kind = 'item_template'",
+        (key,),
+    )
+    row = cur.fetchone()
+    if row is None:
+        return None
+    values = {"label": label or "", "url": url or "", "image_url": image_url or ""}
+    return _ITEM_PLACEHOLDER_PATTERN.sub(lambda m: values.get(m.group(1), ""), row["html"])
+
+
+def _resolve_item_html(cur, base_key: str, item_template_key: str | None, current: bool,
+                        label: str, url: str | None, image_url: str | None,
+                        default_render) -> str:
+    """One item's inner HTML: try the custom template first (current-state
+    variant — key + "_current" — falling back to the plain key if that
+    specific variant doesn't exist), then fall back to default_render()
+    (the existing Python-built markup) if no custom template exists at
+    all. item_template_key is the {{token:modifier}} override; base_key
+    is the reserved default name (e.g. "family_tile") used when no
+    modifier is given, so setting up description_sections rows named
+    exactly "family_tile"/"era_row"/"era_chip" overrides the built-in
+    look for EVERY listing, not just ones that opt in via a modifier."""
+    key = item_template_key or base_key
+    if current:
+        html = _render_item_template(cur, f"{key}_current", label, url, image_url)
+        if html is not None:
+            return html
+    html = _render_item_template(cur, key, label, url, image_url)
+    if html is not None:
+        return html
+    return default_render()
 
 
 def _nav_cell_html(label: str, url: str | None, image_url: str | None, theme: dict,
@@ -215,7 +270,7 @@ def _nav_cell_html(label: str, url: str | None, image_url: str | None, theme: di
             f'<td style="padding:14px;text-align:center;">{inner}</td></tr></table>')
     if url:
         tile = f'<a href="{url}" style="display:block;text-decoration:none;">{tile}</a>'
-    return f'<td width="50%" valign="top" style="padding:6px;">{tile}</td>'
+    return tile
 
 
 def _era_list_cell_html(label: str, url: str | None, theme: dict) -> str:
@@ -235,15 +290,16 @@ def _era_list_cell_html(label: str, url: str | None, theme: dict) -> str:
            f'<tr><td style="padding:11px 12px;">{inner}</td></tr></table>')
     if url:
         row = f'<a href="{url}" style="display:block;text-decoration:none;">{row}</a>'
-    return f'<td width="50%" valign="top" style="padding:5px;">{row}</td>'
+    return row
 
 
-def _nav_block_html(title: str, cells: list[str], theme: dict, subtitle: str | None = None) -> str:
+def _nav_block_html(title: str, cells: list[str], theme: dict, subtitle: str | None = None,
+                     cell_padding: str = "6px") -> str:
     sub = (f'<p style="margin:0 0 12px;font-size:12px;color:{theme["color_text_muted"]};'
            f'font-family:sans-serif;">{subtitle}</p>') if subtitle else ""
     return (f'<div style="margin:20px 0;"><p style="margin:0 0 {"4px" if subtitle else "12px"};'
             f'font-size:15px;font-weight:bold;color:#fff;font-family:sans-serif;">{title}</p>'
-            f'{sub}{_two_col_rows(cells)}</div>')
+            f'{sub}{_two_col_rows(cells, cell_padding)}</div>')
 
 
 def _banner_html(text: str, url: str, theme: dict) -> str:
@@ -276,7 +332,7 @@ def _chip_html(label: str, url: str | None, highlighted: bool, theme: dict) -> s
 # Token renderers
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _render_family_nav(cur, template: dict, theme: dict) -> str:
+def _render_family_nav(cur, template: dict, theme: dict, item_template_key: str | None = None) -> str:
     if not template.get("set_id"):
         return ""
     cur.execute(
@@ -294,17 +350,21 @@ def _render_family_nav(cur, template: dict, theme: dict) -> str:
     cells = []
     for s in siblings:
         is_self = s["id"] == template["id"]
-        cells.append(_nav_cell_html(
-            label=s["family_label"] or _finish_label(s["finish_kind"], theme) or "Listing",
-            url=None if is_self else _item_url(s["listing_id"]),
-            image_url=s["nav_image_url"],
-            theme=theme,
-            highlighted=is_self,
+        label = s["family_label"] or _finish_label(s["finish_kind"], theme) or "Listing"
+        url = None if is_self else _item_url(s["listing_id"])
+        image_url = s["nav_image_url"]
+        cells.append(_resolve_item_html(
+            cur, "family_tile", item_template_key, is_self, label, url, image_url,
+            default_render=lambda label=label, url=url, image_url=image_url, is_self=is_self:
+                _nav_cell_html(label, url, image_url, theme, highlighted=is_self),
         ))
     return _nav_block_html(theme["text_family_nav_title"], cells, theme)
 
 
-def _render_era_hub_link(cur, template: dict, theme: dict) -> str:
+def _render_era_hub_link(cur, template: dict, theme: dict, item_template_key: str | None = None) -> str:
+    # Not a repeating block (one banner, not a list of items) — no
+    # item-template modifier support here, item_template_key is accepted
+    # only so TOKEN_RENDERERS can call every renderer the same way.
     if not template.get("set_id"):
         return ""
     cur.execute("SELECT series FROM card_sets WHERE id = %s", (template["set_id"],))
@@ -320,7 +380,7 @@ def _render_era_hub_link(cur, template: dict, theme: dict) -> str:
     return _banner_html(f"Shop all {series} era sets", _item_url(hub_template["listing_id"]), theme)
 
 
-def _render_era_nav(cur, template: dict, theme: dict) -> str:
+def _render_era_nav(cur, template: dict, theme: dict, item_template_key: str | None = None) -> str:
     if not template.get("set_id"):
         return ""
     cur.execute("SELECT * FROM card_sets WHERE id = %s", (template["set_id"],))
@@ -342,16 +402,22 @@ def _render_era_nav(cur, template: dict, theme: dict) -> str:
         match = _resolve_finish_match(cur, s["id"], template.get("finish_kind"))
         if not match or not match.get("listing_id"):
             continue
-        cells.append(_era_list_cell_html(label=s["name"], url=_item_url(match["listing_id"]), theme=theme))
+        label, url = s["name"], _item_url(match["listing_id"])
+        image_url = match["nav_image_url"]
+        cells.append(_resolve_item_html(
+            cur, "era_row", item_template_key, False, label, url, image_url,
+            default_render=lambda label=label, url=url, theme=theme:
+                _era_list_cell_html(label, url, theme),
+        ))
     if not cells:
         return ""
 
     finish_label = _finish_label(template.get("finish_kind"), theme)
     title = f"Other {finish_label} sets" if finish_label else f"Other {my_set['series']} era sets"
-    return _nav_block_html(title, cells, theme, subtitle=theme["text_era_nav_subtitle"])
+    return _nav_block_html(title, cells, theme, subtitle=theme["text_era_nav_subtitle"], cell_padding="5px")
 
 
-def _render_era_index(cur, template: dict, theme: dict) -> str:
+def _render_era_index(cur, template: dict, theme: dict, item_template_key: str | None = None) -> str:
     cur.execute("SELECT DISTINCT series FROM card_sets WHERE series IS NOT NULL ORDER BY series")
     all_series = [r["series"] for r in cur.fetchall()]
 
@@ -370,7 +436,12 @@ def _render_era_index(cur, template: dict, theme: dict) -> str:
         if not match or not match.get("listing_id"):
             continue
         is_self = series == my_series
-        chips.append(_chip_html(series, None if is_self else _item_url(match["listing_id"]), is_self, theme))
+        url = None if is_self else _item_url(match["listing_id"])
+        chips.append(_resolve_item_html(
+            cur, "era_chip", item_template_key, is_self, series, url, None,
+            default_render=lambda series=series, url=url, is_self=is_self:
+                _chip_html(series, url, is_self, theme),
+        ))
     if not chips:
         return ""
     return _chip_row_html(chips)
@@ -425,14 +496,15 @@ def render_description(template: dict, cur, source_html: str | None = None) -> s
     cache = {}
 
     def substitute(match):
-        token = match.group(1)
-        if token in simple:
+        token, modifier = match.group(1), match.group(2)
+        if modifier is None and token in simple:
             return simple[token]
         if token not in TOKEN_RENDERERS:
             return ""
-        if token not in cache:
-            cache[token] = TOKEN_RENDERERS[token](cur, template, theme)
-        return cache[token]
+        cache_key = (token, modifier)
+        if cache_key not in cache:
+            cache[cache_key] = TOKEN_RENDERERS[token](cur, template, theme, modifier)
+        return cache[cache_key]
 
     return TOKEN_PATTERN.sub(substitute, source)
 
