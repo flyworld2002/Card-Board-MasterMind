@@ -234,9 +234,15 @@ class DescriptionSyncRequest(BaseModel):
 class DescriptionSectionCreateRequest(BaseModel):
     key: str
     label: str
-    html: str
-    kind: str = "section"
+    kind: str = "static"
+    html: str | None = None
     sort_order: int = 0
+    repeat_rule: str | None = None
+    layout: str | None = None
+    item_template_html: str | None = None
+    item_template_current_html: str | None = None
+    title: str | None = None
+    subtitle: str | None = None
 
 
 class DescriptionSectionUpdateRequest(BaseModel):
@@ -245,6 +251,12 @@ class DescriptionSectionUpdateRequest(BaseModel):
     html: str | None = None
     kind: str | None = None
     sort_order: int | None = None
+    repeat_rule: str | None = None
+    layout: str | None = None
+    item_template_html: str | None = None
+    item_template_current_html: str | None = None
+    title: str | None = None
+    subtitle: str | None = None
 
 
 @app.post("/api/picking/refresh")
@@ -539,8 +551,8 @@ def description_presets_endpoint(x_picking_token: str = Header(default="")):
 
 @app.get("/api/description-sections")
 def list_description_sections_endpoint(x_picking_token: str = Header(default="")):
-    """Full rows (id/key/label/html/kind/sort_order/updated_at) for the
-    section manager UI — list/description-presets' trimmed shape is for
+    """Full rows (module-builder columns included, migration 029) for the
+    module library UI — list/description-presets' trimmed shape is for
     the insert dropdowns, this is for CRUD."""
     if x_picking_token != API_TOKEN:
         raise HTTPException(status_code=401, detail="bad token")
@@ -553,8 +565,12 @@ def create_description_section_endpoint(body: DescriptionSectionCreateRequest,
     if x_picking_token != API_TOKEN:
         raise HTTPException(status_code=401, detail="bad token")
     try:
-        return create_description_section(key=body.key, label=body.label, html=body.html,
-                                           kind=body.kind, sort_order=body.sort_order)
+        return create_description_section(
+            key=body.key, label=body.label, kind=body.kind, html=body.html, sort_order=body.sort_order,
+            repeat_rule=body.repeat_rule, layout=body.layout, item_template_html=body.item_template_html,
+            item_template_current_html=body.item_template_current_html, title=body.title,
+            subtitle=body.subtitle,
+        )
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"create failed: {e}")
 

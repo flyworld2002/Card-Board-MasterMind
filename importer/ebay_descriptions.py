@@ -195,45 +195,53 @@ def _two_col_rows(cells: list[str], cell_padding: str = "6px") -> str:
             f'style="border-collapse:collapse;">{"".join(rows)}</table>')
 
 
-def _render_item_template(cur, key: str, label: str, url: str | None, image_url: str | None,
-                           description: str | None = None) -> str | None:
-    """Looks up a custom per-item block (description_sections row,
-    kind='item_template') by key and substitutes {{item_label}}/
-    {{item_url}}/{{item_image_url}}/{{item_description}} into it. Returns
-    None if no such row exists, so callers can fall back to the built-in
-    Python rendering — the table starts empty for this kind; nothing
-    regresses until Fei deliberately creates one."""
-    cur.execute(
-        "SELECT html FROM description_sections WHERE key = %s AND kind = 'item_template'",
-        (key,),
-    )
-    row = cur.fetchone()
-    if row is None:
-        return None
+def _substitute_item_placeholders(html: str, label: str, url: str | None, image_url: str | None,
+                                   description: str | None = None) -> str:
+    """Substitutes {{item_label}}/{{item_url}}/{{item_image_url}}/
+    {{item_description}} into a module's item_template_html/
+    item_template_current_html. Pure string function — the module row
+    (and its template HTML) is already in hand by the time this is
+    called; no DB lookup here (that used to be a separate query per item
+    per render, folded away in migration 029's redesign)."""
     values = {"label": label or "", "url": url or "", "image_url": image_url or "",
               "description": description or ""}
-    return _ITEM_PLACEHOLDER_PATTERN.sub(lambda m: values.get(m.group(1), ""), row["html"])
+    return _ITEM_PLACEHOLDER_PATTERN.sub(lambda m: values.get(m.group(1), ""), html)
 
 
-def _resolve_item_html(cur, base_key: str, current: bool,
-                        label: str, url: str | None, image_url: str | None,
+def _resolve_item_html(module: dict, current: bool, label: str, url: str | None, image_url: str | None,
                         default_render, description: str | None = None) -> str:
-    """One item's inner HTML: try the custom template first (current-state
-    variant — base_key + "_current" — falling back to the plain base_key
-    if that specific variant doesn't exist), then fall back to
-    default_render() (the existing Python-built markup) if no custom
-    template exists at all. base_key is the reserved name for this block
-    type (e.g. "family_tile", "era_row", "era_chip") — a description_sections
-    row named exactly that overrides the built-in look for EVERY listing,
-    with zero extra syntax to opt in."""
-    if current:
-        html = _render_item_template(cur, f"{base_key}_current", label, url, image_url, description)
-        if html is not None:
-            return html
-    html = _render_item_template(cur, base_key, label, url, image_url, description)
-    if html is not None:
-        return html
+    """One item's inner HTML: the module's item_template_current_html (if
+    `current` and set), else its item_template_html (if set), else
+    default_render() (the built-in Python markup) — NULL/unset falls
+    through to the next tier rather than being an error, so a module
+    never needs both columns filled in just to exist."""
+    if current and module.get("item_template_current_html"):
+        return _substitute_item_placeholders(
+            module["item_template_current_html"], label, url, image_url, description)
+    if module.get("item_template_html"):
+        return _substitute_item_placeholders(module["item_template_html"], label, url, image_url, description)
     return default_render()
+
+
+def _module_text(module: dict, field: str, template: dict, theme: dict, simple: dict) -> str | None:
+    """A repeater module's title/subtitle override, if set — substituted
+    against the CURRENT template (not the loop's items) so e.g.
+    {{finish_label}} still works in a custom era_siblings title, which
+    varies per finish_kind on the same hub set in the built-in default.
+    Returns None (caller falls back to the built-in default) when the
+    module doesn't override this field."""
+    value = module.get(field)
+    if not value:
+        return None
+    ctx = {**simple, "finish_label": _finish_label(template.get("finish_kind"), theme) or ""}
+    return TOKEN_PATTERN.sub(lambda m: ctx.get(m.group(1), ""), value)
+
+
+def _wrap_repeater(cells: list[str], layout: str, title: str, subtitle: str | None, theme: dict,
+                    cell_padding: str = "6px") -> str:
+    if layout == "chips":
+        return _chip_row_html(cells)
+    return _nav_block_html(title, cells, theme, subtitle=subtitle, cell_padding=cell_padding)
 
 
 def _nav_cell_html(label: str, url: str | None, image_url: str | None, theme: dict,
@@ -338,10 +346,17 @@ def _chip_html(label: str, url: str | None, highlighted: bool, theme: dict) -> s
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Token renderers
+# Repeat-rule / single-target resolvers — the DATA logic (which listings a
+# module shows) for each repeat_rule, decoupled from a module's own
+# PRESENTATION (its item_template_html, layout, title/subtitle). Any
+# number of differently-named, differently-styled modules can share one
+# repeat_rule; this is what replaced the old fixed family_nav/era_nav/
+# era_hub_link/era_index singleton functions (migration 029 redesign).
+# Registered in _REPEAT_RESOLVERS/_SINGLE_RESOLVERS below, dispatched by
+# render_description()'s substitute().
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _render_family_nav(cur, template: dict, theme: dict) -> str:
+def _render_repeater_family(cur, template: dict, theme: dict, module: dict, simple: dict) -> str:
     if not template.get("set_id"):
         return ""
     cur.execute(
@@ -364,33 +379,17 @@ def _render_family_nav(cur, template: dict, theme: dict) -> str:
         image_url = s["nav_image_url"]
         description = s["family_description"]
         cells.append(_resolve_item_html(
-            cur, "family_tile", is_self, label, url, image_url,
+            module, is_self, label, url, image_url,
             default_render=lambda label=label, url=url, image_url=image_url, is_self=is_self:
                 _nav_cell_html(label, url, image_url, theme, highlighted=is_self),
             description=description,
         ))
-    return _nav_block_html(theme["text_family_nav_title"], cells, theme)
+    title = _module_text(module, "title", template, theme, simple) or theme["text_family_nav_title"]
+    subtitle = _module_text(module, "subtitle", template, theme, simple)
+    return _wrap_repeater(cells, module.get("layout") or "grid", title, subtitle, theme, cell_padding="6px")
 
 
-def _render_era_hub_link(cur, template: dict, theme: dict) -> str:
-    # Not a repeating block (one banner, not a list of items) — no
-    # item-template override applies here.
-    if not template.get("set_id"):
-        return ""
-    cur.execute("SELECT series FROM card_sets WHERE id = %s", (template["set_id"],))
-    row = cur.fetchone()
-    series = row["series"] if row else None
-    base_set = _era_base_set(cur, series)
-    if not base_set or base_set["id"] == template["set_id"]:
-        return ""  # no era, or I AM the hub — no self-link
-
-    hub_template = _resolve_finish_match(cur, base_set["id"], template.get("finish_kind"))
-    if not hub_template or not hub_template.get("listing_id"):
-        return ""
-    return _banner_html(f"Shop all {series} era sets", _item_url(hub_template["listing_id"]), theme)
-
-
-def _render_era_nav(cur, template: dict, theme: dict) -> str:
+def _render_repeater_era_siblings(cur, template: dict, theme: dict, module: dict, simple: dict) -> str:
     if not template.get("set_id"):
         return ""
     cur.execute("SELECT * FROM card_sets WHERE id = %s", (template["set_id"],))
@@ -399,7 +398,7 @@ def _render_era_nav(cur, template: dict, theme: dict) -> str:
         return ""
     base_set = _era_base_set(cur, my_set["series"])
     if not base_set or base_set["id"] != my_set["id"]:
-        return ""  # era_nav only renders on the hub itself
+        return ""  # only renders on the hub itself
 
     cur.execute(
         "SELECT * FROM card_sets WHERE series = %s AND id != %s ORDER BY release_year, name",
@@ -415,7 +414,7 @@ def _render_era_nav(cur, template: dict, theme: dict) -> str:
         label, url = s["name"], _item_url(match["listing_id"])
         image_url = match["nav_image_url"]
         cells.append(_resolve_item_html(
-            cur, "era_row", False, label, url, image_url,
+            module, False, label, url, image_url,
             default_render=lambda label=label, url=url, theme=theme:
                 _era_list_cell_html(label, url, theme),
         ))
@@ -423,11 +422,15 @@ def _render_era_nav(cur, template: dict, theme: dict) -> str:
         return ""
 
     finish_label = _finish_label(template.get("finish_kind"), theme)
-    title = f"Other {finish_label} sets" if finish_label else f"Other {my_set['series']} era sets"
-    return _nav_block_html(title, cells, theme, subtitle=theme["text_era_nav_subtitle"], cell_padding="5px")
+    default_title = f"Other {finish_label} sets" if finish_label else f"Other {my_set['series']} era sets"
+    title = _module_text(module, "title", template, theme, simple) or default_title
+    subtitle = _module_text(module, "subtitle", template, theme, simple)
+    if subtitle is None:
+        subtitle = theme["text_era_nav_subtitle"]
+    return _wrap_repeater(cells, module.get("layout") or "grid", title, subtitle, theme, cell_padding="5px")
 
 
-def _render_era_index(cur, template: dict, theme: dict) -> str:
+def _render_repeater_era_index(cur, template: dict, theme: dict, module: dict, simple: dict) -> str:
     cur.execute("SELECT DISTINCT series FROM card_sets WHERE series IS NOT NULL ORDER BY series")
     all_series = [r["series"] for r in cur.fetchall()]
 
@@ -448,13 +451,60 @@ def _render_era_index(cur, template: dict, theme: dict) -> str:
         is_self = series == my_series
         url = None if is_self else _item_url(match["listing_id"])
         chips.append(_resolve_item_html(
-            cur, "era_chip", is_self, series, url, None,
+            module, is_self, series, url, None,
             default_render=lambda series=series, url=url, is_self=is_self:
                 _chip_html(series, url, is_self, theme),
         ))
     if not chips:
         return ""
-    return _chip_row_html(chips)
+    layout = module.get("layout") or "chips"
+    title = _module_text(module, "title", template, theme, simple) or "Other eras"
+    subtitle = _module_text(module, "subtitle", template, theme, simple)
+    return _wrap_repeater(chips, layout, title, subtitle, theme, cell_padding="6px")
+
+
+def _render_single_era_hub(cur, template: dict, theme: dict, module: dict) -> str:
+    if not template.get("set_id"):
+        return ""
+    cur.execute("SELECT series FROM card_sets WHERE id = %s", (template["set_id"],))
+    row = cur.fetchone()
+    series = row["series"] if row else None
+    base_set = _era_base_set(cur, series)
+    if not base_set or base_set["id"] == template["set_id"]:
+        return ""  # no era, or I AM the hub — no self-link
+
+    hub_template = _resolve_finish_match(cur, base_set["id"], template.get("finish_kind"))
+    if not hub_template or not hub_template.get("listing_id"):
+        return ""
+    text = f"Shop all {series} era sets"
+    url = _item_url(hub_template["listing_id"])
+    if module.get("item_template_html"):
+        return _substitute_item_placeholders(module["item_template_html"], text, url, None)
+    return _banner_html(text, url, theme)
+
+
+def _render_single_self(cur, template: dict, theme: dict, module: dict) -> str:
+    # The one rule with no Python-hardcoded look at all — unlike the other
+    # 3 built-ins, a bare {{some_key}} standalone module was never a thing
+    # before migration 029, so there's no "default" to preserve here.
+    if not module.get("item_template_html"):
+        return ""
+    label = template.get("family_label") or _finish_label(template.get("finish_kind"), theme) or "Listing"
+    return _substitute_item_placeholders(
+        module["item_template_html"], label, None, template.get("nav_image_url"),
+        description=template.get("family_description"))
+
+
+_REPEAT_RESOLVERS = {
+    "family": _render_repeater_family,
+    "era_siblings": _render_repeater_era_siblings,
+    "era_index": _render_repeater_era_index,
+}
+
+_SINGLE_RESOLVERS = {
+    "era_hub": _render_single_era_hub,
+    "self": _render_single_self,
+}
 
 
 def _render_simple_tokens(cur, template: dict) -> dict:
@@ -470,12 +520,9 @@ def _render_simple_tokens(cur, template: dict) -> dict:
     return {"set_name": row["name"] or "", "series_name": row["series"] or ""}
 
 
-TOKEN_RENDERERS = {
-    "family_nav": _render_family_nav,
-    "era_hub_link": _render_era_hub_link,
-    "era_nav": _render_era_nav,
-    "era_index": _render_era_index,
-}
+def _load_module(cur, key: str) -> dict | None:
+    cur.execute("SELECT * FROM description_sections WHERE key = %s", (key,))
+    return cur.fetchone()
 
 
 def preview_description(template_id: str, source_html: str | None = None) -> dict:
@@ -498,17 +545,19 @@ def render_description(template: dict, cur, source_html: str | None = None) -> s
     template Fei hasn't opted into nav for.
 
     Token resolution order: (1) the two plain-text tokens (set_name/
-    series_name), (2) the 4 built-in nav blocks (family_nav/era_nav/
-    era_hub_link/era_index), (3) any OTHER token is tried as a standalone
-    item-template reference (description_sections, kind='item_template',
-    key == the token) — rendered using THIS template's own family_label/
-    nav_image_url/family_description, url left empty (it's a link to
-    itself), same self-view convention the "current" tile already uses
-    inside family_nav. Lets Fei drop any hand-built tile/chip directly
-    into a description as {{its_key}}, not just the 3 reserved keys that
-    auto-apply inside the nav blocks. Genuinely unknown tokens (no
-    matching row either) still render as empty string, not an error —
-    typos/stray {{...}} in freeform HTML shouldn't break the page."""
+    series_name) — pure Python, not a description_sections row; (2)
+    everything else is a module lookup by key (description_sections,
+    migration 029's kind='static'/'repeater'/'single' shapes) —
+    'static' substitutes recursively (its own html can reference other
+    modules, e.g. {{family_nav}} inside a saved layout's html — guarded
+    against a module referencing itself, directly or through a cycle, by
+    `rendering`); 'repeater'/'single' dispatch to a rule resolver keyed
+    by repeat_rule. A key matching no module still renders as empty
+    string, not an error — typos/stray {{...}} in freeform HTML
+    shouldn't break the page. The 4 original built-in blocks
+    (family_nav/era_nav/era_hub_link/era_index) are just modules seeded
+    under those exact names by backfill_description_modules() — no
+    special-casing left for them here."""
     source = source_html if source_html is not None else (template.get("description_html") or "")
     if not source:
         return source
@@ -516,23 +565,36 @@ def render_description(template: dict, cur, source_html: str | None = None) -> s
     theme = _load_theme(cur, template.get("theme_key") or "default")
     simple = _render_simple_tokens(cur, template)
     cache = {}
+    rendering = set()
 
     def substitute(match):
         token = match.group(1)
         if token in simple:
             return simple[token]
-        if token in TOKEN_RENDERERS:
-            if token not in cache:
-                cache[token] = TOKEN_RENDERERS[token](cur, template, theme)
+        if token in cache:
             return cache[token]
-        if token not in cache:
-            label = template.get("family_label") or _finish_label(template.get("finish_kind"), theme) or "Listing"
-            html = _render_item_template(
-                cur, token, label, None, template.get("nav_image_url"),
-                description=template.get("family_description"),
-            )
-            cache[token] = html if html is not None else ""
-        return cache[token]
+        if token in rendering:
+            return ""  # cycle guard: a static module referencing itself/a loop of modules
+        module = _load_module(cur, token)
+        if module is None:
+            return ""
+        rendering.add(token)
+        try:
+            kind = module.get("kind")
+            if kind == "static":
+                result = TOKEN_PATTERN.sub(substitute, module.get("html") or "")
+            elif kind == "repeater":
+                resolver = _REPEAT_RESOLVERS.get(module.get("repeat_rule"))
+                result = resolver(cur, template, theme, module, simple) if resolver else ""
+            elif kind == "single":
+                resolver = _SINGLE_RESOLVERS.get(module.get("repeat_rule"))
+                result = resolver(cur, template, theme, module) if resolver else ""
+            else:
+                result = ""
+        finally:
+            rendering.discard(token)
+        cache[token] = result
+        return result
 
     return TOKEN_PATTERN.sub(substitute, source)
 
@@ -680,14 +742,127 @@ def backfill_nav_images(account_num: int = 1, force: bool = False) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Reusable section/layout library (migration 021) — supersedes the old
-# hardcoded DESCRIPTION_PRESETS constant. 'layout' rows are whole-
-# description starters (Insert-layout dropdown, REPLACES the textarea);
-# 'section' rows are small reusable blocks (Insert-section dropdown,
-# inserts AT CURSOR). Both may contain {{tokens}}, substituted by the same
-# render_description() pass as everything else — no separate rendering
-# path for library content.
+# One-time (re-runnable) description_sections -> module conversion
+# (migration 029, Fei 8/09's "full customizable description module
+# builder" redesign — replaces the reserved-key/{{token:modifier}} special
+# cases with one coherent per-module model). Seeds the 4 built-in modules
+# under the SAME token names the renderer has always recognized
+# (family_nav/era_nav/era_hub_link/era_index), so every listing's
+# description_html renders byte-identical afterward — nothing needs
+# re-authoring. Then folds any leftover kind='item_template' rows (the 5
+# reserved sub-keys, if they exist, or freeform standalone keys like the
+# _example rows) into the new shape.
 # ══════════════════════════════════════════════════════════════════════════════
+
+_BUILTIN_MODULES = [
+    # key, label, kind, repeat_rule, layout, sort_order
+    ("family_nav", "Family strip (finish variants of this set)", "repeater", "family", "grid", 1),
+    ("era_nav", "Era navigation (other sets in this era, hub only)", "repeater", "era_siblings", "grid", 2),
+    ("era_hub_link", "Era hub link (banner, non-hub listings only)", "single", "era_hub", None, 3),
+    ("era_index", "Era index (every era's hub set, chip row)", "repeater", "era_index", "chips", 4),
+]
+
+# Old reserved item-template keys -> which built-in module's
+# item_template_*/item_template_current_* column they fold into.
+_RESERVED_ITEM_TEMPLATE_MAP = {
+    "family_tile": ("family_nav", "item_template_html"),
+    "family_tile_current": ("family_nav", "item_template_current_html"),
+    "era_row": ("era_nav", "item_template_html"),
+    "era_chip": ("era_index", "item_template_html"),
+    "era_chip_current": ("era_index", "item_template_current_html"),
+}
+
+
+def backfill_description_modules() -> dict:
+    """Seeds the 4 built-in modules and converts leftover
+    kind='item_template' rows to the new repeater/single shape. Idempotent
+    — safe to re-run. NOT wired to a main.py flag (one-off, same as
+    backfill_nav_images originally was) — run directly when deploying
+    migration 029."""
+    with db_cursor() as cur:
+        for key, label, kind, repeat_rule, layout, sort_order in _BUILTIN_MODULES:
+            cur.execute(
+                """
+                INSERT INTO description_sections (key, label, kind, repeat_rule, layout, sort_order)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (key) DO NOTHING
+                """,
+                (key, label, kind, repeat_rule, layout, sort_order),
+            )
+
+        cur.execute("SELECT id, key, html FROM description_sections WHERE kind = 'item_template'")
+        leftover = cur.fetchall()
+
+        folded, converted = [], []
+        for row in leftover:
+            if row["key"] in _RESERVED_ITEM_TEMPLATE_MAP:
+                target_key, column = _RESERVED_ITEM_TEMPLATE_MAP[row["key"]]
+                cur.execute(
+                    f"UPDATE description_sections SET {column} = %s WHERE key = %s",
+                    (row["html"], target_key),
+                )
+                cur.execute("DELETE FROM description_sections WHERE id = %s", (row["id"],))
+                folded.append(row["key"])
+            else:
+                cur.execute(
+                    """
+                    UPDATE description_sections
+                    SET kind = 'single', repeat_rule = 'self', item_template_html = html, html = NULL
+                    WHERE id = %s
+                    """,
+                    (row["id"],),
+                )
+                converted.append(row["key"])
+
+    return {"builtins_seeded": [m[0] for m in _BUILTIN_MODULES], "folded_into_builtins": folded,
+            "converted_to_standalone": converted}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Reusable module library (migration 021, extended by migration 029) —
+# supersedes the old hardcoded DESCRIPTION_PRESETS constant. kind='static'
+# rows are plain reusable HTML (formerly split into 'layout'/'section' —
+# that was purely an authoring-time UX distinction in the old textarea-
+# based editor, not a rendering one, so it collapsed into one kind);
+# kind='repeater'/'single' rows are the module-builder shapes, see the
+# "Token renderers" section below. All may contain {{tokens}}, substituted
+# by the same render_description() pass — no separate rendering path for
+# library content.
+# ══════════════════════════════════════════════════════════════════════════════
+
+_FULL_SECTION_COLUMNS = ("id, key, label, html, kind, sort_order, repeat_rule, layout, "
+                         "item_template_html, item_template_current_html, title, subtitle, updated_at")
+
+_REPEATER_RULES = {"family", "era_siblings", "era_index"}
+_SINGLE_RULES = {"self", "era_hub"}
+_LAYOUTS = {"grid", "chips"}
+
+
+def _validate_module_fields(kind: str, repeat_rule: str | None, layout: str | None, html: str | None) -> None:
+    """Application-level guard for (kind, repeat_rule, layout) combinations
+    the CHECK constraint alone can't express. kind='item_template' is
+    grandfathered (legacy rows only — the UI stopped producing that kind
+    after migration 029) and skips these checks entirely."""
+    if kind == "item_template":
+        return
+    if kind == "static":
+        if not html:
+            raise ValueError("a 'static' module needs html")
+        if repeat_rule or layout:
+            raise ValueError("'static' modules don't use repeat_rule/layout")
+    elif kind == "repeater":
+        if repeat_rule not in _REPEATER_RULES:
+            raise ValueError(f"repeat_rule for a 'repeater' module must be one of {sorted(_REPEATER_RULES)}")
+        if layout and layout not in _LAYOUTS:
+            raise ValueError(f"layout must be one of {sorted(_LAYOUTS)}")
+    elif kind == "single":
+        if repeat_rule not in _SINGLE_RULES:
+            raise ValueError(f"repeat_rule for a 'single' module must be one of {sorted(_SINGLE_RULES)}")
+        if layout:
+            raise ValueError("'single' modules don't use layout")
+    else:
+        raise ValueError(f"unknown kind {kind!r}")
+
 
 def list_description_sections() -> dict:
     """{key: {label, html, kind}} — the shape /api/description-presets has
@@ -701,51 +876,67 @@ def list_description_sections() -> dict:
 
 
 def list_description_sections_full() -> list[dict]:
-    """Full rows (id, sort_order, updated_at included) for the section
-    manager UI — list_description_sections()'s trimmed shape is for the
-    dropdown, this is for CRUD."""
+    """Full rows (module-builder columns included, migration 029) for the
+    module library UI — list_description_sections()'s trimmed shape is
+    for the dropdown, this is for CRUD."""
     with db_cursor() as cur:
-        cur.execute(
-            "SELECT id, key, label, html, kind, sort_order, updated_at "
-            "FROM description_sections ORDER BY sort_order, label"
-        )
+        cur.execute(f"SELECT {_FULL_SECTION_COLUMNS} FROM description_sections ORDER BY sort_order, label")
         return cur.fetchall()
 
 
-def create_description_section(key: str, label: str, html: str, kind: str = "section",
-                                sort_order: int = 0) -> dict:
+def create_description_section(key: str, label: str, kind: str = "static", html: str | None = None,
+                                sort_order: int = 0, repeat_rule: str | None = None, layout: str | None = None,
+                                item_template_html: str | None = None,
+                                item_template_current_html: str | None = None,
+                                title: str | None = None, subtitle: str | None = None) -> dict:
+    _validate_module_fields(kind, repeat_rule, layout, html)
     with db_cursor() as cur:
         cur.execute(
-            """
-            INSERT INTO description_sections (key, label, html, kind, sort_order)
-            VALUES (%s, %s, %s, %s, %s) RETURNING id, key, label, html, kind, sort_order, updated_at
+            f"""
+            INSERT INTO description_sections
+                (key, label, html, kind, sort_order, repeat_rule, layout,
+                 item_template_html, item_template_current_html, title, subtitle)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING {_FULL_SECTION_COLUMNS}
             """,
-            (key, label, html, kind, sort_order),
+            (key, label, html, kind, sort_order, repeat_rule, layout,
+             item_template_html, item_template_current_html, title, subtitle),
         )
         return cur.fetchone()
 
 
-_SECTION_FIELDS = ("key", "label", "html", "kind", "sort_order")
+_SECTION_FIELDS = ("key", "label", "html", "kind", "sort_order", "repeat_rule", "layout",
+                    "item_template_html", "item_template_current_html", "title", "subtitle")
 
 
 def update_description_section(section_id: str, **fields) -> dict:
     """Partial update — same pattern as set_manual_listing_metadata():
-    only columns present in fields are touched."""
+    only columns present in fields are touched. Fetches the existing row
+    first so validation sees the EFFECTIVE (kind, repeat_rule, layout,
+    html) after merging the partial update, not just whichever fields
+    happened to be part of this one call."""
     cols = [f for f in _SECTION_FIELDS if f in fields]
     if not cols:
         return {"id": section_id, "updated": []}
-    set_clause = ", ".join(f"{c} = %s" for c in cols)
-    values = [fields[c] for c in cols]
     with db_cursor() as cur:
         cur.execute(
+            "SELECT kind, repeat_rule, layout, html FROM description_sections WHERE id = %s",
+            (section_id,),
+        )
+        existing = cur.fetchone()
+        if existing is None:
+            return {"id": section_id, "error": "no such section"}
+        merged = {**existing, **{c: fields[c] for c in cols}}
+        _validate_module_fields(merged["kind"], merged["repeat_rule"], merged["layout"], merged["html"])
+
+        set_clause = ", ".join(f"{c} = %s" for c in cols)
+        values = [fields[c] for c in cols]
+        cur.execute(
             f"UPDATE description_sections SET {set_clause}, updated_at = now() "
-            f"WHERE id = %s RETURNING id, key, label, html, kind, sort_order, updated_at",
+            f"WHERE id = %s RETURNING {_FULL_SECTION_COLUMNS}",
             values + [section_id],
         )
-        row = cur.fetchone()
-    if row is None:
-        return {"id": section_id, "error": "no such section"}
-    return row
+        return cur.fetchone()
 
 
 def delete_description_section(section_id: str) -> dict:

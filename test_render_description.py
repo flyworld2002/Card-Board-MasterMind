@@ -16,6 +16,13 @@ USAGE:
 Requires migration 020 already applied (listing_templates.set_id /
 finish_kind / family_label / nav_rank / is_set_primary / show_in_nav /
 nav_image_url columns) — fails loudly and rolls back if it isn't.
+
+Also requires migration 029 applied AND backfill_description_modules()
+already run (once, committed — see importer/ebay_descriptions.py) so the
+4 built-in modules (family_nav/era_nav/era_hub_link/era_index) exist as
+real description_sections rows; this script's own transaction only seeds
+listing_templates/card_sets fixtures plus a few one-off module-override
+rows per test case, not the built-ins themselves.
 """
 
 from db.connection import get_connection
@@ -110,22 +117,21 @@ def main():
         print(out)
         print()
 
-        print("=== hub_rh: {{family_nav}} with a reserved-key (family_tile) item-template override ===")
-        # Inserted here, not in seed(), so it doesn't affect the {{family_nav}}
-        # render at the top of this script — reserved keys apply globally the
-        # instant they exist, with no opt-in syntax (migration/design change,
-        # 8/09: the old {{token:modifier}} escape hatch for running multiple
-        # variants at once was deliberately dropped — one design per block
-        # type, and the reserved key alone is the whole story now). Base key
-        # with no "_current" variant deliberately, to also exercise the
-        # fallback path (current item falls back to the plain key, not the
-        # Python default).
+        print("=== hub_rh: {{family_nav}} with the family_nav module's own item_template_html override ===")
+        # Migration 029 redesign: overriding a repeater's per-item look
+        # now means setting item_template_html directly on the module row
+        # itself (here, temporarily on the live 'family_nav' row, within
+        # this script's own rolled-back transaction) — no separate
+        # reserved-key row, no {{token:modifier}} syntax (dropped earlier
+        # this session). item_template_current_html left unset
+        # deliberately, to also exercise the fallback path (current item
+        # falls back to the plain item_template_html, not the Python
+        # default).
         cur.execute(
             """
-            INSERT INTO description_sections (key, label, html, kind)
-            VALUES ('family_tile', 'test tile',
-                    '<div class="custom-tile">{{item_label}} | {{item_url}} | {{item_image_url}}</div>',
-                    'item_template')
+            UPDATE description_sections
+            SET item_template_html = '<div class="custom-tile">{{item_label}} | {{item_url}} | {{item_image_url}}</div>'
+            WHERE key = 'family_nav'
             """
         )
         custom_out = render_description(rows["hub_rh"], cur, source_html="{{family_nav}}")
@@ -134,42 +140,92 @@ def main():
         assert "Non-Holo | https://www.ebay.com/itm/TEST-HUB-COMMON |" in custom_out, \
             "sibling (non-current) tile did not substitute label/url correctly"
         assert "Reverse Holo |  |" in custom_out, \
-            "current tile (no url, no _current variant) did not fall back to the base key correctly"
+            "current tile (no item_template_current_html) did not fall back to item_template_html correctly"
         assert "View listing" not in custom_out, "default Python tile markup leaked in despite override"
         print()
 
-        print("=== spoke_a_common: {{__standalone_test__}} — item template used standalone, no nav loop ===")
-        # Any non-reserved token now doubles as a standalone item-template
-        # reference (8/09), rendered with the CURRENT template's own
-        # label/image/description and an empty url (self-link) — same
-        # self-view convention the "current" tile already uses inside
-        # family_nav. Lets any hand-built tile be dropped straight into a
-        # description as {{its_key}}, not just the 3 reserved keys.
+        print("=== hub_common: {{era_index}} with era_index's item_template_html/current override ===")
+        # Covers the OTHER loop that can include "myself" (family isn't
+        # the only one) — era_index's current chip is the current
+        # template's own series, exercised here since hub_common's set
+        # IS its series' hub.
+        cur.execute(
+            """
+            UPDATE description_sections
+            SET item_template_html = '<span class="chip">{{item_label}}</span>',
+                item_template_current_html = '<span class="chip-current">{{item_label}}</span>'
+            WHERE key = 'era_index'
+            """
+        )
+        era_index_out = render_description(rows["hub_common"], cur, source_html="{{era_index}}")
+        print(era_index_out)
+        assert '<span class="chip-current">__TestEra__</span>' in era_index_out, \
+            "era_index current chip (my own era) did not use item_template_current_html"
+        assert 'class="chip">' in era_index_out, "era_index non-current chip did not use item_template_html"
+        assert "(you're here)" not in era_index_out, "default Python chip markup leaked in despite override"
+        print()
+
+        print("=== spoke_a_common: {{__standalone_test__}} — a 'single'/'self' module, no nav loop ===")
+        # A single/repeat_rule=self module renders using the CURRENT
+        # template's own label/image/description and an empty url
+        # (self-link) — the module-builder replacement for what migration
+        # 026's "_example" rows demonstrated and what the ad-hoc
+        # standalone-token fallback did before this redesign.
         # spoke_a_common has no family_label set, so this also exercises
         # the finish_kind -> theme fallback label path.
         cur.execute(
             """
-            INSERT INTO description_sections (key, label, html, kind)
-            VALUES ('__standalone_test__', 'standalone test',
-                    '<div class="standalone">{{item_label}} | {{item_url}} | {{item_image_url}} | {{item_description}}</div>',
-                    'item_template')
+            INSERT INTO description_sections (key, label, kind, repeat_rule, item_template_html)
+            VALUES ('__standalone_test__', 'standalone test', 'single', 'self',
+                    '<div class="standalone">{{item_label}} | {{item_url}} | {{item_image_url}} | {{item_description}}</div>')
             """
         )
         standalone_out = render_description(rows["spoke_a_common"], cur, source_html="{{__standalone_test__}}")
         print(standalone_out)
-        assert 'class="standalone"' in standalone_out, "standalone item-template token did not resolve"
+        assert 'class="standalone"' in standalone_out, "single/self module did not resolve"
         assert "Non-Holo |  |  | " in standalone_out, \
-            "standalone token should use the template's own finish-label fallback, empty url/image/description"
+            "single/self module should use the template's own finish-label fallback, empty url/image/description"
         print()
 
-        print("=== unknown token (no matching item_template row) still renders empty, not an error ===")
+        print("=== static module referenced by {{key}} recursively substitutes nested tokens ===")
+        # New in the module-builder redesign: a 'static' module can be
+        # REFERENCED (not just pasted) — its own html goes through the
+        # same substitution pass as the outer description, so nested
+        # {{tokens}} inside it resolve too.
+        cur.execute(
+            """
+            INSERT INTO description_sections (key, label, html, kind)
+            VALUES ('__static_test__', 'static test', '<h2>{{set_name}}</h2>{{era_hub_link}}', 'static')
+            """
+        )
+        static_out = render_description(rows["spoke_a_common"], cur, source_html="{{__static_test__}}")
+        inline_out = render_description(rows["spoke_a_common"], cur, source_html="<h2>{{set_name}}</h2>{{era_hub_link}}")
+        assert static_out == inline_out, \
+            "static module reference did not recursively substitute nested tokens the same as writing them inline"
+        print(static_out)
+        print()
+
+        print("=== cycle guard: a static module referencing itself renders empty for the inner occurrence ===")
+        cur.execute(
+            """
+            INSERT INTO description_sections (key, label, html, kind)
+            VALUES ('__cycle_test__', 'cycle test', 'before[{{__cycle_test__}}]after', 'static')
+            """
+        )
+        cycle_out = render_description(rows["spoke_a_common"], cur, source_html="{{__cycle_test__}}")
+        assert cycle_out == "before[]after", f"expected cycle guard to render the inner occurrence empty, got: {cycle_out!r}"
+        print(cycle_out)
+        print()
+
+        print("=== unknown token (no matching module) still renders empty, not an error ===")
         empty_out = render_description(rows["spoke_a_common"], cur, source_html="before[{{__no_such_key__}}]after")
         assert empty_out == "before[]after", f"expected empty substitution, got: {empty_out!r}"
         print(empty_out)
         print()
 
-        print("PASS — no exceptions, unchanged-template invariant held, item-template override verified, "
-              "standalone item-template token verified. Rolling back seed data now.")
+        print("PASS — no exceptions, unchanged-template invariant held, item_template_html override verified "
+              "(family + era_index current-chip), single/self module verified, static module reference + "
+              "recursion + cycle guard verified. Rolling back seed data now.")
     finally:
         conn.rollback()
         cur.close()
