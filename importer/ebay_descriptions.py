@@ -186,13 +186,14 @@ def _two_col_rows(cells: list[str], cell_padding: str = "6px") -> str:
             f'style="border-collapse:collapse;">{"".join(rows)}</table>')
 
 
-def _render_item_template(cur, key: str, label: str, url: str | None, image_url: str | None) -> str | None:
+def _render_item_template(cur, key: str, label: str, url: str | None, image_url: str | None,
+                           description: str | None = None) -> str | None:
     """Looks up a custom per-item block (description_sections row,
     kind='item_template') by key and substitutes {{item_label}}/
-    {{item_url}}/{{item_image_url}} into it. Returns None if no such row
-    exists, so callers can fall back to the built-in Python rendering —
-    the table starts empty for this kind; nothing regresses until Fei
-    deliberately creates one."""
+    {{item_url}}/{{item_image_url}}/{{item_description}} into it. Returns
+    None if no such row exists, so callers can fall back to the built-in
+    Python rendering — the table starts empty for this kind; nothing
+    regresses until Fei deliberately creates one."""
     cur.execute(
         "SELECT html FROM description_sections WHERE key = %s AND kind = 'item_template'",
         (key,),
@@ -200,13 +201,14 @@ def _render_item_template(cur, key: str, label: str, url: str | None, image_url:
     row = cur.fetchone()
     if row is None:
         return None
-    values = {"label": label or "", "url": url or "", "image_url": image_url or ""}
+    values = {"label": label or "", "url": url or "", "image_url": image_url or "",
+              "description": description or ""}
     return _ITEM_PLACEHOLDER_PATTERN.sub(lambda m: values.get(m.group(1), ""), row["html"])
 
 
 def _resolve_item_html(cur, base_key: str, item_template_key: str | None, current: bool,
                         label: str, url: str | None, image_url: str | None,
-                        default_render) -> str:
+                        default_render, description: str | None = None) -> str:
     """One item's inner HTML: try the custom template first (current-state
     variant — key + "_current" — falling back to the plain key if that
     specific variant doesn't exist), then fall back to default_render()
@@ -218,10 +220,10 @@ def _resolve_item_html(cur, base_key: str, item_template_key: str | None, curren
     look for EVERY listing, not just ones that opt in via a modifier."""
     key = item_template_key or base_key
     if current:
-        html = _render_item_template(cur, f"{key}_current", label, url, image_url)
+        html = _render_item_template(cur, f"{key}_current", label, url, image_url, description)
         if html is not None:
             return html
-    html = _render_item_template(cur, key, label, url, image_url)
+    html = _render_item_template(cur, key, label, url, image_url, description)
     if html is not None:
         return html
     return default_render()
@@ -353,10 +355,12 @@ def _render_family_nav(cur, template: dict, theme: dict, item_template_key: str 
         label = s["family_label"] or _finish_label(s["finish_kind"], theme) or "Listing"
         url = None if is_self else _item_url(s["listing_id"])
         image_url = s["nav_image_url"]
+        description = s["family_description"]
         cells.append(_resolve_item_html(
             cur, "family_tile", item_template_key, is_self, label, url, image_url,
             default_render=lambda label=label, url=url, image_url=image_url, is_self=is_self:
                 _nav_cell_html(label, url, image_url, theme, highlighted=is_self),
+            description=description,
         ))
     return _nav_block_html(theme["text_family_nav_title"], cells, theme)
 
