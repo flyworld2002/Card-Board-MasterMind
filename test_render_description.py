@@ -74,21 +74,6 @@ def seed(cur):
     spoke_b_common = make_template("spoke B common", spoke_set_b_id, "non_holo", "TEST-B-COMMON",
                                     is_set_primary=True)
 
-    # Item-template override: a description_sections row with
-    # kind='item_template' (no schema change needed — kind is a plain
-    # text column) overrides the built-in per-tile markup,
-    # referenced via the {{token:modifier}} syntax. Base key with no
-    # "_current" variant deliberately, to also exercise the fallback path
-    # (current item falls back to the plain key, not the Python default).
-    cur.execute(
-        """
-        INSERT INTO description_sections (key, label, html, kind)
-        VALUES ('__test_tile__', 'test tile',
-                '<div class="custom-tile">{{item_label}} | {{item_url}} | {{item_image_url}}</div>',
-                'item_template')
-        """
-    )
-
     return {
         "hub_common": hub_common, "hub_rh": hub_rh,
         "spoke_a_common": spoke_a_common, "spoke_b_common": spoke_b_common,
@@ -125,8 +110,25 @@ def main():
         print(out)
         print()
 
-        print("=== hub_rh: {{family_nav:__test_tile__}} — custom item-template override ===")
-        custom_out = render_description(rows["hub_rh"], cur, source_html="{{family_nav:__test_tile__}}")
+        print("=== hub_rh: {{family_nav}} with a reserved-key (family_tile) item-template override ===")
+        # Inserted here, not in seed(), so it doesn't affect the {{family_nav}}
+        # render at the top of this script — reserved keys apply globally the
+        # instant they exist, with no opt-in syntax (migration/design change,
+        # 8/09: the old {{token:modifier}} escape hatch for running multiple
+        # variants at once was deliberately dropped — one design per block
+        # type, and the reserved key alone is the whole story now). Base key
+        # with no "_current" variant deliberately, to also exercise the
+        # fallback path (current item falls back to the plain key, not the
+        # Python default).
+        cur.execute(
+            """
+            INSERT INTO description_sections (key, label, html, kind)
+            VALUES ('family_tile', 'test tile',
+                    '<div class="custom-tile">{{item_label}} | {{item_url}} | {{item_image_url}}</div>',
+                    'item_template')
+            """
+        )
+        custom_out = render_description(rows["hub_rh"], cur, source_html="{{family_nav}}")
         print(custom_out)
         assert 'class="custom-tile"' in custom_out, "custom item template did not apply"
         assert "Non-Holo | https://www.ebay.com/itm/TEST-HUB-COMMON |" in custom_out, \

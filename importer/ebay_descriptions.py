@@ -23,7 +23,7 @@ from importer.ebay_create_listing import (
     _load_template, build_revise_item_xml, fetch_listing_metadata, ALL_METADATA_FIELDS,
 )
 
-TOKEN_PATTERN = re.compile(r"\{\{(\w+)(?::([\w-]+))?\}\}")
+TOKEN_PATTERN = re.compile(r"\{\{(\w+)\}\}")
 
 # Item-template placeholder syntax inside a custom {{item_*}} block (a
 # description_sections row with kind='item_template') — deliberately a
@@ -42,6 +42,12 @@ _ITEM_PLACEHOLDER_PATTERN = re.compile(r"\{\{item_(\w+)\}\}")
 # hardcoded (Deep Sea theme, Fei 8/08) — moved to a DB table so small
 # tweaks (especially text) don't require a code change + deploy each
 # time.
+#
+# Migration 028 (8/09) added theme_key scoping — description_theme_settings
+# rows are now keyed by (theme_key, key) instead of just key, so different
+# shops/listing groups can each run their own theme instead of one theme
+# applying everywhere. listing_templates.theme_key selects which one a
+# given template renders with; NULL means 'default'.
 DEFAULT_THEME = {
     "color_bg": "#0a1f38",
     "color_panel": "#12365c",
@@ -73,29 +79,32 @@ def _finish_label(finish_kind: str | None, theme: dict) -> str | None:
     return theme.get(f"finish_label_{finish_kind}", finish_kind)
 
 
-def _load_theme(cur) -> dict:
-    cur.execute("SELECT key, value FROM description_theme_settings")
+def _load_theme(cur, theme_key: str = "default") -> dict:
+    cur.execute("SELECT key, value FROM description_theme_settings WHERE theme_key = %s", (theme_key,))
     overrides = {r["key"]: r["value"] for r in cur.fetchall()}
     return {**DEFAULT_THEME, **overrides}
 
 
-def list_theme_settings() -> list[dict]:
+def list_theme_settings(theme_key: str = "default") -> list[dict]:
     with db_cursor() as cur:
-        cur.execute("SELECT key, value, label, category, updated_at FROM description_theme_settings "
-                    "ORDER BY category, label")
+        cur.execute(
+            "SELECT key, value, label, category, theme_key, updated_at FROM description_theme_settings "
+            "WHERE theme_key = %s ORDER BY category, label",
+            (theme_key,),
+        )
         return cur.fetchall()
 
 
-def update_theme_setting(key: str, value: str) -> dict:
+def update_theme_setting(theme_key: str, key: str, value: str) -> dict:
     with db_cursor() as cur:
         cur.execute(
             "UPDATE description_theme_settings SET value = %s, updated_at = now() "
-            "WHERE key = %s RETURNING key, value, label, category, updated_at",
-            (value, key),
+            "WHERE theme_key = %s AND key = %s RETURNING key, value, label, category, theme_key, updated_at",
+            (value, theme_key, key),
         )
         row = cur.fetchone()
     if row is None:
-        return {"key": key, "error": "no such theme setting"}
+        return {"key": key, "theme_key": theme_key, "error": "no such theme setting"}
     return row
 
 
@@ -206,24 +215,22 @@ def _render_item_template(cur, key: str, label: str, url: str | None, image_url:
     return _ITEM_PLACEHOLDER_PATTERN.sub(lambda m: values.get(m.group(1), ""), row["html"])
 
 
-def _resolve_item_html(cur, base_key: str, item_template_key: str | None, current: bool,
+def _resolve_item_html(cur, base_key: str, current: bool,
                         label: str, url: str | None, image_url: str | None,
                         default_render, description: str | None = None) -> str:
     """One item's inner HTML: try the custom template first (current-state
-    variant — key + "_current" — falling back to the plain key if that
-    specific variant doesn't exist), then fall back to default_render()
-    (the existing Python-built markup) if no custom template exists at
-    all. item_template_key is the {{token:modifier}} override; base_key
-    is the reserved default name (e.g. "family_tile") used when no
-    modifier is given, so setting up description_sections rows named
-    exactly "family_tile"/"era_row"/"era_chip" overrides the built-in
-    look for EVERY listing, not just ones that opt in via a modifier."""
-    key = item_template_key or base_key
+    variant — base_key + "_current" — falling back to the plain base_key
+    if that specific variant doesn't exist), then fall back to
+    default_render() (the existing Python-built markup) if no custom
+    template exists at all. base_key is the reserved name for this block
+    type (e.g. "family_tile", "era_row", "era_chip") — a description_sections
+    row named exactly that overrides the built-in look for EVERY listing,
+    with zero extra syntax to opt in."""
     if current:
-        html = _render_item_template(cur, f"{key}_current", label, url, image_url, description)
+        html = _render_item_template(cur, f"{base_key}_current", label, url, image_url, description)
         if html is not None:
             return html
-    html = _render_item_template(cur, key, label, url, image_url, description)
+    html = _render_item_template(cur, base_key, label, url, image_url, description)
     if html is not None:
         return html
     return default_render()
@@ -334,7 +341,7 @@ def _chip_html(label: str, url: str | None, highlighted: bool, theme: dict) -> s
 # Token renderers
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _render_family_nav(cur, template: dict, theme: dict, item_template_key: str | None = None) -> str:
+def _render_family_nav(cur, template: dict, theme: dict) -> str:
     if not template.get("set_id"):
         return ""
     cur.execute(
@@ -357,7 +364,7 @@ def _render_family_nav(cur, template: dict, theme: dict, item_template_key: str 
         image_url = s["nav_image_url"]
         description = s["family_description"]
         cells.append(_resolve_item_html(
-            cur, "family_tile", item_template_key, is_self, label, url, image_url,
+            cur, "family_tile", is_self, label, url, image_url,
             default_render=lambda label=label, url=url, image_url=image_url, is_self=is_self:
                 _nav_cell_html(label, url, image_url, theme, highlighted=is_self),
             description=description,
@@ -365,10 +372,9 @@ def _render_family_nav(cur, template: dict, theme: dict, item_template_key: str 
     return _nav_block_html(theme["text_family_nav_title"], cells, theme)
 
 
-def _render_era_hub_link(cur, template: dict, theme: dict, item_template_key: str | None = None) -> str:
+def _render_era_hub_link(cur, template: dict, theme: dict) -> str:
     # Not a repeating block (one banner, not a list of items) — no
-    # item-template modifier support here, item_template_key is accepted
-    # only so TOKEN_RENDERERS can call every renderer the same way.
+    # item-template override applies here.
     if not template.get("set_id"):
         return ""
     cur.execute("SELECT series FROM card_sets WHERE id = %s", (template["set_id"],))
@@ -384,7 +390,7 @@ def _render_era_hub_link(cur, template: dict, theme: dict, item_template_key: st
     return _banner_html(f"Shop all {series} era sets", _item_url(hub_template["listing_id"]), theme)
 
 
-def _render_era_nav(cur, template: dict, theme: dict, item_template_key: str | None = None) -> str:
+def _render_era_nav(cur, template: dict, theme: dict) -> str:
     if not template.get("set_id"):
         return ""
     cur.execute("SELECT * FROM card_sets WHERE id = %s", (template["set_id"],))
@@ -409,7 +415,7 @@ def _render_era_nav(cur, template: dict, theme: dict, item_template_key: str | N
         label, url = s["name"], _item_url(match["listing_id"])
         image_url = match["nav_image_url"]
         cells.append(_resolve_item_html(
-            cur, "era_row", item_template_key, False, label, url, image_url,
+            cur, "era_row", False, label, url, image_url,
             default_render=lambda label=label, url=url, theme=theme:
                 _era_list_cell_html(label, url, theme),
         ))
@@ -421,7 +427,7 @@ def _render_era_nav(cur, template: dict, theme: dict, item_template_key: str | N
     return _nav_block_html(title, cells, theme, subtitle=theme["text_era_nav_subtitle"], cell_padding="5px")
 
 
-def _render_era_index(cur, template: dict, theme: dict, item_template_key: str | None = None) -> str:
+def _render_era_index(cur, template: dict, theme: dict) -> str:
     cur.execute("SELECT DISTINCT series FROM card_sets WHERE series IS NOT NULL ORDER BY series")
     all_series = [r["series"] for r in cur.fetchall()]
 
@@ -442,7 +448,7 @@ def _render_era_index(cur, template: dict, theme: dict, item_template_key: str |
         is_self = series == my_series
         url = None if is_self else _item_url(match["listing_id"])
         chips.append(_resolve_item_html(
-            cur, "era_chip", item_template_key, is_self, series, url, None,
+            cur, "era_chip", is_self, series, url, None,
             default_render=lambda series=series, url=url, is_self=is_self:
                 _chip_html(series, url, is_self, theme),
         ))
@@ -495,20 +501,19 @@ def render_description(template: dict, cur, source_html: str | None = None) -> s
     if not source:
         return source
 
-    theme = _load_theme(cur)
+    theme = _load_theme(cur, template.get("theme_key") or "default")
     simple = _render_simple_tokens(cur, template)
     cache = {}
 
     def substitute(match):
-        token, modifier = match.group(1), match.group(2)
-        if modifier is None and token in simple:
+        token = match.group(1)
+        if token in simple:
             return simple[token]
         if token not in TOKEN_RENDERERS:
             return ""
-        cache_key = (token, modifier)
-        if cache_key not in cache:
-            cache[cache_key] = TOKEN_RENDERERS[token](cur, template, theme, modifier)
-        return cache[cache_key]
+        if token not in cache:
+            cache[token] = TOKEN_RENDERERS[token](cur, template, theme)
+        return cache[token]
 
     return TOKEN_PATTERN.sub(substitute, source)
 
