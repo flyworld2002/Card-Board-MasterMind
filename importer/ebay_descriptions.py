@@ -290,12 +290,18 @@ def _nav_cell_html(label: str, url: str | None, image_url: str | None, theme: di
     return tile
 
 
-def _era_list_cell_html(label: str, url: str | None, theme: dict) -> str:
+def _era_list_cell_html(label: str, url: str | None, theme: dict, image_url: str | None = None) -> str:
     """Era-nav row: compact icon + set name + chevron link — a list, not
     big tiles, since an era can have 6-8+ sets where family_nav usually
-    only has 2-4."""
+    only has 2-4. image_url is the era's/set's real nav photo when one
+    exists (same nav_image_url column family_nav's tiles use) — falls
+    back to the plain placeholder box when it doesn't, same pattern as
+    _nav_cell_html's image/placeholder fallback."""
     d = theme
-    icon = f'<span style="display:inline-block;width:32px;height:45px;border-radius:4px;background:{d["color_border"]};"></span>'
+    icon = (f'<img src="{image_url}" alt="{label}" style="width:32px;height:45px;object-fit:cover;'
+             f'border-radius:4px;display:block;">'
+             if image_url else
+             f'<span style="display:inline-block;width:32px;height:45px;border-radius:4px;background:{d["color_border"]};"></span>')
     inner = (f'<table role="presentation" cellpadding="0" cellspacing="0"><tr>'
              f'<td valign="middle" style="padding-right:10px;">{icon}</td>'
              f'<td valign="middle"><span style="display:block;font-size:13px;font-weight:bold;'
@@ -415,8 +421,8 @@ def _render_repeater_era_siblings(cur, template: dict, theme: dict, module: dict
         image_url = match["nav_image_url"]
         cells.append(_resolve_item_html(
             module, False, label, url, image_url,
-            default_render=lambda label=label, url=url, theme=theme:
-                _era_list_cell_html(label, url, theme),
+            default_render=lambda label=label, url=url, image_url=image_url, theme=theme:
+                _era_list_cell_html(label, url, theme, image_url),
         ))
     if not cells:
         return ""
@@ -440,6 +446,8 @@ def _render_repeater_era_index(cur, template: dict, theme: dict, module: dict, s
         row = cur.fetchone()
         my_series = row["series"] if row else None
 
+    layout = module.get("layout") or "chips"
+
     chips = []
     for series in all_series:
         base_set = _era_base_set(cur, series)
@@ -450,14 +458,19 @@ def _render_repeater_era_index(cur, template: dict, theme: dict, module: dict, s
             continue
         is_self = series == my_series
         url = None if is_self else _item_url(match["listing_id"])
-        chips.append(_resolve_item_html(
-            module, is_self, series, url, None,
-            default_render=lambda series=series, url=url, is_self=is_self:
-                _chip_html(series, url, is_self, theme),
-        ))
+        image_url = match["nav_image_url"]
+        # 'chips' default stays a flat pill (no room for a picture at that
+        # size); 'grid' reuses era_nav's real-photo-capable row cell so
+        # switching layout actually gets you pictures, not just a wider box.
+        if layout == "grid":
+            default_render = (lambda series=series, url=url, image_url=image_url:
+                               _era_list_cell_html(series, url, theme, image_url))
+        else:
+            default_render = (lambda series=series, url=url, is_self=is_self:
+                               _chip_html(series, url, is_self, theme))
+        chips.append(_resolve_item_html(module, is_self, series, url, image_url, default_render=default_render))
     if not chips:
         return ""
-    layout = module.get("layout") or "chips"
     title = _module_text(module, "title", template, theme, simple) or "Other eras"
     subtitle = _module_text(module, "subtitle", template, theme, simple)
     return _wrap_repeater(chips, layout, title, subtitle, theme, cell_padding="6px")
