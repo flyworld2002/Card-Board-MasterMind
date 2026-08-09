@@ -2113,15 +2113,18 @@ object on save; blank inputs are simply omitted rather than written as
 empty strings.
 
 ### Roadmap — not started
-- **Proper description composition.** `description_html` is currently a
-  raw HTML textarea — you hand-type/paste actual HTML. Fei wants a real
-  design/description-building experience instead (likely a WYSIWYG
-  editor, or a templated builder with reusable blocks) rather than
-  editing markup by hand. Not scoped or started — needs a follow-up
-  conversation on what "proper" means here (a rich-text editor
-  serializing to the same `description_html` field would be the
-  lowest-risk approach, reusing everything downstream unchanged; a
-  templated/block-based builder would be a bigger, separate design).
+- ~~**Proper description composition.**~~ Done (8/09) — built as a full
+  customizable description module builder (migration 029): every block
+  (static HTML, a repeater over related listings, or a single block) is
+  a named `description_sections` row with its own repeat_rule/layout/
+  item-template markup, dispatched generically by key instead of 4
+  hardcoded token functions. `listing-pricing.js`'s description editor
+  is now a reorderable block list (pick a module or add free text,
+  reorder/remove) with an "Advanced (raw HTML)" escape hatch, not a raw
+  textarea. `description_html` itself is unchanged in storage — still a
+  plain `{{key}}`-containing string, the builder just constructs/parses
+  it. See `importer/ebay_descriptions.py`'s module-dispatch section and
+  `docs/plans/listing_pricing_migration_029_description_modules.sql`.
 - **Description-nav milestone 4 (sanitizer test).** Backend + frontend for
   the description navigation system (family strip / era hub-and-spoke /
   era index — migration 020, `importer/ebay_descriptions.py`,
@@ -2150,15 +2153,10 @@ empty strings.
   `Variations/Variation/VariationSpecificPictureSet` instead of the
   top-level `PictureDetails`. Deferred — manual `nav_image_url` overrides
   work fine as a stopgap in the meantime.
-- **`description_sections` section library.** A separate uploaded doc
-  (8/08, not from this conversation) describes a DB-backed reusable-
-  section system: new `description_sections` table (`key`, `label`,
-  `html`, `kind` = `'layout'`|`'section'`, `sort_order`), `/api/
-  description-presets` reading from it instead of the hardcoded
-  `DESCRIPTION_PRESETS` constant, `description_sections` CRUD endpoints,
-  a new "Insert section" (insert-at-cursor) dropdown + section-manager UI
-  alongside the existing "Insert layout" (replace) dropdown, seeded from a
-  "Deep Sea" dark-themed mockup (navy/cyan/pink palette, dark-theme
-  sanitizer hardening via `bgcolor` + inline `style` on every container).
-  Not started — explicitly deferred by Fei (8/08): "I'll ask you to build
-  the section [library]" when ready, not now.
+- ~~**`description_sections` section library.**~~ Done (8/08-8/09) —
+  built, then superseded in place by the module-builder redesign above
+  rather than left as a separate `'layout'`/`'section'`/`'item_template'`
+  kind split. Deep Sea dark theme (navy/cyan palette, `bgcolor` + inline
+  `style` sanitizer hardening) shipped as the seeded default look, with
+  per-shop/listing-group theme scoping (`description_theme_settings.
+  theme_key`, migration 028) on top.

@@ -537,12 +537,12 @@ def create_listing_endpoint(body: CreateListingRequest, x_picking_token: str = H
 @app.get("/api/description-presets")
 def description_presets_endpoint(x_picking_token: str = Header(default="")):
     """
-    { key: {label, html, kind} } for the Insert-layout ('layout' kind,
-    replaces the textarea) and Insert-section ('section' kind, inserts at
-    cursor) dropdowns — DB-backed (description_sections, migration 021),
-    editable via the section manager UI without a deploy. Single-source:
-    the frontend just inserts what it's given, same principle as
-    rendering.
+    { key: {label, html, kind} } — the module library (description_sections,
+    migration 021, module-builder shapes added in migration 029: kind=
+    'static'/'repeater'/'single') for the Listing pricing page's visual
+    builder and the Configuration module-library UI, editable without a
+    deploy. Single-source: the frontend just inserts what it's given, same
+    principle as rendering.
     """
     if x_picking_token != API_TOKEN:
         raise HTTPException(status_code=401, detail="bad token")
