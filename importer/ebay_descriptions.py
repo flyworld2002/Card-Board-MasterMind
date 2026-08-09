@@ -40,6 +40,20 @@ FINISH_LABELS = {
 # table column itself doesn't stretch to fill the row.
 NAV_TILE_WIDTH = 140
 
+# Deep Sea theme (Fei, 8/08 — full match to the approved mockup). Palette
+# only lives here; every block helper below reads from this dict so a
+# future re-theme is a one-place change, same reasoning as the rest of
+# this module's "centralize so a restyle is one edit, not 30" design.
+DEEP_SEA = {
+    "bg": "#0a1f38",
+    "panel": "#12365c",
+    "border": "#1d4d7a",
+    "cyan": "#3fc3e8",
+    "text_light": "#eaf6fb",
+    "text_muted": "#7fa8c9",
+    "text_dim": "#9db2c6",
+}
+
 
 def _item_url(listing_id: str) -> str:
     return f"https://www.ebay.com/itm/{listing_id}"
@@ -98,73 +112,119 @@ def _era_base_set(cur, series: str) -> dict | None:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Block markup — inline styles only, table-friendly, no JS, no external CSS,
-# https images only. NOT finalized — see milestone-4 sanitizer test in the
-# plan doc; kept isolated in these three helpers so a markup fix is a
-# one-place change.
+# Block markup — Deep Sea theme (Fei, 8/08). Dark-theme sanitizer
+# hardening (critical: a stripped background on a dark theme = light text
+# on eBay's default white = invisible): every colored container is a
+# <table>/<td> — never a <div> — carrying BOTH the legacy bgcolor
+# attribute AND inline style="background:...". bgcolor is not a valid div
+# attribute, which is the whole reason these are tables; sanitizers
+# reportedly respect bgcolor more reliably than CSS background. Milestone
+# 4 (push ONE real listing, view live, confirm no invisible regions) is
+# still the gate before wider rollout — see plan doc roadmap.
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _two_col_rows(cells: list[str]) -> str:
+    """Chunks <td> cells into 2-per-row <tr>s, padding a trailing odd cell
+    so the row doesn't collapse lopsided. Shared by family tiles and era
+    list rows — same wrapping behavior, different cell content."""
+    rows = []
+    for i in range(0, len(cells), 2):
+        pair = cells[i:i + 2]
+        if len(pair) == 1:
+            pair.append('<td width="50%">&nbsp;</td>')
+        rows.append(f"<tr>{''.join(pair)}</tr>")
+    return (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+            f'style="border-collapse:collapse;">{"".join(rows)}</table>')
+
+
 def _nav_cell_html(label: str, url: str | None, image_url: str | None, highlighted: bool = False) -> str:
-    """Card-style tile. Fei's images carry their own label/branding, so
-    when nav_image_url is set the image IS the tile — no text row under
-    it. Falls back to a plain text tile when there's no image yet (e.g.
-    before backfill/upload runs), so every listing stays usable in the
-    meantime. "You're here" can't be baked into the (shared, reused-
-    across-listings) image itself, so it's a small overlay badge instead
-    of text, added dynamically at render time regardless of image state."""
-    if image_url:
-        inner = f'<img src="{image_url}" alt="{label}" style="width:100%;display:block;">'
+    """Family-strip tile: dark panel, uppercase micro-label above the
+    image, "View listing" / "Viewing this" pill button below it (matches
+    the approved Deep Sea mockup exactly). Falls back to a plain block
+    placeholder when nav_image_url isn't set yet."""
+    d = DEEP_SEA
+    img = (f'<img src="{image_url}" alt="{label}" style="width:76px;height:106px;'
+           f'object-fit:cover;border-radius:5px;display:block;margin:0 auto 10px;">'
+           if image_url else
+           f'<div style="width:76px;height:106px;border-radius:5px;margin:0 auto 10px;'
+           f'background:{d["border"]};"></div>')
+
+    if highlighted:
+        label_color = d["cyan"]
+        button = (f'<span style="display:inline-block;font-size:11px;font-weight:bold;'
+                  f'color:{d["bg"]};background:#fff;border-radius:7px;padding:7px 14px;'
+                  f'font-family:sans-serif;">Viewing this</span>')
+        bgcolor, bg_style = d["panel"], f'background:linear-gradient(155deg,{d["panel"]},{d["bg"]});'
+        border, extra = f'2px solid {d["cyan"]}', 'box-shadow:0 0 14px rgba(63,195,232,0.3);'
     else:
-        inner = (f'<div style="padding:24px 8px;text-align:center;font-family:sans-serif;'
-                  f'font-size:13px;color:#333;">{label}</div>')
+        label_color = d["text_muted"]
+        button = (f'<span style="display:inline-block;font-size:12px;font-weight:bold;'
+                  f'color:{d["bg"]};background:{d["cyan"]};border-radius:7px;padding:7px 16px;'
+                  f'font-family:sans-serif;">View listing</span>')
+        bgcolor, bg_style = d["panel"], f'background:{d["panel"]};'
+        border, extra = f'1px solid {d["border"]}', ''
 
-    badge = ('<div style="position:absolute;top:6px;right:6px;background:rgba(0,0,0,0.75);'
-             'color:#fff;font-size:10px;font-family:sans-serif;padding:2px 7px;'
-             'border-radius:10px;">You&rsquo;re here</div>') if highlighted else ""
+    inner = (f'<span style="display:block;font-size:10px;color:{label_color};text-transform:uppercase;'
+             f'letter-spacing:0.06em;margin-bottom:8px;font-family:sans-serif;">{label}</span>'
+             f'{img}{button}')
 
-    tile = f'<div style="position:relative;">{inner}{badge}</div>'
+    tile = (f'<table role="presentation" width="100%" bgcolor="{bgcolor}" cellpadding="0" cellspacing="0" '
+            f'style="{bg_style}border:{border};border-radius:11px;{extra}"><tr>'
+            f'<td style="padding:14px;text-align:center;">{inner}</td></tr></table>')
     if url:
         tile = f'<a href="{url}" style="display:block;text-decoration:none;">{tile}</a>'
-
-    ring = "2px solid #333" if highlighted else "1px solid #e0e0e0"
-    # max-width, not a fixed width, on both the td and the inner card so
-    # the tile caps at NAV_TILE_WIDTH on desktop but can still shrink
-    # smaller on narrow/mobile screens instead of forcing overflow.
-    return (f'<td style="padding:6px;max-width:{NAV_TILE_WIDTH}px;">'
-            f'<div style="max-width:{NAV_TILE_WIDTH}px;border:{ring};border-radius:10px;'
-            f'overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,0.12);">{tile}</div></td>')
+    return f'<td width="50%" valign="top" style="padding:6px;">{tile}</td>'
 
 
-def _nav_block_html(title: str, cells: list[str]) -> str:
-    # No width:100% on the table — tiles stay fixed-width (NAV_TILE_WIDTH)
-    # and the table is centered via margin:0 auto rather than stretched
-    # across the whole description column.
-    rows = "".join(cells)
-    return (f'<div style="margin:14px 0;text-align:center;"><div style="font-family:sans-serif;'
-            f'font-weight:bold;margin-bottom:8px;">{title}</div>'
-            f'<table style="border-collapse:separate;border-spacing:0;margin:0 auto;">'
-            f'<tr>{rows}</tr></table></div>')
+def _era_list_cell_html(label: str, url: str | None) -> str:
+    """Era-nav row: compact icon + set name + chevron link — a list, not
+    big tiles, since an era can have 6-8+ sets where family_nav usually
+    only has 2-4."""
+    d = DEEP_SEA
+    icon = f'<span style="display:inline-block;width:32px;height:45px;border-radius:4px;background:{d["border"]};"></span>'
+    inner = (f'<table role="presentation" cellpadding="0" cellspacing="0"><tr>'
+             f'<td valign="middle" style="padding-right:10px;">{icon}</td>'
+             f'<td valign="middle"><span style="display:block;font-size:13px;font-weight:bold;'
+             f'color:{d["text_light"]};font-family:sans-serif;">{label}</span>'
+             f'<span style="display:block;font-size:11px;color:{d["cyan"]};font-family:sans-serif;">'
+             f'Shop this set &rsaquo;</span></td></tr></table>')
+    row = (f'<table role="presentation" width="100%" bgcolor="{d["panel"]}" cellpadding="0" cellspacing="0" '
+           f'style="background:{d["panel"]};border:1px solid {d["border"]};border-radius:9px;">'
+           f'<tr><td style="padding:11px 12px;">{inner}</td></tr></table>')
+    if url:
+        row = f'<a href="{url}" style="display:block;text-decoration:none;">{row}</a>'
+    return f'<td width="50%" valign="top" style="padding:5px;">{row}</td>'
+
+
+def _nav_block_html(title: str, cells: list[str], subtitle: str | None = None) -> str:
+    sub = (f'<p style="margin:0 0 12px;font-size:12px;color:{DEEP_SEA["text_muted"]};'
+           f'font-family:sans-serif;">{subtitle}</p>') if subtitle else ""
+    return (f'<div style="margin:20px 0;"><p style="margin:0 0 {"4px" if subtitle else "12px"};'
+            f'font-size:15px;font-weight:bold;color:#fff;font-family:sans-serif;">{title}</p>'
+            f'{sub}{_two_col_rows(cells)}</div>')
 
 
 def _banner_html(text: str, url: str) -> str:
-    return (f'<div style="margin:12px 0;"><a href="{url}" style="display:block;'
-            f'padding:10px;text-align:center;background:#f5f5f5;border:1px solid #ccc;'
-            f'font-family:sans-serif;font-weight:bold;text-decoration:none;color:#333;">'
-            f'{text} &rarr;</a></div>')
+    d = DEEP_SEA
+    return (f'<table role="presentation" width="100%" bgcolor="{d["panel"]}" cellpadding="0" cellspacing="0" '
+            f'style="background:{d["panel"]};border:1px solid {d["cyan"]};border-radius:9px;margin:16px 0;">'
+            f'<tr><td style="padding:12px;text-align:center;">'
+            f'<a href="{url}" style="display:block;text-decoration:none;font-family:sans-serif;'
+            f'font-weight:bold;font-size:13px;color:{d["cyan"]};">{text} &rarr;</a>'
+            f'</td></tr></table>')
 
 
 def _chip_row_html(chips: list[str]) -> str:
-    return f'<div style="margin:12px 0;">{"".join(chips)}</div>'
+    return f'<div style="margin:16px 0;">{"".join(chips)}</div>'
 
 
 def _chip_html(label: str, url: str | None, highlighted: bool) -> str:
+    d = DEEP_SEA
     text = f"{label} (you're here)" if highlighted else label
-    style = ("display:inline-block;margin:2px;padding:4px 10px;border-radius:12px;"
+    common = ("display:inline-block;margin:2px;padding:4px 10px;border-radius:12px;"
               "font-family:sans-serif;font-size:12px;text-decoration:none;")
-    if highlighted:
-        style += "background:#333;color:#fff;"
-    else:
-        style += "background:#eee;color:#333;"
+    style = common + (f'background:{d["cyan"]};color:{d["bg"]};' if highlighted
+                       else f'background:transparent;border:1px solid {d["border"]};color:{d["text_dim"]};')
     if url:
         return f'<a href="{url}" style="{style}">{text}</a>'
     return f'<span style="{style}">{text}</span>'
@@ -239,11 +299,13 @@ def _render_era_nav(cur, template: dict) -> str:
         match = _resolve_finish_match(cur, s["id"], template.get("finish_kind"))
         if not match or not match.get("listing_id"):
             continue
-        cells.append(_nav_cell_html(label=s["name"], url=_item_url(match["listing_id"]),
-                                     image_url=match["nav_image_url"]))
+        cells.append(_era_list_cell_html(label=s["name"], url=_item_url(match["listing_id"])))
     if not cells:
         return ""
-    return _nav_block_html(f"Shop the {my_set['series']} era", cells)
+
+    finish_label = FINISH_LABELS.get(template.get("finish_kind"), template.get("finish_kind") or "")
+    title = f"Other {finish_label} sets" if finish_label else f"Other {my_set['series']} era sets"
+    return _nav_block_html(title, cells, subtitle="Same finish, other sets:")
 
 
 def _render_era_index(cur, template: dict) -> str:
