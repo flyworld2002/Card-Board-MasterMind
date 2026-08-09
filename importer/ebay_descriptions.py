@@ -33,26 +33,56 @@ FINISH_LABELS = {
     "ultra_rare": "Ultra Rare",
 }
 
-# Card tile width (family strip / era grid) — nav_image_url photos come
-# straight from eBay's own gallery (or a custom upload), full-size, so
-# without a cap a 2-3 tile row stretches each image to roughly half the
-# description's width. Fixed px on the <td> (not just the <img>) so the
-# table column itself doesn't stretch to fill the row.
-NAV_TILE_WIDTH = 140
-
-# Deep Sea theme (Fei, 8/08 — full match to the approved mockup). Palette
-# only lives here; every block helper below reads from this dict so a
-# future re-theme is a one-place change, same reasoning as the rest of
-# this module's "centralize so a restyle is one edit, not 30" design.
-DEEP_SEA = {
-    "bg": "#0a1f38",
-    "panel": "#12365c",
-    "border": "#1d4d7a",
-    "cyan": "#3fc3e8",
-    "text_light": "#eaf6fb",
-    "text_muted": "#7fa8c9",
-    "text_dim": "#9db2c6",
+# Description nav theme (migration 023, description_theme_settings) —
+# colors, sizing, and button/label text for the family_nav/era_nav/
+# era_index renderer. DEFAULT_THEME is the fallback for any key missing
+# from the DB (deleted row, fresh install, etc.) so rendering never
+# breaks; _load_theme() merges DB overrides on top of it. Originally
+# hardcoded (Deep Sea theme, Fei 8/08) — moved to a DB table so small
+# tweaks (especially text) don't require a code change + deploy each
+# time.
+DEFAULT_THEME = {
+    "color_bg": "#0a1f38",
+    "color_panel": "#12365c",
+    "color_border": "#1d4d7a",
+    "color_cyan": "#3fc3e8",
+    "color_text_light": "#eaf6fb",
+    "color_text_muted": "#7fa8c9",
+    "color_text_dim": "#9db2c6",
+    "nav_tile_width": "140",
+    "text_view_listing": "View listing",
+    "text_viewing_this": "Viewing this",
+    "text_family_nav_title": "Shop this set",
+    "text_era_list_link": "Shop this set",
+    "text_era_nav_subtitle": "Same finish, other sets:",
+    "text_youre_here_suffix": "(you're here)",
 }
+
+
+def _load_theme(cur) -> dict:
+    cur.execute("SELECT key, value FROM description_theme_settings")
+    overrides = {r["key"]: r["value"] for r in cur.fetchall()}
+    return {**DEFAULT_THEME, **overrides}
+
+
+def list_theme_settings() -> list[dict]:
+    with db_cursor() as cur:
+        cur.execute("SELECT key, value, label, category, updated_at FROM description_theme_settings "
+                    "ORDER BY category, label")
+        return cur.fetchall()
+
+
+def update_theme_setting(key: str, value: str) -> dict:
+    with db_cursor() as cur:
+        cur.execute(
+            "UPDATE description_theme_settings SET value = %s, updated_at = now() "
+            "WHERE key = %s RETURNING key, value, label, category, updated_at",
+            (value, key),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return {"key": key, "error": "no such theme setting"}
+    return row
 
 
 def _item_url(listing_id: str) -> str:
@@ -137,32 +167,39 @@ def _two_col_rows(cells: list[str]) -> str:
             f'style="border-collapse:collapse;">{"".join(rows)}</table>')
 
 
-def _nav_cell_html(label: str, url: str | None, image_url: str | None, highlighted: bool = False) -> str:
+def _nav_cell_html(label: str, url: str | None, image_url: str | None, theme: dict,
+                    highlighted: bool = False) -> str:
     """Family-strip tile: dark panel, uppercase micro-label above the
-    image, "View listing" / "Viewing this" pill button below it (matches
-    the approved Deep Sea mockup exactly). Falls back to a plain block
-    placeholder when nav_image_url isn't set yet."""
-    d = DEEP_SEA
-    img = (f'<img src="{image_url}" alt="{label}" style="width:76px;height:106px;'
+    image, "View listing" / "Viewing this" pill button below it. Falls
+    back to a plain block placeholder when nav_image_url isn't set yet."""
+    d = theme
+    # Height follows width at the card-art aspect ratio (76:106, the
+    # original Deep Sea mockup's proportions) rather than being a second
+    # independently-tweakable number — one knob, no risk of a mismatched
+    # width/height stretching the image.
+    w = int(d["nav_tile_width"])
+    h = round(w * 106 / 76)
+    img = (f'<img src="{image_url}" alt="{label}" style="width:{w}px;height:{h}px;'
            f'object-fit:cover;border-radius:5px;display:block;margin:0 auto 10px;">'
            if image_url else
-           f'<div style="width:76px;height:106px;border-radius:5px;margin:0 auto 10px;'
-           f'background:{d["border"]};"></div>')
+           f'<div style="width:{w}px;height:{h}px;border-radius:5px;margin:0 auto 10px;'
+           f'background:{d["color_border"]};"></div>')
 
     if highlighted:
-        label_color = d["cyan"]
+        label_color = d["color_cyan"]
         button = (f'<span style="display:inline-block;font-size:11px;font-weight:bold;'
-                  f'color:{d["bg"]};background:#fff;border-radius:7px;padding:7px 14px;'
-                  f'font-family:sans-serif;">Viewing this</span>')
-        bgcolor, bg_style = d["panel"], f'background:linear-gradient(155deg,{d["panel"]},{d["bg"]});'
-        border, extra = f'2px solid {d["cyan"]}', 'box-shadow:0 0 14px rgba(63,195,232,0.3);'
+                  f'color:{d["color_bg"]};background:#fff;border-radius:7px;padding:7px 14px;'
+                  f'font-family:sans-serif;">{d["text_viewing_this"]}</span>')
+        bgcolor = d["color_panel"]
+        bg_style = f'background:linear-gradient(155deg,{d["color_panel"]},{d["color_bg"]});'
+        border, extra = f'2px solid {d["color_cyan"]}', 'box-shadow:0 0 14px rgba(63,195,232,0.3);'
     else:
-        label_color = d["text_muted"]
+        label_color = d["color_text_muted"]
         button = (f'<span style="display:inline-block;font-size:12px;font-weight:bold;'
-                  f'color:{d["bg"]};background:{d["cyan"]};border-radius:7px;padding:7px 16px;'
-                  f'font-family:sans-serif;">View listing</span>')
-        bgcolor, bg_style = d["panel"], f'background:{d["panel"]};'
-        border, extra = f'1px solid {d["border"]}', ''
+                  f'color:{d["color_bg"]};background:{d["color_cyan"]};border-radius:7px;padding:7px 16px;'
+                  f'font-family:sans-serif;">{d["text_view_listing"]}</span>')
+        bgcolor, bg_style = d["color_panel"], f'background:{d["color_panel"]};'
+        border, extra = f'1px solid {d["color_border"]}', ''
 
     inner = (f'<span style="display:block;font-size:10px;color:{label_color};text-transform:uppercase;'
              f'letter-spacing:0.06em;margin-bottom:8px;font-family:sans-serif;">{label}</span>'
@@ -176,41 +213,41 @@ def _nav_cell_html(label: str, url: str | None, image_url: str | None, highlight
     return f'<td width="50%" valign="top" style="padding:6px;">{tile}</td>'
 
 
-def _era_list_cell_html(label: str, url: str | None) -> str:
+def _era_list_cell_html(label: str, url: str | None, theme: dict) -> str:
     """Era-nav row: compact icon + set name + chevron link — a list, not
     big tiles, since an era can have 6-8+ sets where family_nav usually
     only has 2-4."""
-    d = DEEP_SEA
-    icon = f'<span style="display:inline-block;width:32px;height:45px;border-radius:4px;background:{d["border"]};"></span>'
+    d = theme
+    icon = f'<span style="display:inline-block;width:32px;height:45px;border-radius:4px;background:{d["color_border"]};"></span>'
     inner = (f'<table role="presentation" cellpadding="0" cellspacing="0"><tr>'
              f'<td valign="middle" style="padding-right:10px;">{icon}</td>'
              f'<td valign="middle"><span style="display:block;font-size:13px;font-weight:bold;'
-             f'color:{d["text_light"]};font-family:sans-serif;">{label}</span>'
-             f'<span style="display:block;font-size:11px;color:{d["cyan"]};font-family:sans-serif;">'
-             f'Shop this set &rsaquo;</span></td></tr></table>')
-    row = (f'<table role="presentation" width="100%" bgcolor="{d["panel"]}" cellpadding="0" cellspacing="0" '
-           f'style="background:{d["panel"]};border:1px solid {d["border"]};border-radius:9px;">'
+             f'color:{d["color_text_light"]};font-family:sans-serif;">{label}</span>'
+             f'<span style="display:block;font-size:11px;color:{d["color_cyan"]};font-family:sans-serif;">'
+             f'{d["text_era_list_link"]} &rsaquo;</span></td></tr></table>')
+    row = (f'<table role="presentation" width="100%" bgcolor="{d["color_panel"]}" cellpadding="0" cellspacing="0" '
+           f'style="background:{d["color_panel"]};border:1px solid {d["color_border"]};border-radius:9px;">'
            f'<tr><td style="padding:11px 12px;">{inner}</td></tr></table>')
     if url:
         row = f'<a href="{url}" style="display:block;text-decoration:none;">{row}</a>'
     return f'<td width="50%" valign="top" style="padding:5px;">{row}</td>'
 
 
-def _nav_block_html(title: str, cells: list[str], subtitle: str | None = None) -> str:
-    sub = (f'<p style="margin:0 0 12px;font-size:12px;color:{DEEP_SEA["text_muted"]};'
+def _nav_block_html(title: str, cells: list[str], theme: dict, subtitle: str | None = None) -> str:
+    sub = (f'<p style="margin:0 0 12px;font-size:12px;color:{theme["color_text_muted"]};'
            f'font-family:sans-serif;">{subtitle}</p>') if subtitle else ""
     return (f'<div style="margin:20px 0;"><p style="margin:0 0 {"4px" if subtitle else "12px"};'
             f'font-size:15px;font-weight:bold;color:#fff;font-family:sans-serif;">{title}</p>'
             f'{sub}{_two_col_rows(cells)}</div>')
 
 
-def _banner_html(text: str, url: str) -> str:
-    d = DEEP_SEA
-    return (f'<table role="presentation" width="100%" bgcolor="{d["panel"]}" cellpadding="0" cellspacing="0" '
-            f'style="background:{d["panel"]};border:1px solid {d["cyan"]};border-radius:9px;margin:16px 0;">'
+def _banner_html(text: str, url: str, theme: dict) -> str:
+    d = theme
+    return (f'<table role="presentation" width="100%" bgcolor="{d["color_panel"]}" cellpadding="0" cellspacing="0" '
+            f'style="background:{d["color_panel"]};border:1px solid {d["color_cyan"]};border-radius:9px;margin:16px 0;">'
             f'<tr><td style="padding:12px;text-align:center;">'
             f'<a href="{url}" style="display:block;text-decoration:none;font-family:sans-serif;'
-            f'font-weight:bold;font-size:13px;color:{d["cyan"]};">{text} &rarr;</a>'
+            f'font-weight:bold;font-size:13px;color:{d["color_cyan"]};">{text} &rarr;</a>'
             f'</td></tr></table>')
 
 
@@ -218,13 +255,13 @@ def _chip_row_html(chips: list[str]) -> str:
     return f'<div style="margin:16px 0;">{"".join(chips)}</div>'
 
 
-def _chip_html(label: str, url: str | None, highlighted: bool) -> str:
-    d = DEEP_SEA
-    text = f"{label} (you're here)" if highlighted else label
+def _chip_html(label: str, url: str | None, highlighted: bool, theme: dict) -> str:
+    d = theme
+    text = f'{label} {d["text_youre_here_suffix"]}' if highlighted else label
     common = ("display:inline-block;margin:2px;padding:4px 10px;border-radius:12px;"
               "font-family:sans-serif;font-size:12px;text-decoration:none;")
-    style = common + (f'background:{d["cyan"]};color:{d["bg"]};' if highlighted
-                       else f'background:transparent;border:1px solid {d["border"]};color:{d["text_dim"]};')
+    style = common + (f'background:{d["color_cyan"]};color:{d["color_bg"]};' if highlighted
+                       else f'background:transparent;border:1px solid {d["color_border"]};color:{d["color_text_dim"]};')
     if url:
         return f'<a href="{url}" style="{style}">{text}</a>'
     return f'<span style="{style}">{text}</span>'
@@ -234,7 +271,7 @@ def _chip_html(label: str, url: str | None, highlighted: bool) -> str:
 # Token renderers
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _render_family_nav(cur, template: dict) -> str:
+def _render_family_nav(cur, template: dict, theme: dict) -> str:
     if not template.get("set_id"):
         return ""
     cur.execute(
@@ -256,12 +293,13 @@ def _render_family_nav(cur, template: dict) -> str:
             label=s["family_label"] or FINISH_LABELS.get(s["finish_kind"], s["finish_kind"] or "Listing"),
             url=None if is_self else _item_url(s["listing_id"]),
             image_url=s["nav_image_url"],
+            theme=theme,
             highlighted=is_self,
         ))
-    return _nav_block_html("Shop this set", cells)
+    return _nav_block_html(theme["text_family_nav_title"], cells, theme)
 
 
-def _render_era_hub_link(cur, template: dict) -> str:
+def _render_era_hub_link(cur, template: dict, theme: dict) -> str:
     if not template.get("set_id"):
         return ""
     cur.execute("SELECT series FROM card_sets WHERE id = %s", (template["set_id"],))
@@ -274,10 +312,10 @@ def _render_era_hub_link(cur, template: dict) -> str:
     hub_template = _resolve_finish_match(cur, base_set["id"], template.get("finish_kind"))
     if not hub_template or not hub_template.get("listing_id"):
         return ""
-    return _banner_html(f"Shop all {series} era sets", _item_url(hub_template["listing_id"]))
+    return _banner_html(f"Shop all {series} era sets", _item_url(hub_template["listing_id"]), theme)
 
 
-def _render_era_nav(cur, template: dict) -> str:
+def _render_era_nav(cur, template: dict, theme: dict) -> str:
     if not template.get("set_id"):
         return ""
     cur.execute("SELECT * FROM card_sets WHERE id = %s", (template["set_id"],))
@@ -299,16 +337,16 @@ def _render_era_nav(cur, template: dict) -> str:
         match = _resolve_finish_match(cur, s["id"], template.get("finish_kind"))
         if not match or not match.get("listing_id"):
             continue
-        cells.append(_era_list_cell_html(label=s["name"], url=_item_url(match["listing_id"])))
+        cells.append(_era_list_cell_html(label=s["name"], url=_item_url(match["listing_id"]), theme=theme))
     if not cells:
         return ""
 
     finish_label = FINISH_LABELS.get(template.get("finish_kind"), template.get("finish_kind") or "")
     title = f"Other {finish_label} sets" if finish_label else f"Other {my_set['series']} era sets"
-    return _nav_block_html(title, cells, subtitle="Same finish, other sets:")
+    return _nav_block_html(title, cells, theme, subtitle=theme["text_era_nav_subtitle"])
 
 
-def _render_era_index(cur, template: dict) -> str:
+def _render_era_index(cur, template: dict, theme: dict) -> str:
     cur.execute("SELECT DISTINCT series FROM card_sets WHERE series IS NOT NULL ORDER BY series")
     all_series = [r["series"] for r in cur.fetchall()]
 
@@ -327,7 +365,7 @@ def _render_era_index(cur, template: dict) -> str:
         if not match or not match.get("listing_id"):
             continue
         is_self = series == my_series
-        chips.append(_chip_html(series, None if is_self else _item_url(match["listing_id"]), is_self))
+        chips.append(_chip_html(series, None if is_self else _item_url(match["listing_id"]), is_self, theme))
     if not chips:
         return ""
     return _chip_row_html(chips)
@@ -377,6 +415,7 @@ def render_description(template: dict, cur, source_html: str | None = None) -> s
     if not source:
         return source
 
+    theme = _load_theme(cur)
     simple = _render_simple_tokens(cur, template)
     cache = {}
 
@@ -387,7 +426,7 @@ def render_description(template: dict, cur, source_html: str | None = None) -> s
         if token not in TOKEN_RENDERERS:
             return ""
         if token not in cache:
-            cache[token] = TOKEN_RENDERERS[token](cur, template)
+            cache[token] = TOKEN_RENDERERS[token](cur, template, theme)
         return cache[token]
 
     return TOKEN_PATTERN.sub(substitute, source)
