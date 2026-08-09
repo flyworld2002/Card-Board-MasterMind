@@ -25,41 +25,6 @@ from importer.ebay_create_listing import (
 
 TOKEN_PATTERN = re.compile(r"\{\{(\w+)\}\}")
 
-_CONDITION_SHIPPING_BLURB = """
-<p>All cards are shipped in a penny sleeve and a rigid card saver, in a
-bubble mailer. Condition is graded to the best of our ability — please see
-photos and reach out with any questions before purchasing.</p>
-""".strip()
-
-# Starter skeletons ("click and the HTML auto-generates" — Fei's request):
-# one click fills the Description textarea with a ready-made layout, styled
-# header + the standard condition/shipping blurb + the correct tokens in the
-# correct order for that listing's role. {{set_name}}/{{series_name}} are
-# simple tokens (see _render_simple_tokens) so these render unedited even
-# before Fei touches a set_id-linked field's exact wording.
-DESCRIPTION_PRESETS = {
-    "spoke": {
-        "label": "Spoke (regular listing in an era)",
-        "html": (
-            "<h1>{{set_name}}</h1>\n"
-            + _CONDITION_SHIPPING_BLURB + "\n"
-            "{{family_nav}}\n"
-            "{{era_hub_link}}\n"
-            "{{era_index}}\n"
-        ),
-    },
-    "hub": {
-        "label": "Hub (era base-set listing)",
-        "html": (
-            "<h1>{{set_name}} — {{series_name}} era</h1>\n"
-            + _CONDITION_SHIPPING_BLURB + "\n"
-            "{{family_nav}}\n"
-            "{{era_nav}}\n"
-            "{{era_index}}\n"
-        ),
-    },
-}
-
 FINISH_LABELS = {
     "non_holo": "Non-Holo",
     "reverse_holo": "Reverse Holo",
@@ -506,3 +471,79 @@ def backfill_nav_images(account_num: int = 1, force: bool = False) -> dict:
         filled.append(row["id"])
 
     return {"filled": filled, "skipped_no_picture": skipped, "errors": errors}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Reusable section/layout library (migration 021) — supersedes the old
+# hardcoded DESCRIPTION_PRESETS constant. 'layout' rows are whole-
+# description starters (Insert-layout dropdown, REPLACES the textarea);
+# 'section' rows are small reusable blocks (Insert-section dropdown,
+# inserts AT CURSOR). Both may contain {{tokens}}, substituted by the same
+# render_description() pass as everything else — no separate rendering
+# path for library content.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def list_description_sections() -> dict:
+    """{key: {label, html, kind}} — the shape /api/description-presets has
+    always returned (now DB-backed instead of a code constant), ordered by
+    sort_order so the dropdown's item order is editable without a
+    deploy."""
+    with db_cursor() as cur:
+        cur.execute("SELECT key, label, html, kind FROM description_sections ORDER BY sort_order, label")
+        rows = cur.fetchall()
+    return {r["key"]: {"label": r["label"], "html": r["html"], "kind": r["kind"]} for r in rows}
+
+
+def list_description_sections_full() -> list[dict]:
+    """Full rows (id, sort_order, updated_at included) for the section
+    manager UI — list_description_sections()'s trimmed shape is for the
+    dropdown, this is for CRUD."""
+    with db_cursor() as cur:
+        cur.execute(
+            "SELECT id, key, label, html, kind, sort_order, updated_at "
+            "FROM description_sections ORDER BY sort_order, label"
+        )
+        return cur.fetchall()
+
+
+def create_description_section(key: str, label: str, html: str, kind: str = "section",
+                                sort_order: int = 0) -> dict:
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO description_sections (key, label, html, kind, sort_order)
+            VALUES (%s, %s, %s, %s, %s) RETURNING id, key, label, html, kind, sort_order, updated_at
+            """,
+            (key, label, html, kind, sort_order),
+        )
+        return cur.fetchone()
+
+
+_SECTION_FIELDS = ("key", "label", "html", "kind", "sort_order")
+
+
+def update_description_section(section_id: str, **fields) -> dict:
+    """Partial update — same pattern as set_manual_listing_metadata():
+    only columns present in fields are touched."""
+    cols = [f for f in _SECTION_FIELDS if f in fields]
+    if not cols:
+        return {"id": section_id, "updated": []}
+    set_clause = ", ".join(f"{c} = %s" for c in cols)
+    values = [fields[c] for c in cols]
+    with db_cursor() as cur:
+        cur.execute(
+            f"UPDATE description_sections SET {set_clause}, updated_at = now() "
+            f"WHERE id = %s RETURNING id, key, label, html, kind, sort_order, updated_at",
+            values + [section_id],
+        )
+        row = cur.fetchone()
+    if row is None:
+        return {"id": section_id, "error": "no such section"}
+    return row
+
+
+def delete_description_section(section_id: str) -> dict:
+    with db_cursor() as cur:
+        cur.execute("DELETE FROM description_sections WHERE id = %s RETURNING id", (section_id,))
+        row = cur.fetchone()
+    return {"id": section_id, "deleted": row is not None}

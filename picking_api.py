@@ -74,7 +74,11 @@ from importer.ebay_create_listing import (
     list_business_policies, clone_listing_metadata, set_manual_listing_metadata,
     revise_listing_metadata, preview_new_listing, create_listing, ALL_METADATA_FIELDS,
 )
-from importer.ebay_descriptions import preview_description, sync_description, DESCRIPTION_PRESETS
+from importer.ebay_descriptions import (
+    preview_description, sync_description, list_description_sections,
+    list_description_sections_full, create_description_section,
+    update_description_section, delete_description_section,
+)
 from importer.job_runner import start_job, get_job, list_jobs
 from importer.market_price_refresh import refresh_market_prices
 from importer.excel_staging import import_from_excel
@@ -225,6 +229,22 @@ class DescriptionPreviewRequest(BaseModel):
 class DescriptionSyncRequest(BaseModel):
     account_num: int = 1
     dry_run: bool = False
+
+
+class DescriptionSectionCreateRequest(BaseModel):
+    key: str
+    label: str
+    html: str
+    kind: str = "section"
+    sort_order: int = 0
+
+
+class DescriptionSectionUpdateRequest(BaseModel):
+    key: str | None = None
+    label: str | None = None
+    html: str | None = None
+    kind: str | None = None
+    sort_order: int | None = None
 
 
 @app.post("/api/picking/refresh")
@@ -505,15 +525,63 @@ def create_listing_endpoint(body: CreateListingRequest, x_picking_token: str = H
 @app.get("/api/description-presets")
 def description_presets_endpoint(x_picking_token: str = Header(default="")):
     """
-    Starter skeletons for the "Insert layout" dropdown next to the
-    Description textarea — Spoke/Hub presets with a styled header, the
-    standard condition/shipping blurb, and the correct nav tokens in the
-    correct order for that listing's role. Single-source: the frontend
-    just inserts what it's given, same principle as rendering.
+    { key: {label, html, kind} } for the Insert-layout ('layout' kind,
+    replaces the textarea) and Insert-section ('section' kind, inserts at
+    cursor) dropdowns — DB-backed (description_sections, migration 021),
+    editable via the section manager UI without a deploy. Single-source:
+    the frontend just inserts what it's given, same principle as
+    rendering.
     """
     if x_picking_token != API_TOKEN:
         raise HTTPException(status_code=401, detail="bad token")
-    return DESCRIPTION_PRESETS
+    return list_description_sections()
+
+
+@app.get("/api/description-sections")
+def list_description_sections_endpoint(x_picking_token: str = Header(default="")):
+    """Full rows (id/key/label/html/kind/sort_order/updated_at) for the
+    section manager UI — list/description-presets' trimmed shape is for
+    the insert dropdowns, this is for CRUD."""
+    if x_picking_token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="bad token")
+    return list_description_sections_full()
+
+
+@app.post("/api/description-sections")
+def create_description_section_endpoint(body: DescriptionSectionCreateRequest,
+                                          x_picking_token: str = Header(default="")):
+    if x_picking_token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="bad token")
+    try:
+        return create_description_section(key=body.key, label=body.label, html=body.html,
+                                           kind=body.kind, sort_order=body.sort_order)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"create failed: {e}")
+
+
+@app.put("/api/description-sections/{section_id}")
+def update_description_section_endpoint(section_id: str, body: DescriptionSectionUpdateRequest,
+                                          x_picking_token: str = Header(default="")):
+    if x_picking_token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="bad token")
+    fields = {k: v for k, v in body.model_dump().items() if v is not None}
+    try:
+        result = update_description_section(section_id, **fields)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"update failed: {e}")
+    if result.get("error"):
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
+
+
+@app.delete("/api/description-sections/{section_id}")
+def delete_description_section_endpoint(section_id: str, x_picking_token: str = Header(default="")):
+    if x_picking_token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="bad token")
+    result = delete_description_section(section_id)
+    if not result["deleted"]:
+        raise HTTPException(status_code=404, detail="no such section")
+    return result
 
 
 @app.post("/api/description-preview/{template_id}")
