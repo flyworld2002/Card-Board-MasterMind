@@ -396,15 +396,19 @@ def _render_repeater_family(cur, template: dict, theme: dict, module: dict, simp
 
 
 def _render_repeater_era_siblings(cur, template: dict, theme: dict, module: dict, simple: dict) -> str:
+    """Every OTHER set sharing this template's series — renders on any
+    listing in the era, not just the hub (8/10 design change: Fei wants
+    the "other sets in this era" grid visible everywhere in the era, not
+    gated to the hub with spokes only getting a single era_hub_link
+    banner). The hub set itself shows up here too when viewed from a
+    spoke, same as any other era-mate — nothing hub-specific left in this
+    query beyond excluding MY OWN set."""
     if not template.get("set_id"):
         return ""
     cur.execute("SELECT * FROM card_sets WHERE id = %s", (template["set_id"],))
     my_set = cur.fetchone()
     if not my_set or not my_set["series"]:
         return ""
-    base_set = _era_base_set(cur, my_set["series"])
-    if not base_set or base_set["id"] != my_set["id"]:
-        return ""  # only renders on the hub itself
 
     cur.execute(
         "SELECT * FROM card_sets WHERE series = %s AND id != %s ORDER BY release_year, name",
@@ -770,7 +774,7 @@ def backfill_nav_images(account_num: int = 1, force: bool = False) -> dict:
 _BUILTIN_MODULES = [
     # key, label, kind, repeat_rule, layout, sort_order
     ("family_nav", "Family strip (finish variants of this set)", "repeater", "family", "grid", 1),
-    ("era_nav", "Era navigation (other sets in this era, hub only)", "repeater", "era_siblings", "grid", 2),
+    ("era_nav", "Era navigation (other sets in this era)", "repeater", "era_siblings", "grid", 2),
     ("era_hub_link", "Era hub link (banner, non-hub listings only)", "single", "era_hub", None, 3),
     ("era_index", "Era index (every era's hub set, chip row)", "repeater", "era_index", "chips", 4),
 ]

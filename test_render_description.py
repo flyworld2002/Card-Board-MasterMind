@@ -110,6 +110,20 @@ def main():
                                   source_html="{{era_hub_link}}"))
         print()
 
+        print("=== spoke_a_common: {{era_nav}} now renders on a SPOKE too (8/10 design change) ===")
+        # era_nav used to gate on "only the hub set" — removed so every set
+        # in an era sees its era-mates, INCLUDING the hub itself as just
+        # another tile (not a special self-link case, since it isn't self).
+        spoke_era_nav = render_description(rows["spoke_a_common"], cur, source_html="{{era_nav}}")
+        print(spoke_era_nav)
+        assert "__TestEra__" in spoke_era_nav, \
+            "era_nav on a spoke should include the hub set (__TestEra__) as one of the OTHER sets"
+        assert "__TestSetB__" in spoke_era_nav, \
+            "era_nav on a spoke should include its other sibling spoke (__TestSetB__)"
+        assert "__TestSetA__" not in spoke_era_nav, \
+            "era_nav should never include the CURRENT template's own set"
+        print()
+
         print("=== template with no tokens renders unchanged ===")
         unchanged = {**rows["spoke_b_common"], "description_html": "<p>plain, no tokens</p>"}
         out = render_description(unchanged, cur)
