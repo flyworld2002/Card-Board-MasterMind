@@ -598,7 +598,11 @@ def render_description(template: dict, cur, source_html: str | None = None) -> s
         rendering.add(token)
         try:
             kind = module.get("kind")
-            if kind == "static":
+            if kind in ("static", "layout"):
+                # 'layout' (migration 030) renders identically to 'static'
+                # — a complete, ready-to-pick description composed of
+                # other modules by reference, vs. a small reusable piece.
+                # Purely an organizational distinction, not a rendering one.
                 result = TOKEN_PATTERN.sub(substitute, module.get("html") or "")
             elif kind == "repeater":
                 resolver = _REPEAT_RESOLVERS.get(module.get("repeat_rule"))
@@ -856,17 +860,21 @@ _LAYOUTS = {"grid", "chips"}
 
 
 def _validate_module_fields(kind: str, repeat_rule: str | None, layout: str | None, html: str | None) -> None:
-    """Application-level guard for (kind, repeat_rule, layout) combinations
-    the CHECK constraint alone can't express. kind='item_template' is
-    grandfathered (legacy rows only — the UI stopped producing that kind
-    after migration 029) and skips these checks entirely."""
+    """Application-level guard for (kind, repeat_rule, layout-COLUMN)
+    combinations the CHECK constraint alone can't express. kind='item_
+    template' is grandfathered (legacy rows only — the UI stopped
+    producing that kind after migration 029) and skips these checks
+    entirely. Note kind='layout' (migration 030) and the `layout`
+    parameter (the repeater grid/chips column) are unrelated namesakes —
+    a 'layout'-kind module doesn't use the `layout` column any more than
+    a 'static' one does."""
     if kind == "item_template":
         return
-    if kind == "static":
+    if kind in ("static", "layout"):
         if not html:
-            raise ValueError("a 'static' module needs html")
+            raise ValueError(f"a {kind!r} module needs html")
         if repeat_rule or layout:
-            raise ValueError("'static' modules don't use repeat_rule/layout")
+            raise ValueError(f"{kind!r} modules don't use repeat_rule/layout")
     elif kind == "repeater":
         if repeat_rule not in _REPEATER_RULES:
             raise ValueError(f"repeat_rule for a 'repeater' module must be one of {sorted(_REPEATER_RULES)}")
