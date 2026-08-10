@@ -196,20 +196,23 @@ def _two_col_rows(cells: list[str], cell_padding: str = "6px") -> str:
 
 
 def _substitute_item_placeholders(html: str, label: str, url: str | None, image_url: str | None,
-                                   description: str | None = None) -> str:
+                                   description: str | None = None, title: str | None = None) -> str:
     """Substitutes {{item_label}}/{{item_url}}/{{item_image_url}}/
-    {{item_description}} into a module's item_template_html/
-    item_template_current_html. Pure string function — the module row
-    (and its template HTML) is already in hand by the time this is
-    called; no DB lookup here (that used to be a separate query per item
-    per render, folded away in migration 029's redesign)."""
+    {{item_description}}/{{item_title}} into a module's item_template_html/
+    item_template_current_html. item_title is the real eBay listing title
+    (long — a full title, not a short tile label like item_label) for
+    templates that want the actual title instead of the finish/family
+    label. Pure string function — the module row (and its template HTML)
+    is already in hand by the time this is called; no DB lookup here (that
+    used to be a separate query per item per render, folded away in
+    migration 029's redesign)."""
     values = {"label": label or "", "url": url or "", "image_url": image_url or "",
-              "description": description or ""}
+              "description": description or "", "title": title or ""}
     return _ITEM_PLACEHOLDER_PATTERN.sub(lambda m: values.get(m.group(1), ""), html)
 
 
 def _resolve_item_html(module: dict, current: bool, label: str, url: str | None, image_url: str | None,
-                        default_render, description: str | None = None) -> str:
+                        default_render, description: str | None = None, title: str | None = None) -> str:
     """One item's inner HTML: the module's item_template_current_html (if
     `current` and set), else its item_template_html (if set), else
     default_render() (the built-in Python markup) — NULL/unset falls
@@ -217,9 +220,10 @@ def _resolve_item_html(module: dict, current: bool, label: str, url: str | None,
     never needs both columns filled in just to exist."""
     if current and module.get("item_template_current_html"):
         return _substitute_item_placeholders(
-            module["item_template_current_html"], label, url, image_url, description)
+            module["item_template_current_html"], label, url, image_url, description, title)
     if module.get("item_template_html"):
-        return _substitute_item_placeholders(module["item_template_html"], label, url, image_url, description)
+        return _substitute_item_placeholders(
+            module["item_template_html"], label, url, image_url, description, title)
     return default_render()
 
 
@@ -388,7 +392,7 @@ def _render_repeater_family(cur, template: dict, theme: dict, module: dict, simp
             module, is_self, label, url, image_url,
             default_render=lambda label=label, url=url, image_url=image_url, is_self=is_self:
                 _nav_cell_html(label, url, image_url, theme, highlighted=is_self),
-            description=description,
+            description=description, title=s["title"],
         ))
     title = _module_text(module, "title", template, theme, simple) or theme["text_family_nav_title"]
     subtitle = _module_text(module, "subtitle", template, theme, simple)
@@ -427,6 +431,7 @@ def _render_repeater_era_siblings(cur, template: dict, theme: dict, module: dict
             module, False, label, url, image_url,
             default_render=lambda label=label, url=url, image_url=image_url, theme=theme:
                 _era_list_cell_html(label, url, theme, image_url),
+            title=match["title"],
         ))
     if not cells:
         return ""
@@ -472,7 +477,8 @@ def _render_repeater_era_index(cur, template: dict, theme: dict, module: dict, s
         else:
             default_render = (lambda series=series, url=url, is_self=is_self:
                                _chip_html(series, url, is_self, theme))
-        chips.append(_resolve_item_html(module, is_self, series, url, image_url, default_render=default_render))
+        chips.append(_resolve_item_html(module, is_self, series, url, image_url, default_render=default_render,
+                                         title=match["title"]))
     if not chips:
         return ""
     title = _module_text(module, "title", template, theme, simple) or "Other eras"
@@ -496,7 +502,8 @@ def _render_single_era_hub(cur, template: dict, theme: dict, module: dict) -> st
     text = f"Shop all {series} era sets"
     url = _item_url(hub_template["listing_id"])
     if module.get("item_template_html"):
-        return _substitute_item_placeholders(module["item_template_html"], text, url, None)
+        return _substitute_item_placeholders(module["item_template_html"], text, url, None,
+                                              title=hub_template["title"])
     return _banner_html(text, url, theme)
 
 
@@ -509,7 +516,7 @@ def _render_single_self(cur, template: dict, theme: dict, module: dict) -> str:
     label = template.get("family_label") or _finish_label(template.get("finish_kind"), theme) or "Listing"
     return _substitute_item_placeholders(
         module["item_template_html"], label, None, template.get("nav_image_url"),
-        description=template.get("family_description"))
+        description=template.get("family_description"), title=template.get("title"))
 
 
 _REPEAT_RESOLVERS = {

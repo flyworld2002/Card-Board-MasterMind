@@ -137,14 +137,16 @@ def main():
         # itself (here, temporarily on the live 'family_nav' row, within
         # this script's own rolled-back transaction) — no separate
         # reserved-key row, no {{token:modifier}} syntax (dropped earlier
-        # this session). item_template_current_html left unset
-        # deliberately, to also exercise the fallback path (current item
-        # falls back to the plain item_template_html, not the Python
-        # default).
+        # this session). item_template_current_html explicitly cleared
+        # (the live row has a real one set — 8/10 — so this test isolates
+        # the fallback path deliberately rather than assuming it's unset),
+        # to exercise the fallback path (current item falls back to the
+        # plain item_template_html, not the Python default).
         cur.execute(
             """
             UPDATE description_sections
-            SET item_template_html = '<div class="custom-tile">{{item_label}} | {{item_url}} | {{item_image_url}}</div>'
+            SET item_template_html = '<div class="custom-tile">{{item_label}} | {{item_url}} | {{item_image_url}}</div>',
+                item_template_current_html = NULL
             WHERE key = 'family_nav'
             """
         )
