@@ -57,6 +57,7 @@ DEFAULT_THEME = {
     "color_text_muted": "#7fa8c9",
     "color_text_dim": "#9db2c6",
     "nav_tile_width": "140",
+    "nav_tile_height": "195",  # was width*106/76 (card-art ratio); now independent, see _nav_cell_html
     "text_view_listing": "View listing",
     "text_viewing_this": "Viewing this",
     "text_family_nav_title": "Shop this set",
@@ -254,12 +255,13 @@ def _nav_cell_html(label: str, url: str | None, image_url: str | None, theme: di
     image, "View listing" / "Viewing this" pill button below it. Falls
     back to a plain block placeholder when nav_image_url isn't set yet."""
     d = theme
-    # Height follows width at the card-art aspect ratio (76:106, the
-    # original Deep Sea mockup's proportions) rather than being a second
-    # independently-tweakable number — one knob, no risk of a mismatched
-    # width/height stretching the image.
+    # Height used to be locked to width at the card-art aspect ratio
+    # (76:106) so there was only one knob to tweak — switched to an
+    # independent setting (8/11) once real usage showed some tile photos
+    # (set box art, banners) aren't card-shaped and want a flatter/wider
+    # tile than a fixed card ratio allows.
     w = int(d["nav_tile_width"])
-    h = round(w * 106 / 76)
+    h = int(d["nav_tile_height"])
     img = (f'<img src="{image_url}" alt="{label}" style="width:{w}px;height:{h}px;'
            f'object-fit:cover;border-radius:5px;display:block;margin:0 auto 10px;">'
            if image_url else
