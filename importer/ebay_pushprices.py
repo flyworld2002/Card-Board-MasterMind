@@ -56,10 +56,11 @@ def _compute_roster_changes(cur, platform: str, listing_id: str):
     platform_listings row (status 'active' or 'out_of_stock') are ever
     eligible for `changes` — queued rows show up in `resolved` for
     preview but are never pushed directly (only relevant via 250-cap
-    promotion). An 'out_of_stock' row is always pushed with
-    qty_to_push forced to 0 (see below) rather than skipped, so eBay's
-    stored quantity actually reflects zero instead of a stale leftover
-    value.
+    promotion). An 'out_of_stock' row is always pushed (never skipped)
+    with whatever qty_to_push actually computes to — eBay's stored
+    quantity should always reflect current truth, whether that's really
+    zero or the row has since been restocked (8/12: status is a cached
+    label derived from quantity, not an independent gate — see below).
     """
     cur.execute("SELECT * FROM resolve_listing_prices(%s, %s)", (platform, listing_id))
     resolved = cur.fetchall()
@@ -95,17 +96,18 @@ def _compute_roster_changes(cur, platform: str, listing_id: str):
         if r["quantity_limit"] is not None:
             qty_to_push = min(qty_to_push, r["quantity_limit"])
 
-        # An out_of_stock platform_listings row can still have a stale
-        # raw <Quantity> sitting on eBay from before it went OOS — eBay's
-        # Trading API folds QuantitySold into whatever <Quantity> a
-        # revise sends (see docs/plans/listing-pricing-system.md), so
-        # that leftover value can read as real available stock to a live
-        # buyer even though our own system correctly considers it dead.
-        # Force qty_to_push to 0 here so a push actively zeroes eBay's
-        # stored quantity instead of silently skipping the row and
-        # leaving the stale number in place.
-        if cur_row["status"] == "out_of_stock":
-            qty_to_push = 0
+        # No status-based override here on purpose (8/12 fix): qty_to_push
+        # is already the current truth computed from available_qty above.
+        # A genuinely still-empty out_of_stock row naturally computes to 0
+        # here (nothing forced), which correctly zeroes eBay's stored
+        # quantity the same as before. A row that's been restocked since
+        # going OOS (e.g. new inventory imported) now correctly pushes its
+        # real quantity instead of being silently held at a stale forced
+        # 0 forever — platform_listings.status is a cached label derived
+        # FROM quantity by every writer already; forcing it here to gate
+        # quantity was backwards. The write-back below self-heals status
+        # to match whatever actually got pushed, same pattern
+        # revise_single_variation_qty() (Balance Qty) already uses.
 
         # Always recompute and resend every gated-in row's price/qty fresh
         # from what's currently resolved, rather than only sending rows
@@ -126,9 +128,9 @@ def _compute_roster_changes(cur, platform: str, listing_id: str):
             "qty_to_push": qty_to_push,
         }
 
-        # out_of_stock is gated in same as active (see the qty_to_push
-        # override above) — it's only 'delisted' (no longer live on eBay
-        # at all, nothing to revise) that's excluded on status now.
+        # out_of_stock is gated in same as active — it's only 'delisted'
+        # (no longer live on eBay at all, nothing to revise) that's
+        # excluded on status now.
         gated_in = (
             cur_row["sync_enabled"]
             and cur_row["status"] in ("active", "out_of_stock")
@@ -457,8 +459,11 @@ def push_prices(listing_id: str, account_num: int = 1, platform: str = "ebay",
 </ReviseFixedPriceItemRequest>"""
             _post("ReviseFixedPriceItem", xml, account_num=account_num)
             cur.execute(
-                "UPDATE platform_listings SET pushed_price = %s, pushed_qty = %s, pushed_at = now() WHERE id = %s",
-                (change["resolved_price"], change["qty_to_push"], change["platform_listing_id"]),
+                "UPDATE platform_listings SET pushed_price = %s, pushed_qty = %s, pushed_at = now(), "
+                "status = CASE WHEN status = 'delisted' THEN status "
+                "WHEN %s > 0 THEN 'active' ELSE 'out_of_stock' END WHERE id = %s",
+                (change["resolved_price"], change["qty_to_push"], change["qty_to_push"],
+                 change["platform_listing_id"]),
             )
             summary["pushed"] = 1
             p(f"[{listing_id}] pushed 1 change.")
@@ -530,8 +535,11 @@ def push_prices(listing_id: str, account_num: int = 1, platform: str = "ebay",
 
         for change in changes_pushed:
             cur.execute(
-                "UPDATE platform_listings SET pushed_price = %s, pushed_qty = %s, pushed_at = now() WHERE id = %s",
-                (change["resolved_price"], change["qty_to_push"], change["platform_listing_id"]),
+                "UPDATE platform_listings SET pushed_price = %s, pushed_qty = %s, pushed_at = now(), "
+                "status = CASE WHEN status = 'delisted' THEN status "
+                "WHEN %s > 0 THEN 'active' ELSE 'out_of_stock' END WHERE id = %s",
+                (change["resolved_price"], change["qty_to_push"], change["qty_to_push"],
+                 change["platform_listing_id"]),
             )
         for sql, params in pending_writes:
             cur.execute(sql, params)
