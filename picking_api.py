@@ -68,7 +68,7 @@ from pydantic import BaseModel
 from importer.ebay_picking import pull_picking
 from importer.ebay_pushprices import (
     push_prices, push_single_card_live, remove_single_card_live, stage_card_picture,
-    revise_single_variation_qty,
+    stage_nav_image, revise_single_variation_qty,
 )
 from importer.ebay_create_listing import (
     list_business_policies, clone_listing_metadata, set_manual_listing_metadata,
@@ -122,6 +122,10 @@ _remove_card_lock = threading.Lock()
 # queue behind any of the other actions.
 _stage_picture_lock = threading.Lock()
 
+# Own lock, same reasoning — a nav-image EPS upload is unrelated to
+# per-card picture staging and shouldn't queue behind it.
+_stage_nav_image_lock = threading.Lock()
+
 # Balance Qty fires several of these in a row (one per listing being
 # rebalanced) — its own lock so it doesn't contend with unrelated pushes,
 # but each individual revise call still serializes against any other
@@ -156,6 +160,12 @@ class RemoveCardRequest(BaseModel):
 
 class StagePictureRequest(BaseModel):
     row_id: str
+    image_url: str
+    account_num: int = 1
+
+
+class StageNavImageRequest(BaseModel):
+    template_id: str
     image_url: str
     account_num: int = 1
 
@@ -383,6 +393,55 @@ async def stage_card_picture_file_endpoint(
                                          account_num=account_num, quiet=True)
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"picture upload failed: {e}")
+
+    return result
+
+
+@app.post("/api/upload-nav-image")
+def upload_nav_image_endpoint(body: StageNavImageRequest, x_picking_token: str = Header(default="")):
+    """
+    Uploads body.image_url to eBay's own hosting (EPS) right now and
+    writes the resulting URL straight onto listing_templates.nav_image_url
+    — takes effect immediately on the next description render/preview, no
+    push required. Same auth as the other endpoints, own lock.
+    """
+    if x_picking_token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="bad token")
+
+    with _stage_nav_image_lock:
+        try:
+            result = stage_nav_image(template_id=body.template_id, source_url=body.image_url,
+                                      account_num=body.account_num, quiet=True)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"nav image upload failed: {e}")
+
+    return result
+
+
+@app.post("/api/upload-nav-image-file")
+async def upload_nav_image_file_endpoint(
+    template_id: str = Form(...),
+    account_num: int = Form(1),
+    file: UploadFile = File(...),
+    x_picking_token: str = Header(default=""),
+):
+    """
+    Same as /api/upload-nav-image but for a directly-uploaded local file
+    instead of a URL — a separate route because FastAPI can't mix a JSON
+    body with multipart Form/File params on one endpoint.
+    """
+    if x_picking_token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="bad token")
+
+    image_bytes = await file.read()
+
+    with _stage_nav_image_lock:
+        try:
+            result = stage_nav_image(template_id=template_id, image_bytes=image_bytes,
+                                      filename=file.filename or "nav.jpg",
+                                      account_num=account_num, quiet=True)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"nav image upload failed: {e}")
 
     return result
 

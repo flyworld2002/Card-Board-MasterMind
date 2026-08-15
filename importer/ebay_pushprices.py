@@ -807,6 +807,48 @@ def stage_card_picture(row_id: str, source_url: str = None, image_bytes: bytes =
     return {"row_id": row_id, "staged": True, "eps_picture_url": eps_url}
 
 
+def stage_nav_image(template_id: str, source_url: str = None, image_bytes: bytes = None,
+                     filename: str = None, account_num: int = 1, quiet: bool = False) -> dict:
+    """
+    Uploads a picture to eBay's EPS right now and writes the resulting
+    hosted URL straight onto listing_templates.nav_image_url — takes
+    effect immediately (unlike stage_card_picture's queued-row staging,
+    nav_image_url isn't tied to a push; it's read directly by
+    render_description()'s family_nav/era_nav modules on every render).
+
+    Pass either `source_url` (fetched, then uploaded) or
+    `image_bytes`+`filename` (uploaded directly, e.g. a browser file
+    upload) — not both.
+    """
+    def p(msg):
+        if not quiet:
+            print(msg)
+
+    if not source_url and not image_bytes:
+        return {"template_id": template_id, "staged": False, "error": "must provide source_url or image_bytes"}
+
+    with db_cursor() as cur:
+        cur.execute("SELECT id FROM listing_templates WHERE id = %s", (template_id,))
+        if cur.fetchone() is None:
+            return {"template_id": template_id, "staged": False, "error": "no such listing template"}
+
+        try:
+            if source_url:
+                eps_url = upload_picture_from_url(source_url, account_num=account_num)
+            else:
+                eps_url = upload_picture_bytes(image_bytes, filename or "nav.jpg", account_num=account_num)
+        except Exception as e:
+            return {"template_id": template_id, "staged": False, "error": f"EPS upload failed: {e}"}
+
+        cur.execute(
+            "UPDATE listing_templates SET nav_image_url = %s, updated_at = now() WHERE id = %s",
+            (eps_url, template_id),
+        )
+
+    p(f"Staged nav image for template {template_id}: {eps_url}")
+    return {"template_id": template_id, "staged": True, "nav_image_url": eps_url}
+
+
 def revise_single_variation_qty(platform_listing_id: str, new_qty: int, account_num: int = 1,
                                  dry_run: bool = False, quiet: bool = False) -> dict:
     """
