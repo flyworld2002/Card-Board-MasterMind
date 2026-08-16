@@ -2307,6 +2307,27 @@ explicitly preserves it across that refresh and toggles the Fill
 button's visibility inline, so Fill/clear both behave correctly without
 a full page reload.
 
+**Per-set number padding (2026-08-16, same session)**: `{number:pad}`
+(migration 037) derived its width from `card_sets.total_cards`'s digit
+count, not configurable. Fei pointed out real sets pad card numbers
+inconsistently (2-digit, 3-digit, none) — no single derived rule fits
+every set. Added `card_sets.number_pad_width` (migration 038, nullable,
+left NULL for every set — no auto-backfill, since a numeric guess can't
+tell "genuinely no padding" from "not configured yet" and this feeds
+live eBay push output) and updated `render_variation_name()` to pad
+`{number:pad}` to that explicit width instead (same "only pad if
+actually shorter, `lpad()` never truncates" guard from migration 037,
+just retargeted). `NULL`/`0` now makes `{number:pad}` behave exactly
+like plain `{number}`. Verified directly: a card numbered "1" in a real
+set rendered `1` / `001` / `01` under NULL / width=3 / width=2
+respectively, via a scratch template (no real template uses
+`{number:pad}` yet, so zero live behavior change from this). New
+"Number padding" field added to Configuration → Sets edit modal (same
+"Card numbering" section as `base_set_number`/`set_prefix`) — shows a
+computed suggestion (from `base_set_number`'s/`total_cards`'s real
+digit count, NOT the zero-padded stored string's literal length) as a
+placeholder hint, never auto-written; Fei accepts/overrides per set.
+
 **Simplified per Fei's feedback (2026-08-16, same session)**: dropped the
 Fill button entirely — the empty `custom_name` input's `placeholder` AND
 now its `title` (native browser hover tooltip) both show the real
