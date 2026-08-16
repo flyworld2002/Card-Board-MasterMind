@@ -2307,6 +2307,32 @@ explicitly preserves it across that refresh and toggles the Fill
 button's visibility inline, so Fill/clear both behave correctly without
 a full page reload.
 
+**`{set_total}` fixed to use base_set_number, not total_cards
+(2026-08-16, same session)**: caught right after the padding fix — Fei
+noticed `{set_total}` didn't match the real printed denominator either.
+It had always resolved to `card_sets.total_cards` (the full catalog
+count including secret/hyper rares), not `base_set_number` (what
+actually prints on the card, e.g. "Ascended Heroes" is `total_cards=295`
+but real cards print "X/217"). **Higher stakes than the padding fix**:
+64 already-live listings use `{set_total}` in their `name_format`.
+Confirmed again this session that `render_variation_name()` only ever
+runs at promotion time (queued->active), never against an
+already-active row, so nothing already live silently renames itself —
+but flagged clearly to Fei that any NEW card promoted into one of those
+64 listings from now on will use the corrected (smaller) denominator
+while already-live siblings keep whatever was frozen in when THEY
+promoted, a real visible mismatch within one listing until/unless
+reconciled separately. Fei's call: fix it globally now, accept that
+trade-off (didn't ask for the reconcile-existing-variations option).
+Migration 039: `render_variation_name()` now computes
+`v_set_total := COALESCE(base_set_number::integer, total_cards)` (cast
+strips the zero-padding, e.g. `'217'::integer = 217`) and uses that for
+`{set_total}` instead. Verified against 3 real cases: a set with
+`base_set_number` set (217, was 295), a set without one (correctly
+falls back to `total_cards`), and a real already-live template
+(Darkness Ablaze, confirms future promotions there will use 189 now,
+not 201).
+
 **Per-set number padding (2026-08-16, same session)**: `{number:pad}`
 (migration 037) derived its width from `card_sets.total_cards`'s digit
 count, not configurable. Fei pointed out real sets pad card numbers
