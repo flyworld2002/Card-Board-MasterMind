@@ -2226,6 +2226,32 @@ existing usage returning nothing does NOT mean the data doesn't exist
 elsewhere in the schema. Check `information_schema.tables` for
 adjacently-named tables before ruling a feature out as a data gap.
 
+**Bug found by Fei immediately after first use**: the Rarity filter was
+missing Double Rare/Ultra Rare and others. Root cause: `card_master`
+(5,823 rows) and `card_variants` (9,443 rows) both exceed Supabase/
+PostgREST's default 1,000-row REST response cap — `loadAdvancedSearchOptions()`
+had been fetching the whole rarity/axis column and deduping client-side,
+which silently truncated to whichever 1,000 rows came back first (no
+`ORDER BY`), so any value only present later in the table — Double
+Rare/Ultra Rare, common on the newer Mega Evolution-era cards — never
+showed up. Same cap risk existed in `search_roster_candidates()` itself:
+an unfiltered/broad call matches up to 9,422 rows today, so the "Batch
+add cards" preview could have silently shown a truncated, arbitrary-order
+subset with no indication anything was cut off. Fixed both: migration 033
+adds `advanced_search_filter_options()` (one RPC, `DISTINCT` computed
+server-side, replaces the truncatable column fetches); migration 034
+adds an explicit `p_limit` (default 500) to `search_roster_candidates()`
+so it caps itself deterministically instead of relying on the invisible
+REST cap, and the JS treats "got exactly 500 back" as "there may be more
+— narrow your filters" rather than silently presenting it as complete.
+**Lesson**: any Supabase-client `.from(table).select(...)` against a
+table that could plausibly exceed ~1,000 rows needs either an explicit
+`.range()`/pagination loop, a server-side `DISTINCT`/aggregate via RPC, or
+an explicit `.limit()` the caller is aware of — the default cap fails
+silently, not with an error, so it's easy to ship code that "works" in
+testing against small result sets and quietly drops data once the table
+grows past it.
+
 Sanity-tested directly against live data before touching the UI: the
 Mega Evolution era filter combo returns real rows with `is_secret_rare`
 false throughout (matches the 0-secret-rares finding from manual
