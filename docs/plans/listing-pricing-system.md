@@ -2252,6 +2252,69 @@ silently, not with an error, so it's easy to ship code that "works" in
 testing against small result sets and quietly drops data once the table
 grows past it.
 
+**`display_sort` made real (2026-08-16, same session)**: Fei noticed his
+"ME-EX" draft template had `display_sort = 'alpha'` set but the eBay
+variation dropdown wouldn't actually come out alphabetical. Root cause:
+`resolve_listing_prices()` had a hardcoded `ORDER BY set_name,
+card_number_numeric`, never consulting `display_sort` at all — and
+`_compute_insert_position()` (`ebay_listing_sync.py`, used when promoting
+one more card into an already-live listing) explicitly only implemented
+`'card_number'`, falling back to append-at-end for anything else, per its
+own docstring. So `'alpha'`/`'release_date'` were selectable in the web
+UI but did nothing anywhere. Asked Fei which extra modes to add; he asked
+for all of: `card_number` (today's actual default, grouped by set),
+`number` (NEW — card number only, ignores set), `alpha`, `release_date`,
+`rarity` (NEW). Built:
+- `rarities` lookup table (migration 035) — same `code`/`display_name`/
+  `sort_order` shape as `foil_types`/`textures`/etc. (none existed for
+  rarity before). Seeded with the 15 live `card_master.rarity` values in
+  a best-effort standard-TCG tier order — explicitly NOT confirmed
+  value-by-value with Fei, trivially fixable via a plain `UPDATE` per row
+  if the order's wrong, no re-migration needed. Unmapped future rarities
+  sort last via `COALESCE(..., 999999)`, not first/error.
+- `resolve_listing_prices()` (migration 036) — added `release_year` +
+  `rarity_sort_order` to its internal CTEs, fetches the template's own
+  `display_sort` into `v_display_sort`, and replaced the hardcoded
+  ORDER BY with conditional CASE-key columns (each mode's keys evaluate
+  to NULL — a no-op — unless `v_display_sort` matches; original
+  `set_name, card_number_numeric` stays as the unconditional final
+  tiebreaker for `card_number`/unrecognized values). No dynamic SQL/
+  `EXECUTE` needed. Caught during verification: "Mega Evolution" and
+  "Phantasmal Flames" share `release_year = 2025`, so `release_date`
+  needed `set_name` as a tiebreaker between year and card number or
+  same-year sets would interleave instead of staying grouped — fixed
+  before this was ever committed.
+- `_compute_insert_position()` rewritten around a shared
+  `_insert_position_sort_key()` helper producing a comparable tuple per
+  card for whichever mode is active, replacing the old single hardcoded
+  `card_number_numeric` comparison. **Known, explicitly accepted
+  limitation carried forward unchanged**: `card_number`/`number` still
+  only compare card numbers, never set membership, at promotion-insert
+  time — matching `card_number`'s set-grouped *creation-time* order here
+  too would need tracking per-set block boundaries in the live
+  `VariationSpecificsSet`, a materially bigger feature. Not a
+  regression — this function only ever implemented that same
+  approximation for `card_number` before this change.
+- Web dropdown (`listing-pricing.js`, `openTemplateModal`) gets the 2 new
+  options and an accurate `release_date` label (dropped the stale
+  "reserved — future themed listings" qualifier).
+
+Verified directly against Fei's real ME-EX template (`fc23614f-...`):
+flipped `display_sort` through all 5 values and confirmed
+`resolve_listing_prices()` returns visibly correct, distinct orderings
+for each (then restored it to his original `'alpha'`). Separately ran
+`_compute_insert_position()` end-to-end against a real live listing's
+`ebay_listing_map` rows (item 335662210469) for all 5 modes — no errors,
+sane index/append-at-end results throughout. Also fixed, same session:
+`_render_variation_name()` was rendering a double space whenever
+`{suffix}` was empty (the common case — only reverse-holo/pattern/stamp
+cards get a suffix) because format strings like Fei's own
+`{name} {suffix} {number}/{set_total}` have literal spaces around the
+token regardless of whether it resolves to anything; now collapses
+repeated whitespace via `re.sub(r"\s+", " ", rendered).strip()` before
+returning, so no format string needs to special-case an empty token's
+surrounding spaces.
+
 Sanity-tested directly against live data before touching the UI: the
 Mega Evolution era filter combo returns real rows with `is_secret_rare`
 false throughout (matches the 0-secret-rares finding from manual

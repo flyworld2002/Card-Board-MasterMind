@@ -40,6 +40,7 @@ rarities (Double Rare, Shiny Rare, etc.) are deliberately NOT seeded;
 Fei configures them via the Configuration UI as they come up.
 """
 
+import re
 from decimal import Decimal, ROUND_HALF_UP
 
 from db.connection import db_cursor
@@ -568,7 +569,7 @@ def _render_variation_name(cur, variant_id: str, template_id: str = None) -> str
     set_total = row["total_cards"]
     padded = number.zfill(len(str(set_total))) if set_total and number.isdigit() else number
 
-    return (
+    rendered = (
         name_format
         .replace("{number:pad}", padded)
         .replace("{number}", number)
@@ -576,51 +577,91 @@ def _render_variation_name(cur, variant_id: str, template_id: str = None) -> str
         .replace("{prefix}", row["set_prefix"] or "")
         .replace("{name}", row["name"])
         .replace("{suffix}", suffix)
-    ).strip()
+    )
+    # {suffix}/{prefix} are often empty (most cards have no suffix; only
+    # promo sets have a prefix) — collapsing here means format strings
+    # never need to special-case an empty token's surrounding literal
+    # spaces (e.g. "{name} {suffix} {number}/{set_total}" would otherwise
+    # render a double space for every non-suffixed card).
+    return re.sub(r"\s+", " ", rendered).strip()
+
+
+_INSERT_POSITION_SORT_SENTINEL = 10 ** 9  # missing key sorts last, not first/error
+
+
+def _insert_position_sort_key(row: dict, display_sort: str) -> tuple:
+    """Comparable key tuple for one card, matching resolve_listing_prices()'s
+    5 display_sort modes (migration 036) — 'card_number' and 'number' share
+    the identical comparison (card_number_numeric only) since neither
+    tracks set boundaries here. Missing components (no release_year, no
+    matching rarities row) fall back to a large sentinel so they sort
+    last rather than raising or sorting first."""
+    num = row["card_number_numeric"] if row["card_number_numeric"] is not None else _INSERT_POSITION_SORT_SENTINEL
+    if display_sort == "alpha":
+        return (row["card_name"],)
+    if display_sort == "release_date":
+        year = row["release_year"] if row["release_year"] is not None else _INSERT_POSITION_SORT_SENTINEL
+        return (year, row["set_name"], num)
+    if display_sort == "rarity":
+        return (row["rarity_sort_order"], num)
+    return (num,)  # 'card_number' / 'number' / any unrecognized value
 
 
 def _compute_insert_position(cur, variations, specific_name: str, item_id_: str,
                               promoted_variant_id: str, display_sort: str):
     """
     Where in VariationSpecificsSet's value list the promoted card's name
-    belongs, per display_sort. Only 'card_number' ordering is implemented
-    (the only display_sort value confirmed in use — Step 0 #7); 'alpha'
-    and 'release_date' (reserved for the future themed-listings feature)
-    fall back to append-at-end rather than guess an ordering.
+    belongs, per display_sort — all 5 modes implemented (migration 036
+    brought resolve_listing_prices() up to the same 5; this brings
+    promotion-insert positioning up to match). Known limitation carried
+    forward unchanged from before this: 'card_number'/'number' only ever
+    compare card_number_numeric, never set membership, so promoting a
+    card into an already-live listing can't perfectly reproduce
+    'card_number's creation-time set-grouped order — matching per-set
+    block boundaries in a live VariationSpecificsSet is a materially
+    bigger feature. Not a regression: this function only ever implemented
+    that same approximation for 'card_number' before this change too.
     Returns an index into the current value list, or None to append.
     """
     from importer.ebay_variations_xml import get_specifics_set
-
-    if display_sort != "card_number":
-        return None
 
     existing_values = get_specifics_set(variations).get(specific_name, [])
 
     cur.execute(
         """
-        SELECT elm.variation_name, cm.card_number_numeric
+        SELECT elm.variation_name, cm.card_number_numeric, cm.name AS card_name,
+               cs.name AS set_name, cs.release_year, COALESCE(r.sort_order, 999999) AS rarity_sort_order
         FROM ebay_listing_map elm
         JOIN card_variants cv ON elm.variant_id = cv.id
         JOIN card_master cm ON cv.card_id = cm.id
+        JOIN card_sets cs ON cm.set_id = cs.id
+        LEFT JOIN rarities r ON cm.rarity = r.code
         WHERE elm.item_id = %s
         """,
         (item_id_,),
     )
-    known = {r["variation_name"]: r["card_number_numeric"] for r in cur.fetchall()}
+    known = {r["variation_name"]: r for r in cur.fetchall()}
 
     cur.execute(
-        "SELECT card_number_numeric FROM card_master WHERE id = "
-        "(SELECT card_id FROM card_variants WHERE id = %s)",
+        """
+        SELECT cm.card_number_numeric, cm.name AS card_name,
+               cs.name AS set_name, cs.release_year, COALESCE(r.sort_order, 999999) AS rarity_sort_order
+        FROM card_variants cv
+        JOIN card_master cm ON cv.card_id = cm.id
+        JOIN card_sets cs ON cm.set_id = cs.id
+        LEFT JOIN rarities r ON cm.rarity = r.code
+        WHERE cv.id = %s
+        """,
         (promoted_variant_id,),
     )
     promoted_row = cur.fetchone()
-    promoted_num = promoted_row["card_number_numeric"] if promoted_row else None
-    if promoted_num is None:
+    if promoted_row is None:
         return None
+    promoted_key = _insert_position_sort_key(promoted_row, display_sort)
 
     for idx, val in enumerate(existing_values):
-        other_num = known.get(val)
-        if other_num is not None and other_num > promoted_num:
+        other_row = known.get(val)
+        if other_row is not None and _insert_position_sort_key(other_row, display_sort) > promoted_key:
             return idx
     return None
 
