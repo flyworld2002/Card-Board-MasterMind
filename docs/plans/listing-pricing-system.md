@@ -2160,3 +2160,86 @@ empty strings.
   `style` sanitizer hardening) shipped as the seeded default look, with
   per-shop/listing-group theme scoping (`description_theme_settings.
   theme_key`, migration 028) on top.
+
+### Generic advanced card search + batch-add-to-roster (2026-08-16, session 18)
+
+Fei wanted a brand-new "Mega Evolution ex" listing template (all 65
+"Mega ___ ex" cards / 76 `card_variants` rows across the 7 Mega Evolution-
+series sets) without hand-picking each one through the existing
+"Add card to listing" search-one-click-one flow. Explicitly asked for the
+mechanism to be generic/reusable — era, set, Pokémon name, evolution line,
+rarity, all seven `card_variants` axes, and "other Pokémon shown in a
+card's art" as filter dimensions for future themed listings too.
+
+Built `search_roster_candidates(p_template_id, p_series, p_set_ids,
+p_name_terms, p_related_pokemon, p_rarities, p_foil_types,
+p_foil_patterns, p_textures, p_materials, p_sizes, p_stamp_types,
+p_source_types, p_exclude_secret_rare)` (migration 032) — same
+single-source-of-truth convention as `resolve_listing_prices()`. Every
+array param is NULL-means-unconstrained. `is_secret_rare` is computed as
+`card_number_numeric > card_sets.total_cards` (false when `total_cards`
+is NULL — a handful of promo sets have none, treated as "can't
+determine" rather than excluded). Always excludes variant rows already on
+the target template's roster in any status, moving `importExisting()`'s
+client-side dedup server-side so every future caller gets it for free.
+
+`listing-pricing.js` gained a self-contained "advanced card search"
+function group (`loadAdvancedSearchOptions`/`advancedCardSearchFilterHTML`/
+`collectAdvancedSearchFilters`/`runAdvancedCardSearch`, `acs-`-prefixed
+element ids) — deliberately NOT hard-wired only into the new
+"+ Batch add cards" button/`openBatchAddModal()`, per Fei's explicit ask
+that this be reusable elsewhere later, not a one-off. Filter panel only
+ever offers axis/rarity/set values actually in use (queried from
+`card_variants`/`card_master` directly, not the full lookup tables), so a
+filter option can never silently return zero rows.
+
+**Evolution line**: initially assessed as "no data, deferred" (this repo's
+own `card_master`/`card_attributes` have no `evolvesFrom`), which was
+wrong — corrected after Fei pointed out this DB separately carries a full
+PokeAPI-style species mirror (`pokemon`, `pokemon_evolution_chains`,
+`pokemon_evolutions`, `pokemon_names`, seeded by the standalone
+`load_pokemon.py`/`load_pokemon_forms.py` scripts, never previously joined
+to `card_master` anywhere in the codebase). The evolution-line picker
+resolves a chosen species' `evolution_chain_id` via `pokemon_evolutions`
+to get every base stage, THEN separately fetches every `pokemon` row whose
+`base_pokemon_id` points at one of those base stages (Mega/regional/Gmax
+alt forms) — Fei's explicit call was that alt forms show up as their own
+individually toggleable chips, not silently folded into the base name's
+substring match. Both feed the same `p_name_terms` OR'd-substring list the
+plain Name field builds — no special-case RPC path needed.
+
+**"Related Pokémon" / other Pokémon shown in a card's art**: `card_master.
+scenes` is a real column but 100% empty with zero code references
+anywhere in CBMM — nothing has ever written to it. Fei confirmed he'll
+backfill it manually himself eventually, so the filter control (RPC
+param `p_related_pokemon`, `cm.scenes && p_related_pokemon`, plus a
+"Related Pokémon" text field in the UI) shipped now even though it
+matches nothing today — nothing else needs to change once `scenes` gets
+real data.
+
+Lesson worth remembering: don't declare a filter/feature dimension
+"no backing data" from checking only the obviously-named tables
+(`card_master`/`card_attributes` here) — this schema has standalone
+reference-data tables (a whole PokeAPI mirror, in this case) that aren't
+joined to the main card tables anywhere in existing code, so a `grep` for
+existing usage returning nothing does NOT mean the data doesn't exist
+elsewhere in the schema. Check `information_schema.tables` for
+adjacently-named tables before ruling a feature out as a data gap.
+
+Sanity-tested directly against live data before touching the UI: the
+Mega Evolution era filter combo returns real rows with `is_secret_rare`
+false throughout (matches the 0-secret-rares finding from manual
+inspection), and rarity/foil-type combinators compose correctly. Also ran
+a reversible end-to-end smoke test of the exact search-then-insert path
+`openBatchAddModal()`'s Add button performs — scratch `listing_templates`
+row, ran `search_roster_candidates`, inserted 3 of its results into
+`listing_card_assignments`, re-ran the same RPC call and confirmed those
+3 `variant_id`s were now correctly excluded (84 candidates → 81, exact
+diff), then deleted the scratch rows. Confirms the roster-dedup `NOT
+EXISTS` clause and the insert shape both work against real schema/FK
+constraints, not just in isolation. What's genuinely NOT done: no browser
+tool available in this session, so the actual UI was never clicked
+through — creating the real "Mega Evolution ex" template and using
+"+ Batch add cards" against it live is still Fei's next step, and worth a
+first-use sanity look given the filter panel/evolution-picker/chip UI
+itself was only reviewed by re-reading the code, not exercised.
