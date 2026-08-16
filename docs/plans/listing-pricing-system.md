@@ -2307,6 +2307,33 @@ explicitly preserves it across that refresh and toggles the Fill
 button's visibility inline, so Fill/clear both behave correctly without
 a full page reload.
 
+**Available/total inventory in the roster table (2026-08-16, same
+session)**: Fei wants to see "0/total" for a card's available quantity
+so a card that's fully claimed by other listings (`available_qty=0`)
+but still owned in stock shows up as a rebalance candidate without
+opening the "Balance" modal first. Added `total_inventory_qty` to
+`resolve_listing_prices()` (migration 040) — the same raw
+`SUM(quantity - quantity_sold)` `openBalanceQtyModal()` already computed
+client-side, now surfaced inline too, computed once via `LATERAL` (same
+pattern the `market` CTE already used) and reused for both
+`total_inventory_qty` and the `available_qty` subtraction rather than
+querying `inventory` twice. **Real gotcha hit applying this**: Postgres
+flatly refuses to let `CREATE OR REPLACE FUNCTION` change a `RETURNS
+TABLE` function's output columns at all — not even appending one at the
+very end, despite that being the commonly-repeated "safe" pattern.
+Confirmed live (`cannot change return type of existing function`) both
+mid-list AND appended-at-end; needed an explicit `DROP FUNCTION
+resolve_listing_prices(text,text,uuid)` before the `CREATE FUNCTION`
+(checked `pg_depend` first — nothing else references it, so the drop
+was safe). **Lesson: `CREATE OR REPLACE FUNCTION` is body-only-safe for
+`RETURNS TABLE` functions — any output-shape change needs `DROP
+FUNCTION` first, always, regardless of where the new column goes.** Web
+UI: `availableQtyText(r)` (`listing-pricing.js`) shows plain
+`available_qty` when it equals `total_inventory_qty` (nothing hidden
+elsewhere), else `"available/total"` — used in both `rowHTML()` and
+`refreshRowDerivedCells()` so it stays correct after any row edit, not
+just on a full reload.
+
 **`{set_total}` fixed to use base_set_number, not total_cards
 (2026-08-16, same session)**: caught right after the padding fix — Fei
 noticed `{set_total}` didn't match the real printed denominator either.
