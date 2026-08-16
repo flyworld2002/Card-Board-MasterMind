@@ -2252,6 +2252,61 @@ silently, not with an error, so it's easy to ship code that "works" in
 testing against small result sets and quietly drops data once the table
 grows past it.
 
+**Accurate variation-name preview + one-click Fill for custom_name
+(2026-08-16, same session)**: Fei asked whether `custom_name` could
+auto-populate at import time. Flagged the real tradeoff first: an empty
+`custom_name` is meaningful (`promoted_name = custom_name or
+_render_variation_name(...)`) — auto-writing a real string into every
+card's `custom_name` at import would freeze that card's name against any
+future `name_format` edit. Fei's call: show the auto-generated name as
+the visible label, add an explicit action to promote it into a real
+editable value only when he wants one — nothing gets written to
+`custom_name` just from importing a card.
+
+Found along the way: the roster table's empty-`custom_name` placeholder
+was already wrong — it showed `cardLabel(r)` (a generic
+`"{number} {name}"`), not the actual `_render_variation_name()` output,
+which depends on the template's real `name_format` (his own ME-EX
+template would show "77 Mega Lucario ex" as a placeholder when the real
+push-time name is "Mega Lucario ex 77/295").
+
+Built `render_variation_name(p_variant_id, p_template_id)` +
+`render_variation_names(p_template_id, p_variant_ids[])` (migration
+037) — a faithful Postgres port of `_render_variation_name()`
+(`importer/ebay_listing_sync.py`), so the browser can compute the exact
+real name without a `picking_api.py` round-trip. Caught one real bug
+porting it: Postgres's `lpad()` truncates a string already ≥ the target
+length, but Python's `zfill()` (used for `{number:pad}`) never
+truncates — for a secret-rare card number longer than its set's digit
+count (an already-real, already-handled scenario — see `is_secret_rare`,
+migration 032), a naive port would have silently clipped the padded
+number. Guarded with an explicit length check before calling `lpad()`.
+
+Verified byte-identical against the existing Python function across
+**all 9,554 real `listing_card_assignments` rows** (every real
+template + variant combination live) before relying on it for
+anything — zero mismatches. On the strength of that, refactored
+`_render_variation_name()` itself into a thin wrapper around the RPC
+(`_humanize()` and the now-unused `import re` removed too) — single
+source of truth going forward, same principle as
+`resolve_listing_prices()`/`search_roster_candidates()`, and closes off
+the exact class of drift that caused the double-space bug earlier this
+same session (two independent implementations of one rule set).
+
+Web UI (`listing-pricing.js`): `loadListing()` batches one
+`render_variation_names` call for every queued row with no
+`custom_name`, merging `preview_name` onto each row (`rowHTML()` stays a
+pure function). Empty inputs now show the real name as placeholder text
+instead of the generic label. New "Fill" button (shown only when
+`!custom_name && preview_name`) copies the preview into the input and
+dispatches a `change` event — reuses the *existing* save handler
+verbatim rather than a second Supabase call. Also handled: 
+`refreshRowDerivedCells()` re-fetches via `resolve_listing_prices()`,
+which doesn't carry `preview_name` — the custom-name change handler now
+explicitly preserves it across that refresh and toggles the Fill
+button's visibility inline, so Fill/clear both behave correctly without
+a full page reload.
+
 **`display_sort` made real (2026-08-16, same session)**: Fei noticed his
 "ME-EX" draft template had `display_sort = 'alpha'` set but the eBay
 variation dropdown wouldn't actually come out alphabetical. Root cause:

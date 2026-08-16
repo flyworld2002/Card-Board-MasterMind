@@ -40,7 +40,6 @@ rarities (Double Rare, Shiny Rare, etc.) are deliberately NOT seeded;
 Fei configures them via the Configuration UI as they come up.
 """
 
-import re
 from decimal import Decimal, ROUND_HALF_UP
 
 from db.connection import db_cursor
@@ -491,99 +490,32 @@ def recalc(account_num: int = 1, item_id: str = None, card_query: str = None,
         print(summary)
 
 
-def _humanize(value: str) -> str:
-    return value.replace("_", " ").title() if value else ""
-
-
 def _render_variation_name(cur, variant_id: str, template_id: str = None) -> str:
-    """Renders a card's display name for VariationSpecificsSet via the
-    template's name_format (default if no template): tokens {number},
+    """Renders a card's display name for VariationSpecificsSet — thin
+    wrapper over the render_variation_name() Postgres RPC (migration 037).
+    That RPC is the single source of truth now, not this function: it was
+    verified byte-identical against this function's own prior standalone
+    implementation across all 9,554 real roster rows before the swap (see
+    docs/plans/listing-pricing-system.md build log). Moving the rendering
+    itself into Postgres means the web app's roster-table preview
+    (listing-pricing.js — the custom_name placeholder + Fill button) calls
+    the exact same logic directly, with no risk of the two drifting apart
+    the way the old Python-only version briefly did (see the double-space
+    bug fixed earlier the same session).
+
+    Tokens/rules (still true, now implemented in the RPC): {number},
     {number:pad}, {set_total} (= card_sets.total_cards), {prefix} (=
-    card_sets.set_prefix, e.g. "MEP"/"SVP"), {name}, {suffix}.
-
-    The suffix MUST distinguish foil_type — confirmed against real listings
-    (e.g. item 334903449758): reverse-holo variants are always suffixed
-    "Reverse Holo RH" even with no foil_pattern/stamp_type, because a plain
-    holo and reverse-holo copy of the same card number commonly coexist in
-    the same RH-to-UR listing and need distinct VariationSpecificsSet
-    values. Without this, two different variants of the same card could
-    render to an identical name.
-
-    Promo sets typically carry a set_prefix but no total_cards (unlike a
-    numbered main set) — confirmed live: "Mega Evolution Black Star Promos"
-    (set_prefix='MEP') has total_cards=NULL, which the old numbered-only
-    default rendered as a broken "22/ Charcadet" (dangling slash, no
-    denominator). When a card's set has set_prefix but no total_cards and
-    no per-template name_format override exists, default to
-    "{prefix} {number} {name} {suffix}" instead — callers needing anything
-    more specific (e.g. literal "Black Star Promo" wording, or a different
-    word order for alpha-sorted listings) should set the template's
-    name_format explicitly, or use a per-card custom_name override
-    (listing_card_assignments.custom_name) at the call site instead of
-    relying on this function at all.
+    card_sets.set_prefix, e.g. "MEP"/"SVP"), {name}, {suffix} (built from
+    foil_pattern / "Reverse Holo RH" for foil_type='reverse_holo' /
+    stamp_type, in that order — a plain holo and reverse-holo copy of the
+    same card number need distinct VariationSpecificsSet values). Promo
+    sets (set_prefix set, total_cards NULL) fall back to
+    "{prefix} {number} {name} {suffix}" when no template name_format
+    override exists.
     """
-    cur.execute(
-        """
-        SELECT cm.name, cm.card_number, cs.total_cards, cs.set_prefix,
-               cv.foil_type, cv.foil_pattern, cv.stamp_type
-        FROM card_variants cv
-        JOIN card_master cm ON cv.card_id = cm.id
-        JOIN card_sets cs ON cm.set_id = cs.id
-        WHERE cv.id = %s
-        """,
-        (variant_id,),
-    )
+    cur.execute("SELECT render_variation_name(%s, %s) AS rendered", (variant_id, template_id))
     row = cur.fetchone()
-
-    NUMBERED_DEFAULT = "{number}/{set_total} {name} {suffix}"
-
-    name_format = None
-    if template_id:
-        cur.execute("SELECT name_format FROM listing_templates WHERE id = %s", (template_id,))
-        t = cur.fetchone()
-        if t and t.get("name_format"):
-            name_format = t["name_format"]
-
-    # Every template created via the web UI's form gets NUMBERED_DEFAULT
-    # written into name_format verbatim unless a user explicitly typed
-    # something else (confirmed live: all 3 real templates carry this
-    # exact string) — so it's never actually NULL in practice, and a
-    # plain "is None" check would never catch the promo case. Treat
-    # "still equal to the literal default" the same as "no override" —
-    # a genuine user customization (anything else) is always respected.
-    if name_format is None or name_format == NUMBERED_DEFAULT:
-        if row["set_prefix"] and not row["total_cards"]:
-            name_format = "{prefix} {number} {name} {suffix}"
-        else:
-            name_format = NUMBERED_DEFAULT
-
-    suffix_parts = []
-    if row["foil_pattern"]:
-        suffix_parts.append(_humanize(row["foil_pattern"]))
-    if row["foil_type"] == "reverse_holo":
-        suffix_parts.append("Reverse Holo RH")
-    if row["stamp_type"]:
-        suffix_parts.append(_humanize(row["stamp_type"]))
-    suffix = " ".join(suffix_parts)
-    number = row["card_number"] or ""
-    set_total = row["total_cards"]
-    padded = number.zfill(len(str(set_total))) if set_total and number.isdigit() else number
-
-    rendered = (
-        name_format
-        .replace("{number:pad}", padded)
-        .replace("{number}", number)
-        .replace("{set_total}", str(set_total) if set_total else "")
-        .replace("{prefix}", row["set_prefix"] or "")
-        .replace("{name}", row["name"])
-        .replace("{suffix}", suffix)
-    )
-    # {suffix}/{prefix} are often empty (most cards have no suffix; only
-    # promo sets have a prefix) — collapsing here means format strings
-    # never need to special-case an empty token's surrounding literal
-    # spaces (e.g. "{name} {suffix} {number}/{set_total}" would otherwise
-    # render a double space for every non-suffixed card).
-    return re.sub(r"\s+", " ", rendered).strip()
+    return row["rendered"] if row and row["rendered"] is not None else ""
 
 
 _INSERT_POSITION_SORT_SENTINEL = 10 ** 9  # missing key sorts last, not first/error
