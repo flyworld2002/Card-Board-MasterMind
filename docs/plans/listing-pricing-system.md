@@ -2307,6 +2307,17 @@ explicitly preserves it across that refresh and toggles the Fill
 button's visibility inline, so Fill/clear both behave correctly without
 a full page reload.
 
+**Simplified per Fei's feedback (2026-08-16, same session)**: dropped the
+Fill button entirely — the empty `custom_name` input's `placeholder` AND
+now its `title` (native browser hover tooltip) both show the real
+`preview_name`, so hovering surfaces the full auto-generated name without
+a click-to-promote step. `custom_name` still only ever gets written by
+typing directly into the field. Separately, "Remove from roster"
+(`lp-delete-roster-btn`, both the queued and sold_out_retained render
+branches in `actionsHTML()`) is now a bare 🗑️ icon button with a
+`title="Remove from roster"` tooltip instead of a text button, per Fei's
+"short and simple" ask.
+
 **`display_sort` made real (2026-08-16, same session)**: Fei noticed his
 "ME-EX" draft template had `display_sort = 'alpha'` set but the eBay
 variation dropdown wouldn't actually come out alphabetical. Root cause:
