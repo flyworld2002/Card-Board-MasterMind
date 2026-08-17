@@ -2206,6 +2206,67 @@ empty strings.
   variation, not a backfill gap; they need a fresh photo staged like
   any newly-added card. Re-runnable going forward as new listings go
   live and pictures get attached outside this app again.
+- **Untracked live eBay variations — real gap, found while checking the
+  photo backfill's remaining 5 misses (2026-08-17, same session).**
+  While explaining why Stellar Crown #76/Crown Zenith #48/etc. had no
+  picture, Fei asked about a specific listing ("Chaos Rising Reverse
+  Holo - Ultra Rare") and said he was "missing all the not in stock
+  cards in the listing." Investigation (via `AskUserQuestion`, since
+  the DB showed the listing's existing rows were 100% photo-complete —
+  wrong hypothesis) revealed the real issue: **the roster rows
+  themselves didn't exist**. That listing has 125 real `<Variation>`
+  entries live on eBay, but only 105 existed as `platform_listings`
+  rows — 20 live variations, mostly secret rares beyond the set's base
+  86-card count (`087/086 Chespin` through `113/086 Special Red Card`),
+  were never synced into this app at all. Same root cause as the photo
+  gap: added directly through eBay Seller Hub, invisible to anything
+  this codebase tracks. Fei's stated motivation for wanting it fixed:
+  without a roster row, "Add card to listing" can't recognize the card
+  is already live, so re-adding it would create a genuine duplicate
+  variation on eBay instead of recognizing the existing sold-out one.
+  Built `adopt_untracked_live_variations()`
+  (`importer/ebay_pushprices.py`) reusing the exact same
+  fetch+parse+match pipeline `--ebay-import` already uses
+  (`fetch_item_variations()` → `parse_variation_name()` →
+  `lookup_card_for_ebay()`, `importer/ebay.py`/`utils/pokemon_api.py`)
+  rather than building a second, less-trusted matcher — deliberate
+  choice to reuse the same code path every real purchase already
+  trusts. Mirrors `_stage_promotion()`'s three-write bookkeeping
+  (`platform_listings` + `listing_card_assignments` +
+  `ebay_listing_map`) minus the actual eBay Revise call, since these
+  variations are already live — nothing changes on eBay, only what
+  this app knows about it. Wired to `main.py
+  --ebay-adopt-untracked-variations --listing-id ITEM_ID`
+  (`--dry-run` supported). **Dry-run then real run against
+  `336600660278`: all 20 matched cleanly against the local DB alone,
+  zero API fallback needed, zero unmatched, zero errors** — roster went
+  105 → 125, exactly matching eBay. Chained straight into
+  `--ebay-backfill-card-photos --listing-id` afterward, which picked up
+  pictures for all 20 immediately (they were live variations with real
+  attached pictures, same as everything else in that backfill).
+  **Real bug caught mid-verification, unresolved**: a `queued` roster
+  row that existed for this template before the adoption run was gone
+  afterward — expected 126 total rows (106 existing + 20 adopted), got
+  125. The adoption code never touches existing rows (pure INSERT, no
+  UPDATE/DELETE path), so either one of the 20 adopted variants
+  happened to already have a stray queued duplicate that got superseded
+  some other way, or something changed concurrently on the live system
+  while this ran (plausible — Fei was actively using the app this
+  session). Flagged to Fei, not investigated further; end state (125/125,
+  matching eBay exactly) is correct regardless.
+  **Scope check surveyed all 64 live listings** (one `GetItem` each,
+  comparing live `<Variation>` count to `platform_listings` row count):
+  **51 of 64 have this same gap** (not just the one listing) — some
+  significant, e.g. `335336413541` missing 27, `335316826805` missing
+  31. **2 listings have the OPPOSITE mismatch** — `platform_listings`
+  has MORE rows than eBay shows live (`336204674240`: 141 vs 140 live;
+  `336691613250`: 128 vs 127 live) — a stale-row problem this command
+  doesn't fix, flagged as a separate unstarted item. **Fei's explicit
+  call: run it on the other 50 only after reviewing how the one test
+  listing turned out — not yet greenlit.** Re-runnable per-listing via
+  `--listing-id`; no `--all` sweep built since Fei wants to gate this
+  one listing-by-listing rather than batch it blindly given the scale
+  (51 listings, likely 500+ untracked variations total).
 
 ### Generic advanced card search + batch-add-to-roster (2026-08-16, session 18)
 

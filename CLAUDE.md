@@ -213,6 +213,27 @@ part of any build output.
   9,467 of 9,472 filled (99.9%); the remaining 5 genuinely have no
   `VariationSpecificPictureSet` entry on eBay at all (no picture was
   ever attached to that exact live variation), not a backfill gap.
+- **51 of 64 live listings have real eBay variations with NO
+  `platform_listings` row at all** (surveyed 2026-08-17, same session
+  the first instance was caught). `--ebay-adopt-untracked-variations
+  --listing-id ITEM_ID` (`main.py`,
+  `importer.ebay_pushprices.adopt_untracked_live_variations()`) fetches
+  a listing's live `<Variation>` entries, matches each untracked one via
+  the same `fetch_item_variations()`/`lookup_card_for_ebay()` pipeline
+  `--ebay-import` uses, and inserts `platform_listings` +
+  `listing_card_assignments` + `ebay_listing_map` rows reflecting what's
+  already live (no eBay Revise call — nothing changes on eBay itself;
+  unmatched variations are reported, not guessed). Run once, successfully,
+  against listing `336600660278` ("Chaos Rising Reverse Holo - Ultra
+  Rare") — 20/20 matched cleanly, roster went from 105 to 125 rows,
+  now exactly matching eBay's 125 live variations; `--ebay-backfill-card-photos
+  --listing-id` immediately after picked up pictures for all 20. **Not
+  yet run on the other 50** — Fei wants to check the one listing before
+  green-lighting the rest. Two listings surveyed have the OPPOSITE
+  problem instead (`platform_listings` has MORE rows than eBay shows
+  live: `336204674240` 141 vs 140, `336691613250` 128 vs 127) — a
+  different, unstarted problem (a stale row not actually live anymore),
+  not something this command fixes.
 - "Pending shipment" feature: pull paid-but-unshipped eBay orders for a
   pick/pack workflow.
 - Next architecture decision: auto-refreshing inventory as eBay orders

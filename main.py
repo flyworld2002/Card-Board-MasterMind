@@ -488,6 +488,30 @@ def cmd_ebay_backfill_card_photos(args):
         for e in result["errors"]:
             print(f"  {e['listing_id']} ({e['row_id']}): {e['error']}")
 
+def cmd_ebay_adopt_untracked_variations(args):
+    from importer.ebay_pushprices import adopt_untracked_live_variations
+    if not args.listing_id:
+        print("--listing-id is required")
+        return
+    result = adopt_untracked_live_variations(listing_id=args.listing_id, account_num=args.account,
+                                              dry_run=args.dry_run)
+    if "error" in result:
+        print(f"Error: {result['error']}")
+        return
+    label = "Would adopt" if args.dry_run else "Adopted"
+    print(f"Untracked live variations checked: {result['checked']}")
+    print(f"{label}: {len(result['adopted'])}")
+    for a in result["adopted"]:
+        print(f"  {a['variation_name']!r} -> {a['card_name']} (qty {a['quantity']}, ${a['price']})")
+    if result["unmatched"]:
+        print(f"Unmatched (needs manual review, nothing written): {len(result['unmatched'])}")
+        for u in result["unmatched"]:
+            print(f"  {u['variation_name']!r} — parsed as #{u['card_number']} {u['card_name']} ({u['set_name']})")
+    if result["errors"]:
+        print(f"Errors: {len(result['errors'])}")
+        for e in result["errors"]:
+            print(f"  {e['variation_name']!r}: {e['error']}")
+
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main():
@@ -681,6 +705,19 @@ def main():
              "active row's card_photo_id regardless. --listing-id scopes "
              "to one eBay listing. --dry-run reads and matches but writes "
              "nothing. See docs/plans/listing-pricing-system.md.")
+    group.add_argument("--ebay-adopt-untracked-variations", action="store_true",
+        help="For one --listing-id, finds live eBay <Variation> entries "
+             "with NO platform_listings row at all (added directly "
+             "through eBay's own tools, never pushed through this app) "
+             "and adopts them into the roster: matches each via the same "
+             "fetch_item_variations()/lookup_card_for_ebay() pipeline "
+             "--ebay-import uses, then inserts platform_listings + "
+             "listing_card_assignments + ebay_listing_map rows reflecting "
+             "what's already live (no eBay Revise call — nothing changes "
+             "on eBay itself). Unmatched variations are reported, not "
+             "guessed. --dry-run matches but writes nothing. Re-runnable "
+             "— already-tracked variations are left untouched. See "
+             "docs/plans/listing-pricing-system.md.")
 
     # ── Shared optional flags ─────────────────────────────────────────────────
     parser.add_argument("--dry-run", action="store_true",
@@ -847,5 +884,7 @@ def main():
         cmd_ebay_backfill_nav_images(args)
     elif args.ebay_backfill_card_photos:
         cmd_ebay_backfill_card_photos(args)
+    elif args.ebay_adopt_untracked_variations:
+        cmd_ebay_adopt_untracked_variations(args)
 if __name__ == "__main__":
     main()

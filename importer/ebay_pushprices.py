@@ -937,3 +937,151 @@ def revise_single_variation_qty(platform_listing_id: str, new_qty: int, account_
     p(f"[{listing_id}] revised {external_id!r} quantity {pl_row['quantity_listed']} -> {new_qty}")
     return {"platform_listing_id": platform_listing_id, "external_id": external_id,
             "old_qty": pl_row["quantity_listed"], "new_qty": new_qty, "revised": True, "dry_run": False}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# One-time (re-runnable) adoption of variations live on eBay that this app
+# never tracked at all
+# ══════════════════════════════════════════════════════════════════════════════
+
+def adopt_untracked_live_variations(listing_id: str, account_num: int = 1,
+                                     platform: str = "ebay", dry_run: bool = False) -> dict:
+    """Some live listings have real <Variation> entries on eBay with NO
+    corresponding platform_listings row at all — confirmed 2026-08-17 on
+    the "Chaos Rising Reverse Holo - Ultra Rare" listing (125 live
+    variations, only 105 tracked). These weren't sold out and cleaned
+    up by this app (that path clears platform_listing_id but keeps the
+    listing_card_assignments row as 'sold_out_retained' — none existed
+    here either); they were added directly through eBay's own tools,
+    same "attached outside anything this codebase tracked" pattern as
+    the card_photos backfill. Fei's complaint: without a roster row,
+    "Add card to listing" has no way to know the card is already live,
+    so adding it again would create a real duplicate variation on eBay
+    instead of recognizing the existing one.
+
+    Reuses the exact same fetch+parse+match pipeline as --ebay-import
+    (fetch_item_variations() -> parse_variation_name() ->
+    lookup_card_for_ebay(), importer/ebay.py / utils/pokemon_api.py) --
+    the same matcher every real purchase already trusts -- rather than
+    a second, less-trusted variant-matching path. Only variations whose
+    exact eBay variation text isn't already a platform_listings.external_id
+    for this listing_id are considered; already-tracked ones are left
+    alone entirely (no re-matching, no risk of overwriting a correct
+    existing row).
+
+    For each matched, previously-untracked variation: inserts a
+    platform_listings row (status 'active'/'out_of_stock' by current
+    live quantity, pushed_price/pushed_qty snapshotting what's already
+    live -- no eBay Revise call needed, it's already there) + a
+    listing_card_assignments row pointing at it + an ebay_listing_map
+    upsert (item_id, variation_name) -> variant_id, same three writes
+    _stage_promotion() makes when promoting a card live -- without this
+    last one, importer/ebay_orders.py's sale matcher would never learn
+    these variants sell on this listing_id, and a real sale would show
+    up "unmatched" even though the roster row is now correct.
+
+    dry_run=True runs the fetch + match but writes nothing.
+    """
+    from importer.ebay import fetch_item_variations
+    from utils.pokemon_api import lookup_card_for_ebay
+
+    with db_cursor() as cur:
+        cur.execute(
+            "SELECT id FROM listing_templates WHERE listing_id = %s AND platform = %s",
+            (listing_id, platform),
+        )
+        template = cur.fetchone()
+        if template is None:
+            return {"error": f"no listing_templates row for listing_id={listing_id!r}"}
+        template_id = template["id"]
+
+        cur.execute("SELECT external_id FROM platform_listings WHERE listing_id = %s", (listing_id,))
+        tracked = set(r["external_id"] for r in cur.fetchall())
+
+        cur.execute(
+            "SELECT account FROM platform_listings WHERE listing_id = %s AND account IS NOT NULL LIMIT 1",
+            (listing_id,),
+        )
+        acct_row = cur.fetchone()
+        account = acct_row["account"] if acct_row else get_account_name(account_num)
+
+        cur.execute(
+            "SELECT COALESCE(MAX(priority_rank), -1) + 1 AS next_rank "
+            "FROM listing_card_assignments WHERE template_id = %s",
+            (template_id,),
+        )
+        next_rank = cur.fetchone()["next_rank"]
+
+    rows = fetch_item_variations(listing_id, title="", account_num=account_num)
+    untracked = [r for r in rows if r.get("variation_name") and r["variation_name"] not in tracked]
+
+    adopted, unmatched, errors = [], [], []
+    for r in untracked:
+        card_name   = r.get("card_name") or r.get("variation_name", "")
+        card_number = r.get("card_number", "")
+        set_name    = r.get("set_override") or r.get("set_name", "")
+
+        try:
+            lookup = lookup_card_for_ebay(
+                card_name=card_name, card_number=card_number, set_name=set_name,
+                foil_type=r.get("foil_type"), foil_pattern=r.get("foil_pattern"),
+                texture=r.get("texture"), material=r.get("material"), size=r.get("size"),
+                stamp_type=r.get("stamp_type"), source_type=r.get("source_type"),
+            )
+        except Exception as e:
+            errors.append({"variation_name": r["variation_name"], "error": str(e)})
+            continue
+
+        if not lookup["matched"]:
+            unmatched.append({"variation_name": r["variation_name"], "card_name": card_name,
+                               "card_number": card_number, "set_name": set_name})
+            continue
+
+        if dry_run:
+            adopted.append({"variation_name": r["variation_name"], "variant_id": lookup["variant_id"],
+                             "card_name": lookup["card_name"], "quantity": r["quantity"],
+                             "price": r["price"], "dry_run": True})
+            continue
+
+        status = "active" if r["quantity"] > 0 else "out_of_stock"
+        new_platform_listing_id = str(uuid.uuid4())
+        with db_cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO platform_listings
+                    (id, platform, account, listing_id, external_id, variant_id, list_price,
+                     quantity_listed, status, sync_enabled, template_id, listed_at,
+                     pushed_price, pushed_qty, pushed_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, true, %s, now(), %s, %s, now())
+                """,
+                (new_platform_listing_id, platform, account, listing_id, r["variation_name"],
+                 lookup["variant_id"], r["price"], r["quantity"], status, template_id,
+                 r["price"], r["quantity"]),
+            )
+            cur.execute(
+                """
+                INSERT INTO listing_card_assignments
+                    (template_id, variant_id, platform_listing_id, status, priority_rank)
+                VALUES (%s, %s, %s, 'active', %s)
+                """,
+                (template_id, lookup["variant_id"], new_platform_listing_id, next_rank),
+            )
+            cur.execute(
+                """
+                INSERT INTO ebay_listing_map
+                    (item_id, listing_id, variation_name, variant_id, condition, source, last_synced_at)
+                VALUES (%s, %s, %s, %s, 'Near Mint', 'adopt', now())
+                ON CONFLICT (item_id, variation_name) DO UPDATE
+                    SET variant_id = EXCLUDED.variant_id,
+                        condition = EXCLUDED.condition,
+                        source = EXCLUDED.source,
+                        last_synced_at = now()
+                """,
+                (listing_id, listing_id, r["variation_name"], lookup["variant_id"]),
+            )
+        next_rank += 1
+        adopted.append({"variation_name": r["variation_name"], "variant_id": lookup["variant_id"],
+                         "card_name": lookup["card_name"], "platform_listing_id": new_platform_listing_id,
+                         "status": status, "quantity": r["quantity"], "price": r["price"]})
+
+    return {"checked": len(untracked), "adopted": adopted, "unmatched": unmatched, "errors": errors}
