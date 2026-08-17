@@ -2125,23 +2125,17 @@ empty strings.
   plain `{{key}}`-containing string, the builder just constructs/parses
   it. See `importer/ebay_descriptions.py`'s module-dispatch section and
   `docs/plans/listing_pricing_migration_029_description_modules.sql`.
-- **Description-nav milestone 4 (sanitizer test).** Backend + frontend for
-  the description navigation system (family strip / era hub-and-spoke /
-  era index — migration 020, `importer/ebay_descriptions.py`,
-  `picking_api.py` description-preview/-sync/-presets endpoints,
-  `listing-pricing.js` nav fields + preview/push UI) are built and, on the
-  Python side, verified against real DB state. NOT yet done: picking one
-  real live listing, pushing a real test description to it via
-  `ReviseFixedPriceItem`, and comparing what eBay's sanitizer actually
-  keeps vs. strips — the plan's block markup (inline styles only, table-
-  friendly, no JS/external CSS) is deliberately not finalized until this
-  runs. Deferred — needs Fei to pick the sacrificial listing.
+- ~~**Description-nav milestone 4 (sanitizer test).**~~ Done — confirmed
+  by Fei (2026-08-16) that a real test push went live and eBay's
+  sanitizer kept the block markup as designed (inline styles only,
+  table-friendly, no JS/external CSS). The block markup is now
+  considered final, not provisional.
 - **Description-nav milestone 9 (rollout).** Assigning `set_id` /
   `finish_kind` / `family_label` / `nav_rank` / `is_set_primary` across
   Fei's real templates, running `--ebay-backfill-nav-images`, adding nav
   tokens family by family, and pushing era by era via
-  `--ebay-sync-descriptions`. Blocked behind milestone 4 (block markup
-  isn't finalized yet) — deferred until then.
+  `--ebay-sync-descriptions`. No longer blocked (milestone 4 confirmed
+  2026-08-16) — still not started, just unblocked.
 - **`--ebay-backfill-nav-images` variation-photo fix.** Confirmed real
   (8/08): both Pitch Black templates (Common + Reverse Holo - Ultra Rare,
   distinct `listing_id`s) got the identical `nav_image_url`. Root cause:
@@ -2160,6 +2154,23 @@ empty strings.
   `style` sanitizer hardening) shipped as the seeded default look, with
   per-shop/listing-group theme scoping (`description_theme_settings.
   theme_key`, migration 028) on top.
+- **Reconcile existing live variations after the `{set_total}`/
+  `{number:pad}` fixes (migrations 037-039).** Both fixes only apply
+  going forward — a card promoted onto an already-live listing before
+  the fix keeps its old denominator/padding forever unless manually
+  fixed. No reconciliation pass was requested when this was flagged
+  (2026-08-16) — deferred, not scoped.
+- **"Scarlet & Violet Energies" `total_cards` data mismatch.** DB says
+  16 cards, the PokemonTCG API (`sve`) says 8 — large enough gap it's
+  not just an off-by-one. Left unresolved (2026-08-16); `base_set_number`
+  is still NULL for this set as a result. Needs manual investigation,
+  not a batch fix.
+- **3 sets with no PokemonTCG API match at all** (`Mega Evolution Black
+  Star Promos`, `Mega Evolution Energies`, `McDonald's 2023 Match &
+  Battle`) — tried both `set_code` and name-based lookup (2026-08-16),
+  neither resolved. `base_set_number`/`total_cards` stay NULL; these are
+  likely promo/energy grab-bags without a real "base set" concept rather
+  than a lookup bug.
 
 ### Generic advanced card search + batch-add-to-roster (2026-08-16, session 18)
 
