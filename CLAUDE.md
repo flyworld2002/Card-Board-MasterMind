@@ -183,9 +183,23 @@ part of any build output.
 
 ## Current priorities / TODO
 
-- Market-price refresh command hitting the Pokemon TCG API for existing
-  inventory — still deciding whether the CLI trigger should refresh all
-  cards or be scoped per-card/set.
+- Market-price refresh (`importer/market_price_refresh.py`,
+  `refresh_market_prices()`) is built and live — scoped per-set
+  (`set_name`) or per-single-card (`card_id`), exposed via the web app's
+  Jobs page (`POST /api/jobs/market-price-refresh` in `picking_api.py`).
+  **Backlog, not started**: a "refresh market price" button on the
+  Listing Pricing page (`card-board-mastermind-WebInvManagement/listing-pricing.js`)
+  for a specific listing's roster. Fei's explicit requirement (2026-08-16):
+  needs to update **only the cards picked within that listing**, not the
+  whole set(s) the roster happens to span — a listing's roster can cross
+  multiple sets (e.g. a themed listing spanning a whole era), so
+  looping the existing per-set refresh isn't sufficient; that would
+  touch cards outside the listing too. Needs `refresh_market_prices()`/
+  `_cards_needing_refresh()` extended with an explicit `card_ids: list[str]`
+  scoping path (today only `set_name` XOR `card_id`), then a UI reusing
+  the roster table's existing bulk-selection pattern (`state.selected`,
+  already used for bulk-group-assign/bulk-sync/bulk-delete) to pick
+  which cards to refresh.
 - "Pending shipment" feature: pull paid-but-unshipped eBay orders for a
   pick/pack workflow.
 - Next architecture decision: auto-refreshing inventory as eBay orders
