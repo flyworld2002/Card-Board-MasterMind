@@ -32,6 +32,7 @@ from importer.ebay_variations_xml import (
     fetch_item, add_variation_row, insert_specifics_value, set_variation_picture,
 )
 from importer.ebay_listing_sync import _render_variation_name
+from importer.card_photos import resolve_photo_urls
 
 REQUIRED_METADATA_FIELDS = [
     "category_id", "title", "description_html", "item_location",
@@ -443,8 +444,9 @@ def create_listing(template_id: str, account_num: int = 1, platform: str = "ebay
         # Pictures only after every add_variation_row() call, one pass —
         # same rule set_variation_picture()'s docstring requires.
         for r in ready:
-            if r["eps_picture_url"]:
-                set_variation_picture(variations, r["_promoted_name"], r["eps_picture_url"])
+            photo_urls = resolve_photo_urls(cur, r)
+            if photo_urls:
+                set_variation_picture(variations, r["_promoted_name"], photo_urls)
 
         total_qty = sum(r["available_qty"] for r in ready)
         min_price = min(float(r["resolved_price"]) for r in ready)

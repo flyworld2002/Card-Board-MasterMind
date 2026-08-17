@@ -2318,6 +2318,74 @@ explicitly preserves it across that refresh and toggles the Fill
 button's visibility inline, so Fill/clear both behave correctly without
 a full page reload.
 
+**Per-copy photo library — card_photos/card_photo_details (2026-08-17)**:
+revives a design Fei confirmed 2026-08-02 but never built. Prompted by a
+gap Fei surfaced while discussing the nav-image backfill bug: adding the
+same `card_variants` row to a second listing gave that roster row no
+picture and no awareness a picture already existed for that exact
+variant elsewhere — staging always did a fresh EPS upload.
+
+**Corrected from the 2026-08-02 note**: photo groups scope to
+`card_variants.id`, not `card_master.id` — confirmed with Fei, since a
+holo and reverse-holo print of the same card look physically different
+and shouldn't share one photo pool. Multiple `card_photos` rows under
+one `variant_id` represent multiple physical copies of that *same*
+print (Fei photographs pricy cards front+back and holds multiple copies
+at once — the Balance Qty feature already assumes this).
+
+Schema (migration 041): `card_photos` (header — `variant_id`,
+`front_eps_url`, `label`, `has_additional`, `source_finish_kind`,
+`created_at`) + `card_photo_details` (detail rows — `card_photo_id`,
+`eps_url`, `label`, `sort_order`). Both RLS'd per convention.
+`listing_card_assignments.card_photo_id` — new nullable FK, additive
+alongside the legacy `eps_picture_url` (kept, not migrated) — resolved
+via `resolve_photo_urls()` (`importer/card_photos.py`): `card_photo_id`'s
+group wins if set, else the legacy column, else nothing. All 3 push call
+sites (`create_listing()`, `_do_promotions()`, `push_single_card_live()`)
+switched to it.
+
+**First draft of this plan put photo-picking only in the roster table's
+per-row thumbnail — Fei corrected this**: it needed to be an **auto-
+default at add-time**, not a separate later step. `openAddCardModal`
+(single-add) and `openBatchAddModal` (bulk insert) now call
+`default_card_photo_id()`/`default_card_photo_ids()` (migration
+041/043) right before inserting — if the variant already has an
+existing photo group, it's assigned immediately, zero clicks, zero new
+EPS upload, regardless of which listing it's being added to. Still
+always changeable afterward via the roster thumbnail (now "Manage
+photos" instead of "Stage picture").
+
+**Default-priority when multiple groups exist for one variant** (Fei
+confirmed, after a second clarifying round): prefer a group sourced from
+a listing whose `finish_kind` matches the *target* listing's
+`finish_kind`, falling back to most-recently-created. Interpreted as
+*context matching* (reverse-holo-listing photos preferred when adding to
+a reverse-holo listing) rather than one hardcoded "always prefer reverse
+holo" rule — flagged this interpretation explicitly to Fei in case the
+literal fixed-rule reading was meant instead; easy to swap the RPC's
+`ORDER BY` if so. Verified directly: finish_kind match beats a more-recent
+non-match, most-recent wins when nothing matches.
+
+Real gap fixed while building this: `set_variation_picture()`
+(`ebay_variations_xml.py`) previously wrote exactly **one** `<PictureURL>`
+per variation (found-or-created a single entry, overwrote it) — eBay's
+Trading API supports multiple entries per `VariationSpecificPictureSet`,
+this codebase just never exercised it before front+back photos existed
+as a concept. Now accepts an ordered list and replaces every existing
+`<PictureURL>` for that variation on each call (verified against a
+constructed XML tree: multi-URL write, restage-replaces-not-accumulates,
+empty-list no-op, and correct element order all confirmed).
+
+Also required extending `resolve_listing_prices()` twice more this
+session (migrations 040 already done, then 042 for `card_photo_id`) —
+same `DROP FUNCTION` requirement as before, `CREATE OR REPLACE` still
+refuses any output-column change to a `RETURNS TABLE` function no matter
+where the new column goes.
+
+Not done: no browser tool available, so the "Manage photos" modal and
+the auto-default-on-add behavior are reviewed by re-reading the code,
+not clicked through.
+
 **Available/total inventory in the roster table (2026-08-16, same
 session)**: Fei wants to see "0/total" for a card's available quantity
 so a card that's fully claimed by other listings (`available_qty=0`)

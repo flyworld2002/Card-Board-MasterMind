@@ -37,6 +37,7 @@ from importer.ebay_listing_sync import (
     platform_sync_allowed, _render_variation_name, _compute_insert_position,
 )
 from importer.ebay_pictures import upload_picture_from_url, upload_picture_bytes
+from importer.card_photos import resolve_photo_urls
 
 
 def _resolve_template(cur, platform: str, listing_id: str):
@@ -256,6 +257,7 @@ def _stage_promotion(cur, template, platform: str, listing_id: str, promote, pro
         "qty_to_push": qty_to_push,
         "position": position,
         "eps_picture_url": promote.get("eps_picture_url"),
+        "card_photo_id": promote.get("card_photo_id"),
     }
     return promotion, pending_writes
 
@@ -280,7 +282,8 @@ def _do_promotions(cur, template, platform: str, listing_id: str, account_num: i
             print(msg)
 
     cur.execute(
-        "SELECT id, variant_id, priority_rank, custom_name, eps_picture_url FROM listing_card_assignments "
+        "SELECT id, variant_id, priority_rank, custom_name, eps_picture_url, card_photo_id "
+        "FROM listing_card_assignments "
         "WHERE template_id = %s AND status = 'queued' ORDER BY priority_rank ASC",
         (template["id"],),
     )
@@ -386,8 +389,9 @@ def _do_promotions(cur, template, platform: str, listing_id: str, account_num: i
     # <Pictures> to land after every <Variation> element, and this
     # function may have staged several promotions above.
     for promotion in promotions:
-        if promotion["eps_picture_url"]:
-            set_variation_picture(variations, promotion["external_id"], promotion["eps_picture_url"])
+        photo_urls = resolve_photo_urls(cur, promotion)
+        if photo_urls:
+            set_variation_picture(variations, promotion["external_id"], photo_urls)
 
     return promotions, pending_writes
 
@@ -569,7 +573,7 @@ def push_single_card_live(row_id: str, account_num: int = 1, platform: str = "eb
 
     with db_cursor() as cur:
         cur.execute(
-            "SELECT lca.id, lca.variant_id, lca.status, lca.custom_name, lca.eps_picture_url, "
+            "SELECT lca.id, lca.variant_id, lca.status, lca.custom_name, lca.eps_picture_url, lca.card_photo_id, "
             "lt.platform, lt.listing_id "
             "FROM listing_card_assignments lca "
             "JOIN listing_templates lt ON lt.id = lca.template_id "
@@ -647,12 +651,13 @@ def push_single_card_live(row_id: str, account_num: int = 1, platform: str = "eb
         promotion, pending_writes = _stage_promotion(
             cur, template, row_platform, listing_id,
             {"id": row_id, "variant_id": roster_row["variant_id"], "custom_name": roster_row["custom_name"],
-             "eps_picture_url": roster_row["eps_picture_url"]},
+             "eps_picture_url": roster_row["eps_picture_url"], "card_photo_id": roster_row["card_photo_id"]},
             promoted_resolved, variations, specific_name,
             template.get("display_sort") or "card_number", account,
         )
-        if promotion["eps_picture_url"]:
-            set_variation_picture(variations, promotion["external_id"], promotion["eps_picture_url"])
+        photo_urls = resolve_photo_urls(cur, promotion)
+        if photo_urls:
+            set_variation_picture(variations, promotion["external_id"], photo_urls)
 
         if dry_run:
             p(f"[DRY-RUN] would push {promotion['external_id']!r} live on {listing_id}: "

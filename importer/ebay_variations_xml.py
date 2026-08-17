@@ -266,13 +266,22 @@ def insert_specifics_value(variations: ET.Element, specific_name: str,
 # Building the Revise request
 # ══════════════════════════════════════════════════════════════════════════════
 
-def set_variation_picture(variations: ET.Element, specific_value: str, picture_url: str) -> None:
+def set_variation_picture(variations: ET.Element, specific_value: str, picture_urls: list[str]) -> None:
     """
     Add or update the <VariationSpecificPictureSet> entry (inside
-    <Variations><Pictures>) for one VariationSpecificValue — `picture_url`
-    must already be an eBay-hosted URL (EPS's UploadSiteHostedPictures
-    FullURL, see importer/ebay_pictures.py) — eBay's Trading API does not
-    accept an arbitrary external URL here, only its own hosted ones.
+    <Variations><Pictures>) for one VariationSpecificValue with an
+    ORDERED list of <PictureURL> entries (front first, then any
+    additional photos — see resolve_photo_urls() in
+    importer/card_photos.py, migration 041). Every URL must already be
+    eBay-hosted (EPS's UploadSiteHostedPictures FullURL, see
+    importer/ebay_pictures.py) — eBay's Trading API does not accept an
+    arbitrary external URL here, only its own hosted ones.
+
+    Replaces every existing <PictureURL> for this variation with the new
+    list on each call — same "restage overwrites" semantics the old
+    single-URL version had, just generalized to N URLs, not additive
+    across repeated calls. No-ops if picture_urls is empty (leaves
+    whatever, if anything, was already there untouched).
 
     Creates <Pictures> (and its <VariationSpecificName>, inferred from
     VariationSpecificsSet) if the listing has no per-variation pictures
@@ -286,6 +295,9 @@ def set_variation_picture(variations: ET.Element, specific_value: str, picture_u
     promotions first, then applies pictures in one pass at the end, for
     exactly this reason.)
     """
+    if not picture_urls:
+        return
+
     pictures_node = _find(variations, "Pictures")
     if pictures_node is None:
         pictures_node = ET.SubElement(variations, f"{{{NS}}}Pictures")
@@ -297,19 +309,23 @@ def set_variation_picture(variations: ET.Element, specific_value: str, picture_u
             name_el = ET.SubElement(pictures_node, f"{{{NS}}}VariationSpecificName")
             name_el.text = specific_name
 
+    target_vsp = None
     for vsp in _findall(pictures_node, "VariationSpecificPictureSet"):
         if _text(vsp, "VariationSpecificValue") == specific_value:
-            pic_url_el = _find(vsp, "PictureURL")
-            if pic_url_el is None:
-                pic_url_el = ET.SubElement(vsp, f"{{{NS}}}PictureURL")
-            pic_url_el.text = picture_url
-            return
+            target_vsp = vsp
+            break
 
-    vsp = ET.SubElement(pictures_node, f"{{{NS}}}VariationSpecificPictureSet")
-    val_el = ET.SubElement(vsp, f"{{{NS}}}VariationSpecificValue")
-    val_el.text = specific_value
-    pic_url_el = ET.SubElement(vsp, f"{{{NS}}}PictureURL")
-    pic_url_el.text = picture_url
+    if target_vsp is None:
+        target_vsp = ET.SubElement(pictures_node, f"{{{NS}}}VariationSpecificPictureSet")
+        val_el = ET.SubElement(target_vsp, f"{{{NS}}}VariationSpecificValue")
+        val_el.text = specific_value
+    else:
+        for existing_url_el in _findall(target_vsp, "PictureURL"):
+            target_vsp.remove(existing_url_el)
+
+    for url in picture_urls:
+        pic_url_el = ET.SubElement(target_vsp, f"{{{NS}}}PictureURL")
+        pic_url_el.text = url
 
 
 def build_revise_xml(item_id: str, variations: ET.Element,

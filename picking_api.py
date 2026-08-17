@@ -82,6 +82,7 @@ from importer.ebay_descriptions import (
 from importer.job_runner import start_job, get_job, list_jobs
 from importer.market_price_refresh import refresh_market_prices
 from importer.excel_staging import import_from_excel
+from importer.card_photos import list_card_photos, create_card_photo, assign_card_photo
 
 load_dotenv()
 
@@ -168,6 +169,25 @@ class StageNavImageRequest(BaseModel):
     template_id: str
     image_url: str
     account_num: int = 1
+
+
+class CardPhotoDetailInput(BaseModel):
+    source_url: str
+    label: str | None = None
+
+
+class CreateCardPhotoRequest(BaseModel):
+    variant_id: str
+    front_source_url: str
+    label: str | None = None
+    additional: list[CardPhotoDetailInput] = []
+    source_finish_kind: str | None = None
+    account_num: int = 1
+
+
+class AssignCardPhotoRequest(BaseModel):
+    row_id: str
+    card_photo_id: str
 
 
 class ReviseQtyRequest(BaseModel):
@@ -394,6 +414,94 @@ async def stage_card_picture_file_endpoint(
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"picture upload failed: {e}")
 
+    return result
+
+
+@app.get("/api/card-photos/{variant_id}")
+def list_card_photos_endpoint(variant_id: str, x_picking_token: str = Header(default="")):
+    """
+    Every existing photo group for one card_variants row (migration 041) —
+    what the "Manage photos" modal offers to reuse instead of uploading
+    again. Pure read, no lock needed.
+    """
+    if x_picking_token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="bad token")
+    return {"variant_id": variant_id, "photos": list_card_photos(variant_id)}
+
+
+@app.post("/api/card-photos")
+def create_card_photo_endpoint(body: CreateCardPhotoRequest, x_picking_token: str = Header(default="")):
+    """
+    Uploads the front photo (+ every photo in body.additional) to EPS and
+    creates a new card_photos group — same "shouldn't queue behind other
+    actions" reasoning as /api/stage-card-picture, reuses its lock since
+    this is the same class of action (an EPS upload).
+    """
+    if x_picking_token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="bad token")
+
+    with _stage_picture_lock:
+        result = create_card_photo(
+            variant_id=body.variant_id,
+            front_source_url=body.front_source_url,
+            label=body.label,
+            additional=[{"source_url": d.source_url, "label": d.label} for d in body.additional],
+            source_finish_kind=body.source_finish_kind,
+            account_num=body.account_num,
+        )
+    if not result.get("created"):
+        raise HTTPException(status_code=502, detail=result.get("error", "photo group creation failed"))
+    return result
+
+
+@app.post("/api/card-photos-file")
+async def create_card_photo_file_endpoint(
+    variant_id: str = Form(...),
+    label: str = Form(None),
+    source_finish_kind: str = Form(None),
+    account_num: int = Form(1),
+    file: UploadFile = File(...),
+    x_picking_token: str = Header(default=""),
+):
+    """
+    Same as /api/card-photos but for a directly-uploaded front photo file
+    instead of a URL (mirrors the /api/stage-card-picture vs
+    /api/stage-card-picture-file split, for the same reason — FastAPI
+    can't mix a JSON body with multipart Form/File on one endpoint).
+    Front-photo-only: additional photos still go through /api/card-photos
+    (or a follow-up call) via URL — keeping this endpoint's multipart
+    shape simple rather than accepting an arbitrary number of files here.
+    """
+    if x_picking_token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="bad token")
+
+    image_bytes = await file.read()
+
+    with _stage_picture_lock:
+        result = create_card_photo(
+            variant_id=variant_id,
+            front_bytes=image_bytes,
+            front_filename=file.filename or "card.jpg",
+            label=label,
+            source_finish_kind=source_finish_kind,
+            account_num=account_num,
+        )
+    if not result.get("created"):
+        raise HTTPException(status_code=502, detail=result.get("error", "photo group creation failed"))
+    return result
+
+
+@app.post("/api/assign-card-photo")
+def assign_card_photo_endpoint(body: AssignCardPhotoRequest, x_picking_token: str = Header(default="")):
+    """
+    Points a queued roster row at an existing card_photos group — no EPS
+    call at all, so no lock needed (a plain, fast single-row update)."""
+    if x_picking_token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="bad token")
+
+    result = assign_card_photo(row_id=body.row_id, card_photo_id=body.card_photo_id)
+    if not result.get("assigned"):
+        raise HTTPException(status_code=400, detail=result.get("error", "assignment failed"))
     return result
 
 
