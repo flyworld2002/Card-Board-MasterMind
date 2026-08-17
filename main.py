@@ -475,6 +475,19 @@ def cmd_ebay_backfill_nav_images(args):
         for e in result["errors"]:
             print(f"  {e['template_id']}: {e['error']}")
 
+def cmd_ebay_backfill_card_photos(args):
+    from importer.card_photos import backfill_card_photos_from_ebay
+    result = backfill_card_photos_from_ebay(account_num=args.account, listing_id=args.listing_id,
+                                             force=args.force, dry_run=args.dry_run)
+    label = "Would fill" if args.dry_run else "Filled"
+    print(f"Listings fetched: {result['listings_fetched']} / {result['listings_total']}")
+    print(f"{label}: {len(result['filled'])}")
+    print(f"Skipped (no VariationSpecificPictureSet match): {len(result['skipped_no_match'])}")
+    if result["errors"]:
+        print(f"Errors: {len(result['errors'])}")
+        for e in result["errors"]:
+            print(f"  {e['listing_id']} ({e['row_id']}): {e['error']}")
+
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main():
@@ -657,6 +670,17 @@ def main():
              "(migration 020), re-runnable (only fills NULLs). --force "
              "re-fetches and overwrites every live template's nav_image_url "
              "regardless. See docs/plans/listing-pricing-system.md.")
+    group.add_argument("--ebay-backfill-card-photos", action="store_true",
+        help="For every active roster row with no card_photo_id, fetches "
+             "its listing's VariationSpecificPictureSet via GetItem (one "
+             "call per unique listing, not per card) and seeds a "
+             "card_photos row from the picture already live on eBay for "
+             "that exact variation — one-time backfill for the per-copy "
+             "photo library (card_photos, migration 041), re-runnable "
+             "(only fills NULLs). --force re-derives and overwrites every "
+             "active row's card_photo_id regardless. --listing-id scopes "
+             "to one eBay listing. --dry-run reads and matches but writes "
+             "nothing. See docs/plans/listing-pricing-system.md.")
 
     # ── Shared optional flags ─────────────────────────────────────────────────
     parser.add_argument("--dry-run", action="store_true",
@@ -821,5 +845,7 @@ def main():
         cmd_ebay_sync_descriptions(args)
     elif args.ebay_backfill_nav_images:
         cmd_ebay_backfill_nav_images(args)
+    elif args.ebay_backfill_card_photos:
+        cmd_ebay_backfill_card_photos(args)
 if __name__ == "__main__":
     main()

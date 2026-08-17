@@ -233,6 +233,22 @@ def get_or_create_variant(card_id: str,
 
     Returns variant UUID.
     """
+    # All seven axes are FK-constrained against lookup tables whose codes
+    # are always lowercase_snake_case (foil_types, foil_patterns, textures,
+    # materials, sizes, stamp_types, source_types) — but callers (manual
+    # --review free-text corrections, importers) aren't guaranteed to send
+    # matching case. Postgres FK checks are case-sensitive, so e.g.
+    # 'Non_holo' vs 'non_holo' fails with a foreign key violation instead
+    # of matching. Normalize here, the single chokepoint every variant
+    # write goes through, rather than at each call site.
+    foil_type    = foil_type.lower()    if foil_type    else foil_type
+    foil_pattern = foil_pattern.lower() if foil_pattern else foil_pattern
+    texture      = texture.lower()      if texture      else texture
+    material     = material.lower()     if material     else material
+    size         = size.lower()         if size         else size
+    stamp_type   = stamp_type.lower()   if stamp_type   else stamp_type
+    source_type  = source_type.lower()  if source_type  else source_type
+
     with db_cursor() as cur:
         cur.execute("""
             SELECT id FROM card_variants

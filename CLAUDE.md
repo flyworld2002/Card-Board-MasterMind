@@ -200,24 +200,19 @@ part of any build output.
   the roster table's existing bulk-selection pattern (`state.selected`,
   already used for bulk-group-assign/bulk-sync/bulk-delete) to pick
   which cards to refresh.
-- **Per-copy photo library needs a backfill for already-live cards**
-  (`card_photos`/`card_photo_details`, `importer/card_photos.py`, added
-  2026-08-17). Confirmed live (2026-08-17): 9,470 `listing_card_assignments`
-  rows are `status='active'` (already live on eBay, almost certainly with
-  real pictures attached), but only 1 row ever went through this app's
-  picture-staging flow and `card_photos` has 0 rows — meaning virtually
-  every existing live picture was attached directly through eBay's own
-  tools, outside anything this codebase ever tracked. The new "Manage
-  photos" UI (`listing-pricing.js`) only offers photos staged *through
-  it* going forward, so it shows "No existing photos" for cards that
-  visibly already have one live on eBay. **Not started**: a backfill
-  that calls `GetItem` per already-active card, pulls the real photo URL
-  from `Variations/Pictures/VariationSpecificPictureSet` for that
-  specific variation (same XML shape/read pattern as the
-  `--ebay-backfill-nav-images` fix below, but scoped per-card instead of
-  per-template, and against ~9,470 rows instead of ~54 templates), and
-  seeds a `card_photos` row from it so those pictures become reusable
-  the next time that same card gets added to a different listing.
+- ~~Per-copy photo library needs a backfill for already-live cards~~ —
+  **done 2026-08-17**. `--ebay-backfill-card-photos` (`main.py`,
+  `importer.card_photos.backfill_card_photos_from_ebay()`) fetches
+  `Variations/Pictures/VariationSpecificPictureSet` via one `GetItem`
+  call per unique live listing (grouped, not per-card — 65 unique
+  listings backed all active roster rows), matches each entry's
+  `VariationSpecificValue` against `platform_listings.external_id`, and
+  seeds a `card_photos` row from the real, already-live picture URL.
+  Re-runnable (`--dry-run`, `--force`, `--listing-id` supported). Ran
+  against every `status IN ('active', 'out_of_stock')` roster row —
+  9,467 of 9,472 filled (99.9%); the remaining 5 genuinely have no
+  `VariationSpecificPictureSet` entry on eBay at all (no picture was
+  ever attached to that exact live variation), not a backfill gap.
 - "Pending shipment" feature: pull paid-but-unshipped eBay orders for a
   pick/pack workflow.
 - Next architecture decision: auto-refreshing inventory as eBay orders

@@ -2171,22 +2171,41 @@ empty strings.
   neither resolved. `base_set_number`/`total_cards` stay NULL; these are
   likely promo/energy grab-bags without a real "base set" concept rather
   than a lookup bug.
-- **Per-copy photo library needs a backfill for already-live cards.**
-  Confirmed live (2026-08-17): 9,470 `listing_card_assignments` rows are
-  `status='active'` — already live on eBay, almost certainly with real
-  pictures attached — but only 1 row ever went through this app's
-  picture-staging flow, and `card_photos` (added 2026-08-17, same
-  session as the per-copy library itself — see above) has 0 rows. Every
-  existing live picture was attached directly through eBay's own tools,
-  outside anything this codebase tracked, so the new "Manage photos" UI
-  shows "No existing photos" for cards that visibly already have one.
-  Fei caught this immediately after the feature shipped. Needs the same
-  fix class as the `--ebay-backfill-nav-images` item above — call
-  `GetItem` per already-active card, pull the real photo URL from
-  `Variations/Pictures/VariationSpecificPictureSet` for that specific
-  variation, seed a `card_photos` row from it — but scoped per-card
-  against ~9,470 rows instead of per-template against ~54. Not started;
-  Fei hasn't confirmed he wants it built yet, only that it's real.
+- ~~Per-copy photo library needs a backfill for already-live cards.~~
+  **Done 2026-08-17**, same session it was flagged. Fei confirmed he
+  wanted it built ("For this, I need to prefil the images from ebay")
+  right after asking what the fix would look like. Built
+  `backfill_card_photos_from_ebay()` (`importer/card_photos.py`), wired
+  to `main.py --ebay-backfill-card-photos` (`--dry-run`/`--force`/
+  `--listing-id`, same shape as `--ebay-backfill-nav-images`). Rows
+  grouped by listing_id so ONE `GetItem` call covers every active roster
+  row on that listing (65 unique listings backed all active rows, not
+  9,470+ separate calls) — matches
+  `Variations/Pictures/VariationSpecificPictureSet` entries by
+  `VariationSpecificValue` against `platform_listings.external_id`,
+  seeds a `card_photos` row from the real live URL, reuses an existing
+  group instead of duplicating when a variant is active on more than one
+  listing. **Bug caught mid-run**: the query's first cut joined
+  `platform_listings.template_id` to `listing_templates.id` to fetch
+  `finish_kind` for `source_finish_kind` — but `template_id` is NULL on
+  almost every real `platform_listings` row (only ever set for a
+  handful pushed a specific way), so the join silently dropped ~99.98%
+  of rows (2 out of 9,245 survived). Fixed by joining
+  `listing_templates.listing_id = platform_listings.listing_id` (the
+  eBay item ID) instead — every active row actually has that. Second
+  bug caught after the first full run reported "done": scoped to
+  `platform_listings.status = 'active'` only, silently missing 227 rows
+  sitting in `status = 'out_of_stock'` — confirmed that's "still live on
+  eBay, qty 0" not "removed" (see the "self-heal status" commit),
+  widened to `status IN ('active', 'out_of_stock')` and re-ran for just
+  the gap. **Final result: 9,467 of 9,472 active roster rows (99.9%)
+  now have `card_photo_id` set from a real already-live picture.** The
+  remaining 5 (2x Stellar Crown #76, Crown Zenith #48, Ascended Heroes
+  #141, +1) have no `VariationSpecificPictureSet` entry on eBay at
+  all — genuinely no picture was ever attached to that exact live
+  variation, not a backfill gap; they need a fresh photo staged like
+  any newly-added card. Re-runnable going forward as new listings go
+  live and pictures get attached outside this app again.
 
 ### Generic advanced card search + batch-add-to-roster (2026-08-16, session 18)
 
