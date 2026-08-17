@@ -2171,6 +2171,22 @@ empty strings.
   neither resolved. `base_set_number`/`total_cards` stay NULL; these are
   likely promo/energy grab-bags without a real "base set" concept rather
   than a lookup bug.
+- **Per-copy photo library needs a backfill for already-live cards.**
+  Confirmed live (2026-08-17): 9,470 `listing_card_assignments` rows are
+  `status='active'` — already live on eBay, almost certainly with real
+  pictures attached — but only 1 row ever went through this app's
+  picture-staging flow, and `card_photos` (added 2026-08-17, same
+  session as the per-copy library itself — see above) has 0 rows. Every
+  existing live picture was attached directly through eBay's own tools,
+  outside anything this codebase tracked, so the new "Manage photos" UI
+  shows "No existing photos" for cards that visibly already have one.
+  Fei caught this immediately after the feature shipped. Needs the same
+  fix class as the `--ebay-backfill-nav-images` item above — call
+  `GetItem` per already-active card, pull the real photo URL from
+  `Variations/Pictures/VariationSpecificPictureSet` for that specific
+  variation, seed a `card_photos` row from it — but scoped per-card
+  against ~9,470 rows instead of per-template against ~54. Not started;
+  Fei hasn't confirmed he wants it built yet, only that it's real.
 
 ### Generic advanced card search + batch-add-to-roster (2026-08-16, session 18)
 
