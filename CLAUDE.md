@@ -321,6 +321,28 @@ part of any build output.
   variation text no longer matches anything live on eBay at all, a
   pre-existing rename-artifact issue, not something a quantity backfill
   can fix).
+- **Stale external_id text needs manual reconcile — Stellar Crown #76**
+  (Fei to pick up 2026-08-19). `card_master` calls this card
+  "Rhyperior" (#76, Stellar Crown), but the LIVE eBay variation text on
+  two listings still says "Rhyhorn"/"Rhydon" — an old name that no
+  longer matches anything actually live, so a real quantity can't be
+  read for these rows (same class of issue as the "needs manual
+  reconcile in Seller Hub" cases this codebase already flags
+  elsewhere). Affected rows:
+  - `335569556534` (Stellar Crown Common, `non_holo`): `external_id =
+    '076/142 Rhyhorn Holo'`, `variant_id = 978efac2-d63d-461c-b8d2-9c2c2e139ef6`
+  - `335570034662` (Stellar Crown Reverse Holo, `reverse_holo`):
+    - `external_id = '076/142 Rhyhorn Holo'`, same `variant_id =
+      978efac2-d63d-461c-b8d2-9c2c2e139ef6` as above
+    - `external_id = '076/142 Rhydon Reverse Holo RH'`, `variant_id =
+      c52727f0-788d-4d5c-ba8c-7daad0338dc0`
+  Needs checking in Seller Hub what these 2 variations are ACTUALLY
+  called on eBay right now, then either fixing the live eBay text to
+  match "Rhyperior" or updating `platform_listings.external_id` here
+  to match whatever eBay actually shows — whichever is the intended
+  fix. Once `external_id` is correct again, the `quantity_listed`
+  backfill (`fetch_item_variations()` + match by `external_id`, see
+  above) will pick these up cleanly on a re-run.
 - "Pending shipment" feature: pull paid-but-unshipped eBay orders for a
   pick/pack workflow.
 - Next architecture decision: auto-refreshing inventory as eBay orders
