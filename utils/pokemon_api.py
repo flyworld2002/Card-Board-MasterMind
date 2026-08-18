@@ -219,6 +219,28 @@ def search_cards(name: str, set_name: str = None, set_code: str = None,
 # eBay import: auto-match a parsed variation to card_master
 # ----------------------------------------------------------------
 
+# Rarities that only ever print holo — eBay variation text/parse_variation_name()
+# often has no visual cue for these (e.g. a secret rare like "111/086 Prism
+# Tower" has no "Holo"/"RH" in its name), so a caller passing foil_type=None
+# or the parser's non_holo default would otherwise create/match the WRONG
+# (non_holo) card_variants row for a card that never actually prints non-holo.
+# Applied here, inside the one shared lookup function, rather than by each
+# caller separately — a caller-side version of this same check already
+# existed in importer/ebay.py's write_to_staging() but ran AFTER
+# get_or_create_variant() had already resolved the (wrong) variant_id, so it
+# only ever corrected the staging.foil_type display column, not the real
+# variant. Real incident: importer/ebay_pushprices.py's
+# adopt_untracked_live_variations() (2026-08-17) has no staging/review step
+# to catch that downstream, so 10 Illustration Rare/Ultra Rare cards got
+# wrongly created as non_holo variants on first use.
+HOLO_RARITIES = {
+    'Rare Holo', 'Rare Holo V', 'Rare Holo VMAX', 'Rare Holo VSTAR',
+    'Double Rare', 'Ultra Rare', 'Illustration Rare',
+    'Special Illustration Rare', 'Hyper Rare', 'ACE SPEC Rare',
+    'Rare Holo EX', 'Rare Holo GX', 'Rare Holo LV.X',
+}
+
+
 def lookup_card_for_ebay(card_name: str, card_number: str,
                          set_name: str,
                          foil_type: str = None,
@@ -310,6 +332,9 @@ def lookup_card_for_ebay(card_name: str, card_number: str,
                 result["image_url"] = row.get("image_url")
                 print(f"    + Found in local DB — skipping API lookup: "
                       f"{row['name']} #{row.get('card_number')} ({set_name})")
+
+                if result["rarity"] in HOLO_RARITIES and foil_type in (None, "non_holo"):
+                    foil_type = "holo"
 
                 try:
                     variant_id = get_or_create_variant(
@@ -438,6 +463,9 @@ def lookup_card_for_ebay(card_name: str, card_number: str,
             return result
 
     # ── Step 4: Get or create card_variant (seven-axis model) ────────────────
+    if result["rarity"] in HOLO_RARITIES and foil_type in (None, "non_holo"):
+        foil_type = "holo"
+
     try:
         variant_id = get_or_create_variant(
             card_id      = result["card_id"],

@@ -2267,6 +2267,43 @@ empty strings.
   `--listing-id`; no `--all` sweep built since Fei wants to gate this
   one listing-by-listing rather than batch it blindly given the scale
   (51 listings, likely 500+ untracked variations total).
+  **Real bug found reviewing the test listing, fixed same session**:
+  Fei caught it directly — "Illustration Rare needs to be holo, not
+  non-holo. Ultra rare needs to be holo as well." 10 of the 20 adopted
+  cards got created as `non_holo` variants despite being rarities that
+  only ever print holo (secret rares like `111/086 Prism Tower` have no
+  "Holo"/"RH" text in their eBay variation name for the parser to key
+  off). Root cause: `write_to_staging()` (`importer/ebay.py`) already
+  had a `HOLO_RARITIES` correction, but it ran AFTER
+  `lookup_card_for_ebay()` had already resolved (and, via
+  `get_or_create_variant()`, possibly created) the variant using the
+  UN-corrected `foil_type` — the correction only ever fixed the
+  `staging.foil_type` display column, never the real `variant_id`,
+  silently papered over until now because staging rows always pass
+  through human `--review` before touching real inventory.
+  `adopt_untracked_live_variations()` has no such review step — it
+  writes directly to an already-`'active'` roster, so the same
+  never-actually-fixed bug became immediately visible instead of
+  silently self-correcting. **Real fix: moved the `HOLO_RARITIES`
+  check INSIDE `lookup_card_for_ebay()` itself** (`utils/pokemon_api.py`),
+  right before each of its two `get_or_create_variant()` call sites (the
+  local-DB-match branch and the API-match branch) — so every caller,
+  not just ones that remember to duplicate the check afterward, gets a
+  correctly-holo variant_id. `importer/ebay.py`'s two pre-existing
+  (now redundant-but-harmless) copies of this same check were left in
+  place — untouched, no regression risk, just no longer load-bearing.
+  Data-fixed the 10 already-wrong live rows by hand: 6 had a pre-existing
+  `holo` sibling variant already in the DB (from other listings) — for
+  those, repointed `listing_card_assignments`/`platform_listings`/
+  `ebay_listing_map`/`card_photos` (`.variant_id`) to the correct
+  existing `holo` row and deleted the wrongly-created `non_holo` orphan
+  after confirming zero remaining references; 4 had no `holo` sibling
+  yet — for those, simply flipped the existing row's `foil_type` in
+  place (safe, since nothing but this run's own new rows referenced it).
+  **Lesson: a "fix" that runs after the wrong value has already created
+  a persisted row isn't a fix, it's a cosmetic patch — trace a
+  correction to before the point where a wrong value gets written to
+  disk, not just before display.**
 
 ### Generic advanced card search + batch-add-to-roster (2026-08-16, session 18)
 
