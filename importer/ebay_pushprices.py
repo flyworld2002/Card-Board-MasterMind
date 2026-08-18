@@ -770,6 +770,93 @@ def remove_single_card_live(row_id: str, account_num: int = 1, platform: str = "
         return {"row_id": row_id, "external_id": external_id, "removed": True, "dry_run": False}
 
 
+def push_card_photo_live(row_id: str, account_num: int = 1, dry_run: bool = False,
+                          quiet: bool = False) -> dict:
+    """
+    Revises ONLY the <VariationSpecificPictureSet> entry for one already-
+    live variation — no other variation's price/qty/picture is touched,
+    and this variation's own price/qty are untouched too. This is the
+    active-row counterpart to assign_card_photo(): reassigning
+    card_photo_id alone only changes what the roster THINKS this card's
+    picture is; nothing reaches eBay until this is called (mirrors how
+    stage_card_picture() for a queued row doesn't go live until
+    push_single_card_live()/promotion picks it up).
+
+    Resolves the picture set from the roster row's CURRENT card_photo_id/
+    eps_picture_url via resolve_photo_urls() — always the live DB state,
+    not a value passed in, so this can't drift from what "Manage photos"
+    last saved.
+    """
+    def p(msg):
+        if not quiet:
+            print(msg)
+
+    with db_cursor() as cur:
+        cur.execute(
+            "SELECT lca.id, lca.platform_listing_id, lca.status, lca.eps_picture_url, lca.card_photo_id, "
+            "lt.platform, lt.listing_id "
+            "FROM listing_card_assignments lca "
+            "JOIN listing_templates lt ON lt.id = lca.template_id "
+            "WHERE lca.id = %s",
+            (row_id,),
+        )
+        roster_row = cur.fetchone()
+        if roster_row is None:
+            return {"row_id": row_id, "pushed": False, "dry_run": dry_run, "error": "no such roster row"}
+        if roster_row["status"] != "active" or not roster_row["platform_listing_id"]:
+            return {"row_id": row_id, "pushed": False, "dry_run": dry_run,
+                     "error": f"row is {roster_row['status']!r}, not 'active' — nothing live to update"}
+
+        listing_id = roster_row["listing_id"]
+        platform_listing_id = roster_row["platform_listing_id"]
+
+        cur.execute(
+            "SELECT external_id FROM platform_listings WHERE id = %s",
+            (platform_listing_id,),
+        )
+        pl_row = cur.fetchone()
+        if pl_row is None or not pl_row["external_id"]:
+            return {"row_id": row_id, "pushed": False, "dry_run": dry_run,
+                     "error": "no external_id on the platform_listings row — can't locate the live variation"}
+        external_id = pl_row["external_id"]
+
+        photo_urls = resolve_photo_urls(cur, roster_row)
+        if not photo_urls:
+            return {"row_id": row_id, "pushed": False, "dry_run": dry_run,
+                     "error": "no card_photo_id or eps_picture_url set on this row — nothing to push"}
+
+        item = fetch_item(listing_id, account_num=account_num)
+        variations_node = _find(item, "Variations")
+        if variations_node is None:
+            return {"row_id": row_id, "pushed": False, "dry_run": dry_run,
+                     "error": "live listing has no <Variations> block — not a multi-variation listing"}
+
+        variations = deep_copy_variations(item)
+        normalize_quantities(variations)
+        strip_selling_status(variations)
+
+        specifics_set = get_specifics_set(variations)
+        specific_name = next(iter(specifics_set), None)
+        var_el = find_variation_by_specifics(variations, specific_name, external_id) if specific_name else None
+        if var_el is None:
+            return {"row_id": row_id, "pushed": False, "dry_run": dry_run,
+                     "error": f"variation {external_id!r} not found live — mismatch, needs manual reconcile in Seller Hub"}
+
+        set_variation_picture(variations, external_id, photo_urls)
+
+        if dry_run:
+            p(f"[DRY-RUN] would push {len(photo_urls)} picture(s) live for {external_id!r} on {listing_id}")
+            return {"row_id": row_id, "external_id": external_id, "photo_urls": photo_urls,
+                     "pushed": False, "dry_run": True}
+
+        xml = build_revise_xml(listing_id, variations, "ReviseFixedPriceItem", account_num=account_num)
+        _post("ReviseFixedPriceItem", xml, account_num=account_num)
+
+        p(f"[{listing_id}] pushed {len(photo_urls)} picture(s) live for {external_id!r}")
+        return {"row_id": row_id, "external_id": external_id, "photo_urls": photo_urls,
+                 "pushed": True, "dry_run": False}
+
+
 def stage_card_picture(row_id: str, source_url: str = None, image_bytes: bytes = None,
                         filename: str = None, account_num: int = 1, quiet: bool = False) -> dict:
     """

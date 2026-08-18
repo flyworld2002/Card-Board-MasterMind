@@ -68,7 +68,7 @@ from pydantic import BaseModel
 from importer.ebay_picking import pull_picking
 from importer.ebay_pushprices import (
     push_prices, push_single_card_live, remove_single_card_live, stage_card_picture,
-    stage_nav_image, revise_single_variation_qty,
+    stage_nav_image, revise_single_variation_qty, push_card_photo_live,
 )
 from importer.ebay_create_listing import (
     list_business_policies, clone_listing_metadata, set_manual_listing_metadata,
@@ -122,6 +122,10 @@ _remove_card_lock = threading.Lock()
 # Same reasoning again — staging a picture (an EPS upload) shouldn't
 # queue behind any of the other actions.
 _stage_picture_lock = threading.Lock()
+
+# Pushing a photo change live for an already-active row is its own
+# Revise call — own lock, same reasoning as _push_card_lock/_remove_card_lock.
+_push_card_photo_lock = threading.Lock()
 
 # Own lock, same reasoning — a nav-image EPS upload is unrelated to
 # per-card picture staging and shouldn't queue behind it.
@@ -188,6 +192,12 @@ class CreateCardPhotoRequest(BaseModel):
 class AssignCardPhotoRequest(BaseModel):
     row_id: str
     card_photo_id: str
+
+
+class PushCardPhotoRequest(BaseModel):
+    row_id: str
+    account_num: int = 1
+    dry_run: bool = False
 
 
 class ReviseQtyRequest(BaseModel):
@@ -502,6 +512,29 @@ def assign_card_photo_endpoint(body: AssignCardPhotoRequest, x_picking_token: st
     result = assign_card_photo(row_id=body.row_id, card_photo_id=body.card_photo_id)
     if not result.get("assigned"):
         raise HTTPException(status_code=400, detail=result.get("error", "assignment failed"))
+    return result
+
+
+@app.post("/api/push-card-photo")
+def push_card_photo_endpoint(body: PushCardPhotoRequest, x_picking_token: str = Header(default="")):
+    """
+    Revises ONLY the picture set for one already-'active' roster row's
+    live variation — reassigning card_photo_id via /api/assign-card-photo
+    alone doesn't touch eBay; this is what actually makes it live. Same
+    auth as the other push endpoints, own lock.
+    """
+    if x_picking_token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="bad token")
+
+    with _push_card_photo_lock:
+        try:
+            result = push_card_photo_live(row_id=body.row_id, account_num=body.account_num,
+                                           dry_run=body.dry_run, quiet=True)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"push failed: {e}")
+
+    if result.get("error"):
+        raise HTTPException(status_code=400, detail=result["error"])
     return result
 
 

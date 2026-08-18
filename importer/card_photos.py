@@ -119,13 +119,14 @@ def create_card_photo(variant_id: str, front_source_url: str = None, front_bytes
 
 
 def assign_card_photo(row_id: str, card_photo_id: str) -> dict:
-    """Points a queued roster row's card_photo_id at an existing group —
-    zero EPS calls, the whole point of this feature. Only for
-    status='queued' rows, matching stage_card_picture()'s existing
-    restriction (an active row has nothing here to restage against).
-    Validates the group actually belongs to this row's variant — picking
-    a photo group from a different variant would silently show the
-    wrong card's picture."""
+    """Points a roster row's card_photo_id at an existing group — zero EPS
+    calls, the whole point of this feature. Allowed for 'queued' rows
+    (rides along automatically on the next promotion push) and 'active'
+    rows (takes effect only once push_card_photo_live() is called for
+    this row — reassigning here alone does not touch the live eBay
+    listing). Validates the group actually belongs to this row's
+    variant — picking a photo group from a different variant would
+    silently show the wrong card's picture."""
     with db_cursor() as cur:
         cur.execute(
             "SELECT id, status, variant_id FROM listing_card_assignments WHERE id = %s", (row_id,)
@@ -133,10 +134,10 @@ def assign_card_photo(row_id: str, card_photo_id: str) -> dict:
         row = cur.fetchone()
         if row is None:
             return {"row_id": row_id, "assigned": False, "error": "no such roster row"}
-        if row["status"] != "queued":
+        if row["status"] not in ("queued", "active"):
             return {"row_id": row_id, "assigned": False,
-                     "error": f"row is {row['status']!r}, not 'queued' — pictures can only be "
-                              f"assigned for queued cards right now"}
+                     "error": f"row is {row['status']!r} — pictures can only be assigned for "
+                              f"'queued' or 'active' cards"}
 
         cur.execute("SELECT variant_id FROM card_photos WHERE id = %s", (card_photo_id,))
         photo = cur.fetchone()

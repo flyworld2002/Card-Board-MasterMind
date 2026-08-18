@@ -2713,3 +2713,99 @@ through — creating the real "Mega Evolution ex" template and using
 "+ Batch add cards" against it live is still Fei's next step, and worth a
 first-use sanity look given the filter panel/evolution-picker/chip UI
 itself was only reviewed by re-reading the code, not exercised.
+
+### 2026-08-18: "Manage photos" opened up to already-active roster rows
+
+Fei reported: cards show a preloaded picture (from the card_photos
+backfill), but clicking one gives no option to pick a different
+existing photo. Root cause: the "Manage photos" modal
+(`openStagePictureModal`) and its backing `assign_card_photo()` were
+built `status='queued'`-only (migration 041's original design) — an
+`'active'` row's thumbnail rendered as a plain static `<img>` with no
+click handler at all, and the backend hard-rejected non-queued rows
+even if the UI had let you try.
+
+Also found, while tracing this: the routine multi-variation push path
+(`push_prices()`'s per-variation branch, driven by `_compute_roster_
+changes()`'s price/qty diff) never called `resolve_photo_urls()` /
+`set_variation_picture()` for an already-changed row — pictures were
+only ever pushed at promotion time (`_do_promotions`) or single-card
+first-push (`push_single_card_live`), both queued→active transitions.
+There was no path at all to revise an already-live variation's picture.
+
+Fix, both sides:
+- `importer/card_photos.py` `assign_card_photo()`: now allows
+  `'active'` in addition to `'queued'`.
+- `importer/ebay_pushprices.py`: new `push_card_photo_live(row_id, ...)`
+  — finds the live `<Variation>` by `external_id`, resolves the row's
+  current `card_photo_id`/`eps_picture_url` via `resolve_photo_urls()`,
+  and Revises ONLY that variation's `<VariationSpecificPictureSet>` —
+  no other variation's price/qty/picture touched, and this variation's
+  own price/qty untouched too. Deliberately its own explicit action
+  (mirrors `push_single_card_live`/`remove_single_card_live`'s
+  precedent), not folded into the routine price/qty push, since a
+  reassigned `card_photo_id` alone gives no reliable "stale" signal to
+  diff against (no last-pushed-photo tracking exists, unlike
+  `pushed_price`/`pushed_qty`).
+- `picking_api.py`: new `/api/push-card-photo` endpoint, own lock, same
+  auth convention as the other push endpoints.
+- `listing-pricing.js`: `rowHTML()`'s thumbnail cell is now clickable
+  for `'active'` rows too (previously `'queued'`-only), reusing the
+  same `thumbInnerHTML()`/`thumbTitle()` (message text now branches on
+  status). `openStagePictureModal()` gained a `pushPhotoLiveIfActive()`
+  step, run right after a pick/upload+assign completes for an active
+  row — an explicit `confirm()` (naming the card, stating only its
+  picture changes) before calling the new endpoint, so reassigning
+  never silently "looks done" while eBay still shows the old picture.
+
+Verified: both edited Python modules import cleanly from the main repo
+path (`push_card_photo_live` present, `picking_api.PushCardPhotoRequest`
+constructible) and the JS file's brace/paren/backtick counts stay
+balanced after the edit. Not verified: no browser tool available, so
+the modal's active-row flow (thumbnail click → pick/upload → confirm →
+live Revise) was never clicked through end-to-end — and the
+`CBMPickingAPI` scheduled task on the desktop needs a restart to pick up
+`picking_api.py`'s new endpoint before this works from the browser at
+all.
+
+Fei then hit exactly the failure mode this predicted: opened the modal
+on a real "ME-EX" queued card and it hung forever on "Loading existing
+photos..." — turned out `CBMPickingAPI` wasn't running at all
+(confirmed via `netstat`/`tasklist`, nothing listening on 8765).
+Restarted it (`schtasks /end` + `/run`), confirmed the port came back
+and the new `/api/push-card-photo` route responds (422 on an empty
+body, i.e. routed and validating, not 404).
+
+That led to a follow-up question worth fixing properly: does browsing/
+picking an EXISTING photo group actually need `picking_api.py` at all?
+No — `list_card_photos()`/`assign_card_photo()` are plain Postgres
+reads/writes with zero eBay dependency (only the real EPS upload and
+the new eBay-Revise photo push genuinely need it); they were just
+routed through `picking_api.py` for consistency with the upload
+endpoints, which is exactly why the whole modal stalled rather than
+degrading gracefully.
+
+**Migration 049** (`docs/plans/listing_pricing_migration_049_assign_
+card_photo_rpc.sql`): new `assign_card_photo(p_row_id uuid,
+p_card_photo_id uuid) RETURNS void` RPC — Postgres-side twin of
+`importer/card_photos.py`'s function of the same name (same validation:
+row exists, status is `'queued'`/`'active'`, photo group's `variant_id`
+matches the row's). Applied live and verified directly against real
+data before touching the UI (project convention): reassigned a real
+active row to its own current `card_photo_id` (success, no exception),
+then confirmed both failure paths raise cleanly — a bogus `row_id`
+("no such roster row") and a real photo group belonging to a different
+variant ("that photo group belongs to a different card variant").
+
+`listing-pricing.js`'s `openStagePictureModal()`: the "existing photos"
+list now queries `card_photos` directly via `supabase.from(...)`
+instead of `GET /api/card-photos/{variant_id}`, and `assignExisting()`
+now calls `supabase.rpc('assign_card_photo', ...)` instead of
+`POST /api/assign-card-photo`. The "+ New photo group" upload path is
+UNCHANGED — still goes through `picking_api.py` (`/api/card-photos`,
+`/api/card-photos-file`, and its own follow-up `/api/assign-card-photo`
+call), since a real EPS upload has no Supabase-only equivalent. Net
+effect: browsing/selecting an already-uploaded photo (and, for an
+active row, everything up to the live-push confirm) now works even
+when `CBMPickingAPI` is down — only uploading a brand-new photo or
+actually pushing one live still needs that service running.
