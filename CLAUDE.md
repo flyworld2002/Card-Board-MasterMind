@@ -233,7 +233,15 @@ part of any build output.
   problem instead (`platform_listings` has MORE rows than eBay shows
   live: `336204674240` 141 vs 140, `336691613250` 128 vs 127) — a
   different, unstarted problem (a stale row not actually live anymore),
-  not something this command fixes.
+  not something this command fixes. **Bug fixed same session**: 10 of
+  the 20 adopted cards got wrongly created as `non_holo` (Illustration
+  Rare/Ultra Rare secret rares that only ever print holo, but have no
+  "Holo"/"RH" text for the eBay-name parser to key off). Root cause was
+  a `HOLO_RARITIES` correction in `write_to_staging()` running AFTER
+  the variant was already resolved/created — fixed at the source by
+  moving the check inside `lookup_card_for_ebay()`
+  (`utils/pokemon_api.py`) itself, before variant creation. Already
+  fixed before any of the other 50 pending listings get run.
 - "Pending shipment" feature: pull paid-but-unshipped eBay orders for a
   pick/pack workflow.
 - Next architecture decision: auto-refreshing inventory as eBay orders
