@@ -213,35 +213,64 @@ part of any build output.
   9,467 of 9,472 filled (99.9%); the remaining 5 genuinely have no
   `VariationSpecificPictureSet` entry on eBay at all (no picture was
   ever attached to that exact live variation), not a backfill gap.
-- **51 of 64 live listings have real eBay variations with NO
-  `platform_listings` row at all** (surveyed 2026-08-17, same session
-  the first instance was caught). `--ebay-adopt-untracked-variations
-  --listing-id ITEM_ID` (`main.py`,
-  `importer.ebay_pushprices.adopt_untracked_live_variations()`) fetches
-  a listing's live `<Variation>` entries, matches each untracked one via
-  the same `fetch_item_variations()`/`lookup_card_for_ebay()` pipeline
-  `--ebay-import` uses, and inserts `platform_listings` +
+- ~~51 of 64 live listings have real eBay variations with NO
+  `platform_listings` row at all~~ — **done 2026-08-17**, same session
+  caught. `--ebay-adopt-untracked-variations --listing-id ITEM_ID`
+  (`main.py`, `importer.ebay_pushprices.adopt_untracked_live_variations()`)
+  fetches a listing's live `<Variation>` entries, matches each untracked
+  one via the same `fetch_item_variations()`/`lookup_card_for_ebay()`
+  pipeline `--ebay-import` uses, and inserts `platform_listings` +
   `listing_card_assignments` + `ebay_listing_map` rows reflecting what's
-  already live (no eBay Revise call — nothing changes on eBay itself;
-  unmatched variations are reported, not guessed). Run once, successfully,
-  against listing `336600660278` ("Chaos Rising Reverse Holo - Ultra
-  Rare") — 20/20 matched cleanly, roster went from 105 to 125 rows,
-  now exactly matching eBay's 125 live variations; `--ebay-backfill-card-photos
-  --listing-id` immediately after picked up pictures for all 20. **Not
-  yet run on the other 50** — Fei wants to check the one listing before
-  green-lighting the rest. Two listings surveyed have the OPPOSITE
-  problem instead (`platform_listings` has MORE rows than eBay shows
-  live: `336204674240` 141 vs 140, `336691613250` 128 vs 127) — a
-  different, unstarted problem (a stale row not actually live anymore),
-  not something this command fixes. **Bug fixed same session**: 10 of
-  the 20 adopted cards got wrongly created as `non_holo` (Illustration
-  Rare/Ultra Rare secret rares that only ever print holo, but have no
-  "Holo"/"RH" text for the eBay-name parser to key off). Root cause was
-  a `HOLO_RARITIES` correction in `write_to_staging()` running AFTER
-  the variant was already resolved/created — fixed at the source by
-  moving the check inside `lookup_card_for_ebay()`
-  (`utils/pokemon_api.py`) itself, before variant creation. Already
-  fixed before any of the other 50 pending listings get run.
+  already live (no eBay Revise call). Fei green-lit the remaining 50
+  after reviewing the first test listing. **Result: every live listing
+  now matches eBay exactly, except one deliberately skipped** —
+  "Pokemon TCG Classic" (`335336413541`) uses an unrecognized
+  `CLV`/`CLC`/`CLB 001/034 <name>` naming scheme (3 sub-packs each
+  numbered independently) that the parser can't handle; Fei said skip
+  it rather than build one-listing-only parser support. Its 27
+  untracked cards remain unmatched, reported not guessed.
+  **Real bug fixed same session**: 10 of the first listing's 20 adopted
+  cards got wrongly created as `non_holo` (Illustration Rare/Ultra Rare
+  secret rares that only ever print holo, but have no "Holo"/"RH" text
+  for the eBay-name parser to key off). Root cause was a `HOLO_RARITIES`
+  correction in `write_to_staging()` running AFTER the variant was
+  already resolved/created — fixed at the source by moving the check
+  inside `lookup_card_for_ebay()` (`utils/pokemon_api.py`) itself,
+  before variant creation.
+  **Second real bug, found running the other 50 concurrently across
+  3 overlapping batch jobs**: a duplicate-key crash
+  (`idx_platform_listings_unique`) aborted a listing's entire remaining
+  work when the same variant was already tracked under a different
+  eBay text — mostly a race between the overlapping runs themselves
+  (one run's "already tracked" snapshot went stale mid-loop as another
+  run committed concurrently), confirmed by re-running the crashed
+  listings serially with no concurrency and having 6 of 7 resolve
+  clean with zero errors. Fixed by checking for an existing
+  `(platform, account, listing_id, variant_id)` row before each INSERT
+  instead of relying on the constraint violation, so one bad/racy row
+  no longer kills the rest of that listing's adoption.
+  **Third finding, a genuinely stale row** (`336458632284`,
+  "Mega Evolution 2.5 Ascended Heroes"): `141/217 Hoopa` (non_holo) was
+  a real pre-existing roster row whose eBay text had drifted — the live
+  listing now calls it `141/217 Hoopa Holo` (a real, different, holo
+  variant that adoption correctly added as a new row). The old
+  non_holo row was never actually removed from eBay through this app
+  (Seller Hub edit, same "attached outside this app" pattern as
+  everything else this session) — reconciled by marking it `delisted`
+  (`sync_enabled = false`) and its roster row back to `queued`, the
+  same pattern `remove_single_card_live()` already uses for a real
+  removal.
+  **Fourth finding — the "2 listings with the opposite mismatch"
+  flagged earlier turned out to be a false alarm**, not a real problem:
+  the original survey counted ALL `platform_listings` rows for a
+  listing_id with no status filter, so a normal, legitimately-kept
+  `status='delisted'` row (audit history, unrelated to any of this
+  session's work) inflated the count above the live variation count.
+  Re-checked with `status != 'delisted'` excluded and both listings
+  (`336204674240`, `336691613250`) balance exactly. Lesson: never
+  compare a raw `platform_listings` row count to eBay's live variation
+  count without excluding `delisted` — it's expected to accumulate
+  over time and isn't itself a sign of a problem.
   **Full DB-wide cleanup also done same session**: Fei asked for the
   complete always-holo rarity list (`Ace Spec Rare`, `Double Rare`,
   `Hyper Rare`, `Illustration Rare`, `Mega Hyper Rare`,
@@ -261,6 +290,23 @@ part of any build output.
   Pitch Black) — fixed the check and the specific row, then re-ran
   clean. Fixed listing-by-listing at Fei's request (lowest count
   first), all 501 now correct.
+- **`platform_listings.quantity_listed` goes stale on every normal
+  price/qty sync** (found 2026-08-17, code fixed same session — see
+  `importer/ebay_pushprices.py`, both `UPDATE platform_listings` sites
+  in `push_prices()` now set `quantity_listed` alongside `pushed_qty`).
+  This column is the ONLY one `resolve_listing_prices()`'s shared-
+  inventory subtraction reads, so a stale value makes every OTHER
+  listing sharing that card think more is available than really is.
+  **9,197 of ~9,467 active rows account-wide were stale** when found —
+  **only backfilled for the two Chaos Rising listings and the two
+  Pitch Black listings so far** (using each row's real live eBay
+  quantity via `fetch_item_variations()`, NOT `pushed_qty` — that
+  column is NULL on many older rows since it was added later than
+  `quantity_listed`; a first attempt at backfilling via
+  `quantity_listed = pushed_qty` wiped 75 rows to NULL before being
+  caught and fixed the same way). **Backlog, not started**: the
+  remaining ~9,000+ stale rows across the rest of the account need the
+  same live-eBay-read backfill, listing by listing or in bulk.
 - "Pending shipment" feature: pull paid-but-unshipped eBay orders for a
   pick/pack workflow.
 - Next architecture decision: auto-refreshing inventory as eBay orders
