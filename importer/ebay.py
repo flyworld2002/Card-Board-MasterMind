@@ -239,12 +239,7 @@ def import_single_item(item_id: str, dry_run: bool = False, no_api: bool = False
         )
 
         # Infer foil_type from rarity if parser didn't set it
-        HOLO_RARITIES = {
-            'Rare Holo', 'Rare Holo V', 'Rare Holo VMAX', 'Rare Holo VSTAR',
-            'Double Rare', 'Ultra Rare', 'Illustration Rare',
-            'Special Illustration Rare', 'Hyper Rare', 'ACE SPEC Rare',
-            'Rare Holo EX', 'Rare Holo GX', 'Rare Holo LV.X',
-        }
+        from utils.pokemon_api import HOLO_RARITIES
         if lookup.get("rarity") in HOLO_RARITIES and r.get("foil_type") in (None, "non_holo"):
             r["foil_type"] = "holo"
 
@@ -551,12 +546,7 @@ def write_to_staging(rows: list[dict], batch_id: str, dry_run: bool = False, acc
                 source_type  = row.get("source_type"),
             )
             # Infer foil_type from rarity if parser defaulted to non_holo
-            HOLO_RARITIES = {
-                'Rare Holo', 'Rare Holo V', 'Rare Holo VMAX', 'Rare Holo VSTAR',
-                'Double Rare', 'Ultra Rare', 'Illustration Rare',
-                'Special Illustration Rare', 'Hyper Rare', 'ACE SPEC Rare',
-                'Rare Holo EX', 'Rare Holo GX', 'Rare Holo LV.X',
-            }
+            from utils.pokemon_api import HOLO_RARITIES
             if lookup.get("rarity") in HOLO_RARITIES and row.get("foil_type") in (None, "non_holo"):
                 row["foil_type"] = "holo"
 

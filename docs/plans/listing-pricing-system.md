@@ -2304,6 +2304,35 @@ empty strings.
   a persisted row isn't a fix, it's a cosmetic patch — trace a
   correction to before the point where a wrong value gets written to
   disk, not just before display.**
+  **Full DB-wide cleanup, immediately after the code fix, same
+  session**: Fei gave the complete always-holo rarity list (`Ace Spec
+  Rare`, `Double Rare`, `Hyper Rare`, `Illustration Rare`, `Mega Hyper
+  Rare`, `MEGA_ATTACK_RARE`, `Shiny Rare`, `Shiny Ultra Rare`,
+  `Ultra Rare`) — added the 4 missing to `HOLO_RARITIES` and collapsed
+  the 2 remaining `importer/ebay.py` copies into imports of the one
+  constant in `utils/pokemon_api.py`, so the set can't drift into 3
+  copies again. A full-DB scan (not just the one listing) found **501
+  pre-existing misclassified `card_variants` rows** — Illustration Rare
+  290, Ultra Rare 127, ACE SPEC Rare 34, Special Illustration Rare 29,
+  Hyper Rare 21 — that predated this session; the adoption feature just
+  happened to be what surfaced the bug, it didn't cause most of them.
+  Fixed listing-by-listing... actually rarity-by-rarity at Fei's
+  request (lowest count first): checked every wrong variant against
+  `listing_card_assignments`/`platform_listings`/`inventory`/
+  `card_photos`/`sales` before any write — 495 were pure orphans (zero
+  references, safe delete-if-holo-sibling-exists or flip-in-place-if-
+  not), 6 were tied to something real and got carefully repointed.
+  **Real gap caught mid-run**: the repoint script checked 4 reference
+  tables but not `sales` — hit a live `ForeignKeyViolation` trying to
+  delete `Brave Bangle` #104 (Pitch Black) because it had real sale
+  history the check missed. psycopg2's per-row transaction rolled back
+  cleanly (no partial write), but the lesson stands: enumerate
+  FK-referencing tables from `information_schema`/`pg_constraint`
+  before writing a "nothing references this, safe to delete" check,
+  don't assemble the list from memory — `sales` isn't an obviously-named
+  table to think of unprompted. Fixed the gap, re-ran clean. **Final
+  state: 0 misclassified variants remain across every always-holo
+  rarity, DB-wide** — not just the one listing that surfaced the bug.
 
 ### Generic advanced card search + batch-add-to-roster (2026-08-16, session 18)
 

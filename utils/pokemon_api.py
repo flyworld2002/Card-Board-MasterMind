@@ -237,6 +237,7 @@ HOLO_RARITIES = {
     'Rare Holo', 'Rare Holo V', 'Rare Holo VMAX', 'Rare Holo VSTAR',
     'Double Rare', 'Ultra Rare', 'Illustration Rare',
     'Special Illustration Rare', 'Hyper Rare', 'ACE SPEC Rare',
+    'Mega Hyper Rare', 'MEGA_ATTACK_RARE', 'Shiny Rare', 'Shiny Ultra Rare',
     'Rare Holo EX', 'Rare Holo GX', 'Rare Holo LV.X',
 }
 

@@ -242,6 +242,25 @@ part of any build output.
   moving the check inside `lookup_card_for_ebay()`
   (`utils/pokemon_api.py`) itself, before variant creation. Already
   fixed before any of the other 50 pending listings get run.
+  **Full DB-wide cleanup also done same session**: Fei asked for the
+  complete always-holo rarity list (`Ace Spec Rare`, `Double Rare`,
+  `Hyper Rare`, `Illustration Rare`, `Mega Hyper Rare`,
+  `MEGA_ATTACK_RARE`, `Shiny Rare`, `Shiny Ultra Rare`, `Ultra Rare` —
+  added the 4 missing ones to `HOLO_RARITIES`, which also collapsed 3
+  duplicate copies of that set across `utils/pokemon_api.py`/
+  `importer/ebay.py` into one shared constant). A full-DB scan found
+  **501 pre-existing misclassified `card_variants` rows** (290
+  Illustration Rare, 127 Ultra Rare, 34 ACE SPEC Rare, 29 Special
+  Illustration Rare, 21 Hyper Rare) predating this session entirely —
+  495 were pure orphans (zero references anywhere, safely deleted or
+  flipped in place), 6 were tied to a real listing/inventory/photo/
+  **sales** row and got carefully repointed instead. **Caught a real
+  gap in the repoint script mid-run**: it didn't check the `sales`
+  table for references, so `DELETE FROM card_variants` hit a live FK
+  violation on a card with real sale history (`Brave Bangle` #104,
+  Pitch Black) — fixed the check and the specific row, then re-ran
+  clean. Fixed listing-by-listing at Fei's request (lowest count
+  first), all 501 now correct.
 - "Pending shipment" feature: pull paid-but-unshipped eBay orders for a
   pick/pack workflow.
 - Next architecture decision: auto-refreshing inventory as eBay orders
