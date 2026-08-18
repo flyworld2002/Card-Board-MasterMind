@@ -223,12 +223,20 @@ part of any build output.
   `listing_card_assignments` + `ebay_listing_map` rows reflecting what's
   already live (no eBay Revise call). Fei green-lit the remaining 50
   after reviewing the first test listing. **Result: every live listing
-  now matches eBay exactly, except one deliberately skipped** —
-  "Pokemon TCG Classic" (`335336413541`) uses an unrecognized
-  `CLV`/`CLC`/`CLB 001/034 <name>` naming scheme (3 sub-packs each
-  numbered independently) that the parser can't handle; Fei said skip
-  it rather than build one-listing-only parser support. Its 27
-  untracked cards remain unmatched, reported not guessed.
+  now matches eBay exactly, including "Pokemon TCG Classic"
+  (`335336413541`)** — initially deliberately skipped (unrecognized
+  `CLV`/`CLC`/`CLB 001/034 <name>` naming scheme, 3 sub-packs each
+  numbered independently), then actually fixed same session (see
+  `utils/ebay_parser.py`'s `SET_PREFIX_OVERRIDES`, same generic
+  prefix-override pattern as `PROMO_PATTERNS`) once it turned out to be
+  a cheap, real fix rather than a one-off hack. Of its 27 untracked
+  cards, 14 matched immediately; the other 13 (Squirtle, Magikarp,
+  Articuno, Zapdos, Clefairy, Clefable, Mewtwo, Snorlax, Miltank LV32,
+  Boss's Orders, Pokemon Nurse, Switch, Fire Energy) don't exist in the
+  Pokemon TCG API at all (Fei confirmed) — created their `card_master`
+  rows by hand from the known-correct eBay text (name/number/set only,
+  no rarity/attributes — worth a manual pass later) so local-DB
+  matching found them instantly on retry, no API needed.
   **Real bug fixed same session**: 10 of the first listing's 20 adopted
   cards got wrongly created as `non_holo` (Illustration Rare/Ultra Rare
   secret rares that only ever print holo, but have no "Holo"/"RH" text
