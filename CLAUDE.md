@@ -298,23 +298,29 @@ part of any build output.
   Pitch Black) — fixed the check and the specific row, then re-ran
   clean. Fixed listing-by-listing at Fei's request (lowest count
   first), all 501 now correct.
-- **`platform_listings.quantity_listed` goes stale on every normal
-  price/qty sync** (found 2026-08-17, code fixed same session — see
+- ~~`platform_listings.quantity_listed` goes stale on every normal
+  price/qty sync~~ — **done 2026-08-18**. Found 2026-08-17 (see
   `importer/ebay_pushprices.py`, both `UPDATE platform_listings` sites
-  in `push_prices()` now set `quantity_listed` alongside `pushed_qty`).
-  This column is the ONLY one `resolve_listing_prices()`'s shared-
-  inventory subtraction reads, so a stale value makes every OTHER
-  listing sharing that card think more is available than really is.
-  **9,197 of ~9,467 active rows account-wide were stale** when found —
-  **only backfilled for the two Chaos Rising listings and the two
-  Pitch Black listings so far** (using each row's real live eBay
-  quantity via `fetch_item_variations()`, NOT `pushed_qty` — that
-  column is NULL on many older rows since it was added later than
-  `quantity_listed`; a first attempt at backfilling via
-  `quantity_listed = pushed_qty` wiped 75 rows to NULL before being
-  caught and fixed the same way). **Backlog, not started**: the
-  remaining ~9,000+ stale rows across the rest of the account need the
-  same live-eBay-read backfill, listing by listing or in bulk.
+  in `push_prices()` now set `quantity_listed` alongside `pushed_qty`,
+  fixed same day it was found). This column is the ONLY one
+  `resolve_listing_prices()`'s shared-inventory subtraction reads, so a
+  stale value makes every OTHER listing sharing that card think more is
+  available than really is. **9,197 of ~9,467 active rows account-wide
+  were stale** when found. Backfilled in two passes: 4 listings
+  (2 Chaos Rising + 2 Pitch Black) by hand first, then all other 60
+  listings in one bulk run — 404 more rows corrected, 8,482 already
+  right, 0 errors, 0 rows left NULL (verified against all 9,288 active
+  rows account-wide after). All using each row's real live eBay
+  quantity via `fetch_item_variations()`, never `pushed_qty` — that
+  column is NULL on many older rows (added later than `quantity_listed`)
+  and a first attempt at `quantity_listed = pushed_qty` wiped 75 rows to
+  NULL before being caught and fixed the same way. **3 rows skipped,
+  not fixable this way**: `076/142 Rhyhorn Holo`/`076/142 Rhydon
+  Reverse Holo RH` on two Stellar Crown listings — the same stale-
+  external-id-text rows flagged earlier this session (their stored
+  variation text no longer matches anything live on eBay at all, a
+  pre-existing rename-artifact issue, not something a quantity backfill
+  can fix).
 - "Pending shipment" feature: pull paid-but-unshipped eBay orders for a
   pick/pack workflow.
 - Next architecture decision: auto-refreshing inventory as eBay orders
