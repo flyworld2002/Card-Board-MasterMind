@@ -503,15 +503,18 @@ def _render_variation_name(cur, variant_id: str, template_id: str = None) -> str
     the way the old Python-only version briefly did (see the double-space
     bug fixed earlier the same session).
 
-    Tokens/rules (still true, now implemented in the RPC): {number},
-    {number:pad}, {set_total} (= card_sets.total_cards), {prefix} (=
-    card_sets.set_prefix, e.g. "MEP"/"SVP"), {name}, {suffix} (built from
-    foil_pattern / "Reverse Holo RH" for foil_type='reverse_holo' /
-    stamp_type, in that order — a plain holo and reverse-holo copy of the
-    same card number need distinct VariationSpecificsSet values). Promo
-    sets (set_prefix set, total_cards NULL) fall back to
-    "{prefix} {number} {name} {suffix}" when no template name_format
-    override exists.
+    Tokens/rules (still true, now implemented in the RPC): {number} and
+    {number:pad} are equivalent — both pad to card_sets.number_pad_width
+    whenever it's configured (migration 045). {base_set_number} (=
+    card_sets.base_set_number as stored, no total_cards fallback —
+    migrations 047/048; was named {set_total} through migration 046).
+    {prefix} (= card_sets.set_prefix, e.g. "MEP"/"SVP"/"CLB"), {name},
+    {suffix} (built from foil_pattern / "Reverse Holo RH" for
+    foil_type='reverse_holo' / stamp_type, in that order — a plain holo
+    and reverse-holo copy of the same card number need distinct
+    VariationSpecificsSet values). Promo sets (set_prefix set,
+    total_cards NULL) fall back to "{prefix} {number} {name} {suffix}"
+    when no template name_format override exists.
     """
     cur.execute("SELECT render_variation_name(%s, %s) AS rendered", (variant_id, template_id))
     row = cur.fetchone()
