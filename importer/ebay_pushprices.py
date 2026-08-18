@@ -462,11 +462,19 @@ def push_prices(listing_id: str, account_num: int = 1, platform: str = "ebay",
   </Item>
 </ReviseFixedPriceItemRequest>"""
             _post("ReviseFixedPriceItem", xml, account_num=account_num)
+            # quantity_listed must track every push, not just pushed_qty — it's
+            # the only column resolve_listing_prices()'s shared-inventory
+            # subtraction reads to know how much of a variant another listing
+            # is currently holding. Missing here for a long time (found
+            # 2026-08-17): 9,197 active rows had drifted stale, silently
+            # making every OTHER listing that shares a card think more of it
+            # was available than actually was.
             cur.execute(
-                "UPDATE platform_listings SET pushed_price = %s, pushed_qty = %s, pushed_at = now(), "
+                "UPDATE platform_listings SET pushed_price = %s, pushed_qty = %s, quantity_listed = %s, "
+                "pushed_at = now(), "
                 "status = CASE WHEN status = 'delisted' THEN status "
                 "WHEN %s > 0 THEN 'active' ELSE 'out_of_stock' END WHERE id = %s",
-                (change["resolved_price"], change["qty_to_push"], change["qty_to_push"],
+                (change["resolved_price"], change["qty_to_push"], change["qty_to_push"], change["qty_to_push"],
                  change["platform_listing_id"]),
             )
             summary["pushed"] = 1
@@ -539,10 +547,11 @@ def push_prices(listing_id: str, account_num: int = 1, platform: str = "ebay",
 
         for change in changes_pushed:
             cur.execute(
-                "UPDATE platform_listings SET pushed_price = %s, pushed_qty = %s, pushed_at = now(), "
+                "UPDATE platform_listings SET pushed_price = %s, pushed_qty = %s, quantity_listed = %s, "
+                "pushed_at = now(), "
                 "status = CASE WHEN status = 'delisted' THEN status "
                 "WHEN %s > 0 THEN 'active' ELSE 'out_of_stock' END WHERE id = %s",
-                (change["resolved_price"], change["qty_to_push"], change["qty_to_push"],
+                (change["resolved_price"], change["qty_to_push"], change["qty_to_push"], change["qty_to_push"],
                  change["platform_listing_id"]),
             )
         for sql, params in pending_writes:
@@ -1015,7 +1024,7 @@ def adopt_untracked_live_variations(listing_id: str, account_num: int = 1,
     rows = fetch_item_variations(listing_id, title="", account_num=account_num)
     untracked = [r for r in rows if r.get("variation_name") and r["variation_name"] not in tracked]
 
-    adopted, unmatched, errors = [], [], []
+    adopted, unmatched, errors, duplicate_variant = [], [], [], []
     for r in untracked:
         card_name   = r.get("card_name") or r.get("variation_name", "")
         card_number = r.get("card_number", "")
@@ -1044,6 +1053,29 @@ def adopt_untracked_live_variations(listing_id: str, account_num: int = 1,
             continue
 
         status = "active" if r["quantity"] > 0 else "out_of_stock"
+
+        # This exact (platform, account, listing_id, variant_id) can already
+        # exist under a DIFFERENT external_id — either a real eBay rename/
+        # duplicate-text artifact, or (observed in practice) a race when two
+        # adoption runs process overlapping listings concurrently and one
+        # commits the row between the other's "already tracked" snapshot and
+        # its INSERT. Either way there's nothing to adopt: this variant is
+        # already on the roster here. Checking first (rather than catching
+        # the resulting IntegrityError) keeps one bad/racy row from aborting
+        # the whole listing's remaining untracked cards.
+        with db_cursor() as cur:
+            cur.execute(
+                "SELECT external_id FROM platform_listings "
+                "WHERE platform = %s AND account = %s AND listing_id = %s AND variant_id = %s",
+                (platform, account, listing_id, lookup["variant_id"]),
+            )
+            existing = cur.fetchone()
+        if existing:
+            duplicate_variant.append({"variation_name": r["variation_name"],
+                                       "already_tracked_as": existing["external_id"],
+                                       "variant_id": lookup["variant_id"]})
+            continue
+
         new_platform_listing_id = str(uuid.uuid4())
         with db_cursor() as cur:
             cur.execute(
@@ -1084,4 +1116,5 @@ def adopt_untracked_live_variations(listing_id: str, account_num: int = 1,
                          "card_name": lookup["card_name"], "platform_listing_id": new_platform_listing_id,
                          "status": status, "quantity": r["quantity"], "price": r["price"]})
 
-    return {"checked": len(untracked), "adopted": adopted, "unmatched": unmatched, "errors": errors}
+    return {"checked": len(untracked), "adopted": adopted, "unmatched": unmatched, "errors": errors,
+             "duplicate_variant": duplicate_variant}

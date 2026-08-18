@@ -507,6 +507,10 @@ def cmd_ebay_adopt_untracked_variations(args):
         print(f"Unmatched (needs manual review, nothing written): {len(result['unmatched'])}")
         for u in result["unmatched"]:
             print(f"  {u['variation_name']!r} — parsed as #{u['card_number']} {u['card_name']} ({u['set_name']})")
+    if result.get("duplicate_variant"):
+        print(f"Already tracked under different eBay text (skipped, nothing written): {len(result['duplicate_variant'])}")
+        for d in result["duplicate_variant"]:
+            print(f"  {d['variation_name']!r} — same variant already tracked as {d['already_tracked_as']!r}")
     if result["errors"]:
         print(f"Errors: {len(result['errors'])}")
         for e in result["errors"]:
