@@ -153,16 +153,28 @@ def _compute_roster_changes(cur, platform: str, listing_id: str):
 
 
 def _stage_promotion(cur, template, platform: str, listing_id: str, promote, promoted_resolved,
-                      variations, specific_name: str, display_sort: str, account: str):
+                      variations, specific_name: str, display_sort: str, account: str,
+                      extra_known: dict = None):
     """
     Mutates `variations` in-memory to add one new <Variation> row for
     `promote` (a queued listing_card_assignments row — anything with
     ["id"] and ["variant_id"]). Purely in-memory, always safe to call —
     has no live effect until the caller actually POSTs the Revise call.
 
-    Returns (promotion, pending_writes). `pending_writes` is a list of
-    (sql, params) tuples the caller MUST NOT execute until AFTER a
-    successful live eBay Revise call — running them before that (e.g. for
+    `extra_known` is forwarded to _compute_insert_position() — see its
+    docstring. A caller staging several promotions in one batch (one
+    Revise call at the end) should accumulate each returned promoted-card
+    row and pass the growing dict back in on every subsequent call, so
+    card #2+ in the batch can position itself relative to card #1, not
+    just whatever was already live from an earlier, separate session.
+
+    Returns (promotion, pending_writes, promoted_row). `promoted_row` is
+    this card's own sort-relevant row (card_number_numeric/card_name/
+    set_name/release_year/rarity_sort_order) — fold it into extra_known
+    under promotion["external_id"] before staging the batch's next card.
+    `pending_writes` is a list of (sql, params) tuples the caller MUST
+    NOT execute until AFTER a successful live eBay Revise call — running
+    them before that (e.g. for
     --dry-run, or if the POST fails) would leave the DB believing a card
     is live on eBay when it never actually was. The new platform_listings
     row's id is generated client-side (uuid.uuid4()) specifically so the
@@ -198,8 +210,9 @@ def _stage_promotion(cur, template, platform: str, listing_id: str, promote, pro
     docs/plans/listing-pricing-system.md.
     """
     promoted_name = promote.get("custom_name") or _render_variation_name(cur, promote["variant_id"], template["id"])
-    position = _compute_insert_position(cur, variations, specific_name, listing_id,
-                                         promote["variant_id"], display_sort)
+    position, promoted_row = _compute_insert_position(cur, variations, specific_name, listing_id,
+                                                        promote["variant_id"], display_sort,
+                                                        extra_known=extra_known)
     insert_specifics_value(variations, specific_name, promoted_name, position=position)
 
     resolved_price = float(promoted_resolved["resolved_price"]) if promoted_resolved else 0.0
@@ -213,7 +226,28 @@ def _stage_promotion(cur, template, platform: str, listing_id: str, promote, pro
     add_variation_row(variations, {specific_name: promoted_name}, quantity=qty_to_push,
                        start_price=resolved_price)
 
-    new_platform_listing_id = str(uuid.uuid4())
+    # Reuse an existing row's id for this exact (platform, account,
+    # listing_id, variant_id) instead of always minting a fresh uuid --
+    # idx_platform_listings_unique is a unique constraint on those four
+    # columns, and remove_single_card_live() deliberately never deletes a
+    # removed card's old row (kept as status='delisted' history). Without
+    # this check, re-promoting a variant that was previously removed from
+    # THIS SAME listing hits a duplicate-key crash on the INSERT below.
+    # Confirmed live 2026-08-19 (listing 336563267133, re-adding Poke Pad
+    # after removing it) -- same class of bug as the duplicate-variant
+    # race already fixed in adopt_untracked_live_variations(), just not
+    # fixed here too. ON CONFLICT (id) DO UPDATE makes one statement
+    # correct either way: a fresh uuid never collides (plain insert), a
+    # reused id always matches exactly the one existing row (reactivating
+    # it in place, same row identity/history preserved).
+    with db_cursor() as cur:
+        cur.execute(
+            "SELECT id FROM platform_listings "
+            "WHERE platform = %s AND account = %s AND listing_id = %s AND variant_id = %s",
+            (platform, account, listing_id, promote["variant_id"]),
+        )
+        existing_row = cur.fetchone()
+    new_platform_listing_id = str(existing_row["id"]) if existing_row else str(uuid.uuid4())
     pending_writes = [
         (
             """
@@ -222,6 +256,21 @@ def _stage_promotion(cur, template, platform: str, listing_id: str, promote, pro
                  quantity_listed, status, sync_enabled, template_id, listed_at,
                  pushed_price, pushed_qty, pushed_at)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'active', true, %s, now(), %s, %s, now())
+            ON CONFLICT (id) DO UPDATE SET
+                platform = EXCLUDED.platform,
+                account = EXCLUDED.account,
+                listing_id = EXCLUDED.listing_id,
+                external_id = EXCLUDED.external_id,
+                variant_id = EXCLUDED.variant_id,
+                list_price = EXCLUDED.list_price,
+                quantity_listed = EXCLUDED.quantity_listed,
+                status = 'active',
+                sync_enabled = true,
+                template_id = EXCLUDED.template_id,
+                listed_at = now(),
+                pushed_price = EXCLUDED.pushed_price,
+                pushed_qty = EXCLUDED.pushed_qty,
+                pushed_at = now()
             """,
             (new_platform_listing_id, platform, account, listing_id, promoted_name,
              promote["variant_id"], resolved_price, qty_to_push, template["id"],
@@ -259,7 +308,7 @@ def _stage_promotion(cur, template, platform: str, listing_id: str, promote, pro
         "eps_picture_url": promote.get("eps_picture_url"),
         "card_photo_id": promote.get("card_photo_id"),
     }
-    return promotion, pending_writes
+    return promotion, pending_writes, promoted_row
 
 
 def _do_promotions(cur, template, platform: str, listing_id: str, account_num: int,
@@ -300,6 +349,13 @@ def _do_promotions(cur, template, platform: str, listing_id: str, account_num: i
 
     promotions = []
     pending_writes = []
+    # Accumulates each promotion's sort-relevant row as it's staged, keyed
+    # by its external_id, so the NEXT card promoted in this same batch can
+    # anchor its own insert position off it — see _compute_insert_position's
+    # extra_known docstring for why this is needed (ebay_listing_map's
+    # INSERT for each promotion is deferred until the whole batch's single
+    # Revise call succeeds, so it can't otherwise see its own batch-mates).
+    known_this_batch = {}
 
     # Case 1: direct promotion — room under the cap, no deletion needed.
     active_count = sum(1 for r in resolved if r["status"] == "active")
@@ -326,12 +382,15 @@ def _do_promotions(cur, template, platform: str, listing_id: str, account_num: i
                 p(f"    [SKIP] {promoted_resolved['derived_label']}: 0 available quantity, "
                   f"leaving queued")
                 continue
-            promotion, writes = _stage_promotion(
+            promotion, writes, promoted_row = _stage_promotion(
                 cur, template, platform, listing_id, promote, promoted_resolved,
                 variations, specific_name, display_sort, account,
+                extra_known=known_this_batch,
             )
             promotions.append(promotion)
             pending_writes.extend(writes)
+            if promoted_row is not None:
+                known_this_batch[promotion["external_id"]] = promoted_row
             room -= 1
             p(f"    [PROMOTE] (free slot) -> {promotion['external_id']!r} "
               f"at position {promotion['position'] if promotion['position'] is not None else 'end'}")
@@ -370,9 +429,10 @@ def _do_promotions(cur, template, platform: str, listing_id: str, account_num: i
                 continue
 
             mark_variation_deleted(var_el)
-            promotion, writes = _stage_promotion(
+            promotion, writes, promoted_row = _stage_promotion(
                 cur, template, platform, listing_id, promote, promoted_resolved,
                 variations, specific_name, display_sort, meta["account"],
+                extra_known=known_this_batch,
             )
             promotions.append(promotion)
             pending_writes.append((
@@ -380,6 +440,8 @@ def _do_promotions(cur, template, platform: str, listing_id: str, account_num: i
                 (r["row_id"],),
             ))
             pending_writes.extend(writes)
+            if promoted_row is not None:
+                known_this_batch[promotion["external_id"]] = promoted_row
             p(f"    [PROMOTE] {meta['external_id']} (sold out) -> {promotion['external_id']!r} "
               f"at position {promotion['position'] if promotion['position'] is not None else 'end'}")
 
@@ -657,7 +719,9 @@ def push_single_card_live(row_id: str, account_num: int = 1, platform: str = "eb
         acct_row = cur.fetchone()
         account = acct_row["account"] if acct_row else None
 
-        promotion, pending_writes = _stage_promotion(
+        # Single-card push, not a batch — no extra_known needed, this is
+        # the only card being staged this call.
+        promotion, pending_writes, _promoted_row = _stage_promotion(
             cur, template, row_platform, listing_id,
             {"id": row_id, "variant_id": roster_row["variant_id"], "custom_name": roster_row["custom_name"],
              "eps_picture_url": roster_row["eps_picture_url"], "card_photo_id": roster_row["card_photo_id"]},

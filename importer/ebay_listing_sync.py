@@ -543,7 +543,8 @@ def _insert_position_sort_key(row: dict, display_sort: str) -> tuple:
 
 
 def _compute_insert_position(cur, variations, specific_name: str, item_id_: str,
-                              promoted_variant_id: str, display_sort: str):
+                              promoted_variant_id: str, display_sort: str,
+                              extra_known: dict = None):
     """
     Where in VariationSpecificsSet's value list the promoted card's name
     belongs, per display_sort — all 5 modes implemented (migration 036
@@ -556,7 +557,25 @@ def _compute_insert_position(cur, variations, specific_name: str, item_id_: str,
     block boundaries in a live VariationSpecificsSet is a materially
     bigger feature. Not a regression: this function only ever implemented
     that same approximation for 'card_number' before this change too.
-    Returns an index into the current value list, or None to append.
+
+    `extra_known` lets a caller promoting several cards in the same batch
+    (same _do_promotions() call, one eBay Revise at the end) supply the
+    sort-relevant row for each card it's ALREADY staged earlier in that
+    same batch. Without it, the DB-only `known` lookup below is blind to
+    those: ebay_listing_map's INSERT for each promotion is deliberately
+    deferred (pending_writes) until after the batch's single Revise call
+    succeeds, so a card staged 2nd in a batch can't yet see card #1 as a
+    real ebay_listing_map row even though #1 is already sitting in the
+    in-memory `variations` tree at the correct spot — every 2nd+ promotion
+    in a batch could only ever anchor off cards from an entirely earlier,
+    already-committed session, not its own batch-mates. Confirmed via a
+    live listing (336563267133) where a same-batch promotion landed at
+    the end of the dropdown instead of between its numeric neighbors.
+
+    Returns (index into the current value list, or None to append,
+             the promoted card's own row — callers batching several
+             promotions should fold this into their next call's
+             extra_known so later cards in the batch can anchor off it).
     """
     from importer.ebay_variations_xml import get_specifics_set
 
@@ -576,6 +595,8 @@ def _compute_insert_position(cur, variations, specific_name: str, item_id_: str,
         (item_id_,),
     )
     known = {r["variation_name"]: r for r in cur.fetchall()}
+    if extra_known:
+        known.update(extra_known)
 
     cur.execute(
         """
@@ -591,12 +612,12 @@ def _compute_insert_position(cur, variations, specific_name: str, item_id_: str,
     )
     promoted_row = cur.fetchone()
     if promoted_row is None:
-        return None
+        return None, None
     promoted_key = _insert_position_sort_key(promoted_row, display_sort)
 
     for idx, val in enumerate(existing_values):
         other_row = known.get(val)
         if other_row is not None and _insert_position_sort_key(other_row, display_sort) > promoted_key:
-            return idx
-    return None
+            return idx, promoted_row
+    return None, promoted_row
 
