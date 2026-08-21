@@ -621,6 +621,48 @@ def push_prices(listing_id: str, account_num: int = 1, platform: str = "ebay",
 
         summary["pushed"] = len(pushed)
         summary["promoted"] = len(promotions)
+
+        # Post-push verification — eBay's Ack=Warning on ReviseFixedPriceItem
+        # doesn't reliably indicate which variations actually applied.
+        # Found 2026-08-21: a 237-variation batch revise silently dropped
+        # 11 of them while returning Ack=Warning with an unrelated "SKU
+        # missing in variation" message that had nothing to do with the
+        # actual failure (confirmed: cards that pushed fine also have no
+        # SKU). The warning text can't be trusted to explain a partial
+        # failure, so instead of parsing it, re-fetch live state and diff
+        # against what was just intended — the same manual check that
+        # caught the original incident, now automatic.
+        verify_item = fetch_item(listing_id, account_num=account_num)
+        verify_variations = deep_copy_variations(verify_item)
+        normalize_quantities(verify_variations)
+        strip_selling_status(verify_variations)
+        live_now = {}
+        for var in _findall(verify_variations, "Variation"):
+            specs = _find(var, "VariationSpecifics")
+            price_el = _find(var, "StartPrice")
+            qty_el = _find(var, "Quantity")
+            for nvl in _findall(specs, "NameValueList"):
+                val_el = _find(nvl, "Value")
+                if val_el is not None and val_el.text:
+                    live_now[val_el.text] = (float(price_el.text), int(qty_el.text))
+
+        for row in pushed:
+            ext = row["external_id"]
+            expected_price = round(row["resolved_price"], 2)
+            expected_qty = row["qty_to_push"]
+            actual = live_now.get(ext)
+            if actual is None:
+                msg = f"post-push verify: {ext!r} not found live after push — eBay may have dropped it"
+                summary["warnings"].append(msg)
+                p(f"  [VERIFY WARN] {msg}")
+                continue
+            actual_price, actual_qty = actual
+            if abs(actual_price - expected_price) > 0.01 or actual_qty != expected_qty:
+                msg = (f"post-push verify: {ext!r} expected ${expected_price:.2f} qty {expected_qty}, "
+                       f"live shows ${actual_price:.2f} qty {actual_qty} — eBay silently dropped this update")
+                summary["warnings"].append(msg)
+                p(f"  [VERIFY WARN] {msg}")
+
         p(f"[{listing_id}] pushed {len(pushed)} of {len(resolved)} row(s) ({len(promotions)} promoted).")
         return summary
 
