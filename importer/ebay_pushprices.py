@@ -22,6 +22,7 @@ ebay_listing_sync.py's _resolve_scope. Quantity gating: available_qty is
 reduced by low_stock_qty (floored at 0) before being sent.
 """
 
+import copy
 import uuid
 
 from db.connection import db_cursor
@@ -29,7 +30,7 @@ from importer.ebay_auth import get_account_name, get_user_token
 from importer.ebay import _post, _find, _findall
 from importer.ebay_variations_xml import (
     fetch_item, deep_copy_variations, strip_selling_status, normalize_quantities,
-    find_variation_by_specifics, set_variation_price_qty, get_specifics_set,
+    find_variation_by_specifics, get_variation_specifics, set_variation_price_qty, get_specifics_set,
     insert_specifics_value, mark_variation_deleted, add_variation_row,
     set_variation_picture, build_revise_xml,
 )
@@ -621,6 +622,8 @@ def push_prices(listing_id: str, account_num: int = 1, platform: str = "ebay",
 
         summary["pushed"] = len(pushed)
         summary["promoted"] = len(promotions)
+        summary["auto_fixed"] = 0
+        summary["still_broken"] = 0
 
         # Post-push verification — eBay's Ack=Warning on ReviseFixedPriceItem
         # doesn't reliably indicate which variations actually applied.
@@ -646,25 +649,101 @@ def push_prices(listing_id: str, account_num: int = 1, platform: str = "ebay",
                 if val_el is not None and val_el.text:
                     live_now[val_el.text] = (float(price_el.text), int(qty_el.text))
 
+        dropped = []
         for row in pushed:
             ext = row["external_id"]
             expected_price = round(row["resolved_price"], 2)
             expected_qty = row["qty_to_push"]
             actual = live_now.get(ext)
-            if actual is None:
-                msg = f"post-push verify: {ext!r} not found live after push — eBay may have dropped it"
-                summary["warnings"].append(msg)
-                p(f"  [VERIFY WARN] {msg}")
-                continue
-            actual_price, actual_qty = actual
-            if abs(actual_price - expected_price) > 0.01 or actual_qty != expected_qty:
-                msg = (f"post-push verify: {ext!r} expected ${expected_price:.2f} qty {expected_qty}, "
-                       f"live shows ${actual_price:.2f} qty {actual_qty} — eBay silently dropped this update")
-                summary["warnings"].append(msg)
-                p(f"  [VERIFY WARN] {msg}")
+            if actual is None or abs(actual[0] - expected_price) > 0.01 or actual[1] != expected_qty:
+                dropped.append({"external_id": ext, "expected_price": expected_price, "expected_qty": expected_qty})
 
-        p(f"[{listing_id}] pushed {len(pushed)} of {len(resolved)} row(s) ({len(promotions)} promoted).")
+        if dropped:
+            # DB bookkeeping for these rows is already correct either way
+            # (written above, from the same intended price/qty) — this
+            # retry only needs to touch eBay, never the DB.
+            p(f"  [VERIFY] {len(dropped)} of {len(pushed)} row(s) didn't land — retrying as one small, "
+              f"isolated batch...")
+            fixed_ids, retry_error = _retry_dropped_variations(listing_id, account_num, verify_variations, dropped)
+            for d in dropped:
+                ext = d["external_id"]
+                if ext in fixed_ids:
+                    msg = f"{ext!r} was dropped by eBay on the first attempt — automatically retried and fixed"
+                    summary["auto_fixed"] += 1
+                else:
+                    tail = f" (retry failed: {retry_error})" if retry_error else " — the retry didn't resolve it either"
+                    msg = (f"{ext!r} expected ${d['expected_price']:.2f} qty {d['expected_qty']} — eBay dropped it "
+                           f"and the automatic retry could not fix it{tail} — needs manual reconcile")
+                    summary["still_broken"] += 1
+                summary["warnings"].append(msg)
+                p(f"  [VERIFY {'FIXED' if ext in fixed_ids else 'UNRESOLVED'}] {msg}")
+
+        p(f"[{listing_id}] pushed {len(pushed)} of {len(resolved)} row(s) ({len(promotions)} promoted, "
+          f"{summary['auto_fixed']} auto-fixed, {summary['still_broken']} still broken).")
         return summary
+
+
+def _retry_dropped_variations(listing_id: str, account_num: int, base_variations, dropped: list):
+    """
+    Re-sends ONE small, isolated Revise call containing ONLY the rows
+    eBay silently dropped from the original (much larger) batch, applying
+    their already-intended price/qty again — same technique used to
+    manually confirm and fix the 2026-08-21 incident (a small batch
+    succeeded where the full 237-variation one silently lost 11 rows).
+    Never touches the DB — it's already correct from the original push
+    either way, since it recorded the intended values, not eBay's
+    unconfirmed response.
+
+    Returns (fixed_external_ids: set, error: str | None). `error` is set
+    only if the retry Revise call itself raised — individual per-row
+    failures just mean that external_id is absent from fixed_external_ids.
+    """
+    mini = copy.deepcopy(base_variations)
+    by_ext = {d["external_id"]: d for d in dropped}
+
+    specifics_set = get_specifics_set(mini)
+    specific_name = next(iter(specifics_set), None)
+    if specific_name is None:
+        return set(), "no specifics name found on the refetched listing"
+
+    kept = 0
+    for var in list(_findall(mini, "Variation")):
+        target = by_ext.get(get_variation_specifics(var).get(specific_name))
+        if target is None:
+            mini.remove(var)
+            continue
+        set_variation_price_qty(var, start_price=target["expected_price"], quantity=target["expected_qty"])
+        kept += 1
+
+    if kept == 0:
+        return set(), "none of the dropped variations were found in the refetched listing"
+
+    try:
+        xml = build_revise_xml(listing_id, mini, "ReviseFixedPriceItem", account_num=account_num)
+        _post("ReviseFixedPriceItem", xml, account_num=account_num)
+    except Exception as e:
+        return set(), str(e)
+
+    # Confirm the retry actually landed too — never just trust Ack=Warning,
+    # that's exactly what let the original drop go unnoticed.
+    recheck_item = fetch_item(listing_id, account_num=account_num)
+    recheck_variations = deep_copy_variations(recheck_item)
+    normalize_quantities(recheck_variations)
+    strip_selling_status(recheck_variations)
+    recheck_live = {}
+    for var in _findall(recheck_variations, "Variation"):
+        val = get_variation_specifics(var).get(specific_name)
+        if val:
+            price_el = _find(var, "StartPrice")
+            qty_el = _find(var, "Quantity")
+            recheck_live[val] = (float(price_el.text), int(qty_el.text))
+
+    fixed = set()
+    for ext, target in by_ext.items():
+        actual = recheck_live.get(ext)
+        if actual and abs(actual[0] - target["expected_price"]) <= 0.01 and actual[1] == target["expected_qty"]:
+            fixed.add(ext)
+    return fixed, None
 
 
 def push_single_card_live(row_id: str, account_num: int = 1, platform: str = "ebay",
