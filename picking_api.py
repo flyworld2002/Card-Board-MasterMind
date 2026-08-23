@@ -482,29 +482,57 @@ async def create_card_photo_file_endpoint(
     label: str = Form(None),
     source_finish_kind: str = Form(None),
     account_num: int = Form(1),
-    file: UploadFile = File(...),
+    front_url: str = Form(None),
+    front_file: UploadFile = File(None),
+    additional_urls: list[str] = Form([]),
+    additional_url_labels: list[str] = Form([]),
+    additional_files: list[UploadFile] = File([]),
+    additional_file_labels: list[str] = Form([]),
     x_picking_token: str = Header(default=""),
 ):
     """
-    Same as /api/card-photos but for a directly-uploaded front photo file
-    instead of a URL (mirrors the /api/stage-card-picture vs
-    /api/stage-card-picture-file split, for the same reason — FastAPI
-    can't mix a JSON body with multipart Form/File on one endpoint).
-    Front-photo-only: additional photos still go through /api/card-photos
-    (or a follow-up call) via URL — keeping this endpoint's multipart
-    shape simple rather than accepting an arbitrary number of files here.
+    Same as /api/card-photos but for direct file uploads (mirrors the
+    /api/stage-card-picture vs /api/stage-card-picture-file split, for
+    the same reason — FastAPI can't mix a JSON body with multipart
+    Form/File params on one endpoint). Used whenever ANY photo in the
+    group is an uploaded file rather than a URL — front and every
+    additional photo can each independently be a URL or a file.
+    additional_urls/additional_files are two separate parallel-labeled
+    lists (this endpoint's multipart shape can't preserve one interleaved
+    UI row order across File and Form fields), concatenated URLs-then-
+    files into card_photo_details — sort_order isn't otherwise meaningful
+    beyond "front first, extras after."
     """
     if x_picking_token != API_TOKEN:
         raise HTTPException(status_code=401, detail="bad token")
 
-    image_bytes = await file.read()
+    if not front_url and front_file is None:
+        raise HTTPException(status_code=400, detail="must provide front_url or front_file")
+
+    front_bytes = await front_file.read() if front_file is not None else None
+    front_filename = front_file.filename if front_file is not None else None
+
+    additional = []
+    for i, url in enumerate(additional_urls):
+        additional.append({
+            "source_url": url,
+            "label": additional_url_labels[i] if i < len(additional_url_labels) else None,
+        })
+    for i, f in enumerate(additional_files):
+        additional.append({
+            "image_bytes": await f.read(),
+            "filename": f.filename,
+            "label": additional_file_labels[i] if i < len(additional_file_labels) else None,
+        })
 
     with _stage_picture_lock:
         result = create_card_photo(
             variant_id=variant_id,
-            front_bytes=image_bytes,
-            front_filename=file.filename or "card.jpg",
+            front_source_url=front_url,
+            front_bytes=front_bytes,
+            front_filename=front_filename,
             label=label,
+            additional=additional,
             source_finish_kind=source_finish_kind,
             account_num=account_num,
         )
