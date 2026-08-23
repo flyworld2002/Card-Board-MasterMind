@@ -139,7 +139,7 @@ def _resolve_card_interactive(card_name: str, set_name: str) -> str | None:
 
 def _get_or_create_card(api_card: dict) -> str:
     """Get existing card_master entry or create a new one."""
-    from db.connection import find_card_by_external_id, find_card_by_number_set
+    from db.connection import find_card_by_external_id, find_card_by_number_set, backfill_card_master
     existing = find_card_by_external_id(api_card["id"])
     if existing:
         return str(existing["id"])
@@ -165,7 +165,13 @@ def _get_or_create_card(api_card: dict) -> str:
     # different/missing external_id.
     existing_by_number = find_card_by_number_set(set_id, fields["card_number"])
     if existing_by_number:
-        return str(existing_by_number[0]["id"])
+        card_id = str(existing_by_number[0]["id"])
+        # Backfill whatever this row was missing (image, external_id,
+        # rarity) from this fresh API match — the earlier fix only
+        # avoided the crash, it never actually applied the API's data.
+        backfill_card_master(card_id, name=fields.get("name"), rarity=fields.get("rarity"),
+                              image_url=fields.get("image_url"), external_id=fields["external_id"])
+        return card_id
 
     card_id = insert_card_master(
         set_id           = set_id,

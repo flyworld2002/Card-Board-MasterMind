@@ -142,6 +142,24 @@ def insert_card_master(set_id: str, name: str, card_number: str,
               is_promo, is_first_edition, image_url, external_id))
         return str(cur.fetchone()["id"])
 
+
+def backfill_card_master(card_id: str, name: str = None, rarity: str = None,
+                         image_url: str = None, external_id: str = None) -> None:
+    """Fill in fields on an existing card_master row from a fresh API
+    match (e.g. a row that was hand-entered before the API indexed this
+    printing, then later re-matched by set+number). Only fills fields
+    that are currently NULL, so a manually curated value is never
+    clobbered by the API's."""
+    with db_cursor() as cur:
+        cur.execute("""
+            UPDATE card_master
+            SET name        = COALESCE(name, %s),
+                rarity      = COALESCE(rarity, %s),
+                image_url   = COALESCE(image_url, %s),
+                external_id = COALESCE(external_id, %s)
+            WHERE id = %s
+        """, (name, rarity, image_url, external_id, card_id))
+
 def insert_card_attributes(card_id: str, card_type: str = None, stage: str = None,
                            hp: int = None, energy_type: str = None, artist: str = None,
                            weakness: str = None, resistance: str = None,
