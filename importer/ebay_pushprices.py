@@ -1220,6 +1220,108 @@ def revise_single_variation_qty(platform_listing_id: str, new_qty: int, account_
             "old_qty": pl_row["quantity_listed"], "new_qty": new_qty, "revised": True, "dry_run": False}
 
 
+def revise_multiple_variation_qty(listing_id: str, changes: list[dict], account_num: int = 1,
+                                   dry_run: bool = False, quiet: bool = False) -> dict:
+    """
+    Revises MULTIPLE existing live variations' quantities on the SAME
+    listing in a single eBay ReviseFixedPriceItem call — price untouched,
+    only <Quantity> per changed variation. `changes` is a list of
+    {"platform_listing_id": ..., "new_qty": ...} dicts, all belonging to
+    listing_id. Same no-template-required design as
+    revise_single_variation_qty (everything needed lives on
+    platform_listings itself) — built so group-level "Balance Qty" (many
+    cards sharing one listing) sends one live eBay call per LISTING
+    instead of one call per (card, listing) pair. Found the hard way
+    2026-08-22: looping revise_single_variation_qty once per card across a
+    37-card group meant ~100+ sequential live calls for what should have
+    been 3 — slow enough that one hung eBay request stalled the whole
+    browser-side loop behind the endpoint's shared _revise_qty_lock for
+    hours. This does one fetch_item + one ReviseFixedPriceItem per
+    listing, matching push_prices()'s multi-variation path above.
+    """
+    def p(msg):
+        if not quiet:
+            print(msg)
+
+    results = []
+    with db_cursor() as cur:
+        pl_ids = [c["platform_listing_id"] for c in changes]
+        cur.execute(
+            "SELECT id, external_id, quantity_listed FROM platform_listings "
+            "WHERE id = ANY(%s::uuid[]) AND listing_id = %s",
+            (pl_ids, listing_id),
+        )
+        pl_by_id = {row["id"]: row for row in cur.fetchall()}
+
+        item = fetch_item(listing_id, account_num=account_num)
+        variations_node = _find(item, "Variations")
+        if variations_node is None:
+            return {"listing_id": listing_id, "dry_run": dry_run, "results": [
+                {"platform_listing_id": c["platform_listing_id"], "revised": False,
+                 "error": "live listing has no <Variations> block — not a multi-variation listing"}
+                for c in changes
+            ]}
+
+        variations = deep_copy_variations(item)
+        normalize_quantities(variations)
+        strip_selling_status(variations)
+
+        specifics_set = get_specifics_set(variations)
+        specific_name = next(iter(specifics_set), None)
+
+        to_push = []  # (platform_listing_id, external_id, old_qty, new_qty, var_el)
+        for change in changes:
+            pl_id = change["platform_listing_id"]
+            new_qty = change["new_qty"]
+            pl_row = pl_by_id.get(pl_id)
+            if pl_row is None:
+                results.append({"platform_listing_id": pl_id, "revised": False,
+                                 "error": "no such platform_listings row for this listing_id"})
+                continue
+            if new_qty < 0:
+                results.append({"platform_listing_id": pl_id, "revised": False, "error": "quantity can't be negative"})
+                continue
+            external_id = pl_row["external_id"]
+            if not external_id:
+                results.append({"platform_listing_id": pl_id, "revised": False,
+                                 "error": "no external_id on this row — can't locate the live variation"})
+                continue
+            var_el = find_variation_by_specifics(variations, specific_name, external_id) if specific_name else None
+            if var_el is None:
+                results.append({"platform_listing_id": pl_id, "revised": False,
+                                 "error": f"variation {external_id!r} not found live — mismatch, needs manual reconcile in Seller Hub"})
+                continue
+            to_push.append((pl_id, external_id, pl_row["quantity_listed"], new_qty, var_el))
+
+        if dry_run:
+            for pl_id, external_id, old_qty, new_qty, _ in to_push:
+                p(f"[DRY-RUN] would revise {external_id!r} on {listing_id}: qty {old_qty} -> {new_qty}")
+                results.append({"platform_listing_id": pl_id, "external_id": external_id,
+                                 "old_qty": old_qty, "new_qty": new_qty, "revised": False, "dry_run": True})
+            return {"listing_id": listing_id, "dry_run": True, "results": results}
+
+        if not to_push:
+            return {"listing_id": listing_id, "dry_run": False, "results": results}
+
+        for _, _, _, new_qty, var_el in to_push:
+            set_variation_price_qty(var_el, quantity=new_qty)
+
+        xml = build_revise_xml(listing_id, variations, "ReviseFixedPriceItem", account_num=account_num)
+        _post("ReviseFixedPriceItem", xml, account_num=account_num)
+
+        for pl_id, external_id, old_qty, new_qty, _ in to_push:
+            cur.execute(
+                "UPDATE platform_listings SET quantity_listed = %s, pushed_qty = %s, pushed_at = now(), "
+                "status = %s WHERE id = %s",
+                (new_qty, new_qty, 'active' if new_qty > 0 else 'out_of_stock', pl_id),
+            )
+            p(f"[{listing_id}] revised {external_id!r} quantity {old_qty} -> {new_qty}")
+            results.append({"platform_listing_id": pl_id, "external_id": external_id,
+                             "old_qty": old_qty, "new_qty": new_qty, "revised": True, "dry_run": False})
+
+    return {"listing_id": listing_id, "dry_run": False, "results": results}
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # One-time (re-runnable) adoption of variations live on eBay that this app
 # never tracked at all

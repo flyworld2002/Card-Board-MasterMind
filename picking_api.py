@@ -68,7 +68,7 @@ from pydantic import BaseModel
 from importer.ebay_picking import pull_picking
 from importer.ebay_pushprices import (
     push_prices, push_single_card_live, remove_single_card_live, stage_card_picture,
-    stage_nav_image, revise_single_variation_qty, push_card_photo_live,
+    stage_nav_image, revise_single_variation_qty, revise_multiple_variation_qty, push_card_photo_live,
 )
 from importer.ebay_create_listing import (
     list_business_policies, clone_listing_metadata, set_manual_listing_metadata,
@@ -203,6 +203,18 @@ class PushCardPhotoRequest(BaseModel):
 class ReviseQtyRequest(BaseModel):
     platform_listing_id: str
     new_qty: int
+    account_num: int = 1
+    dry_run: bool = False
+
+
+class ReviseQtyBatchItem(BaseModel):
+    platform_listing_id: str
+    new_qty: int
+
+
+class ReviseQtyBatchRequest(BaseModel):
+    listing_id: str
+    changes: list[ReviseQtyBatchItem]
     account_num: int = 1
     dry_run: bool = False
 
@@ -604,6 +616,34 @@ def revise_variation_qty_endpoint(body: ReviseQtyRequest, x_picking_token: str =
             result = revise_single_variation_qty(platform_listing_id=body.platform_listing_id,
                                                   new_qty=body.new_qty, account_num=body.account_num,
                                                   dry_run=body.dry_run, quiet=True)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"revise failed: {e}")
+
+    return result
+
+
+@app.post("/api/revise-variation-qty-batch")
+def revise_variation_qty_batch_endpoint(body: ReviseQtyBatchRequest, x_picking_token: str = Header(default="")):
+    """
+    Revises MULTIPLE variations' quantities on ONE listing in a single
+    live eBay call — built for group-level "Balance Qty", where several
+    cards in a group can share the same listing. Same auth/lock as the
+    single-variation endpoint above; see revise_multiple_variation_qty()
+    for why this exists as a separate call rather than looping the
+    single-variation one.
+    """
+    if x_picking_token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="bad token")
+
+    with _revise_qty_lock:
+        try:
+            result = revise_multiple_variation_qty(
+                listing_id=body.listing_id,
+                changes=[c.dict() for c in body.changes],
+                account_num=body.account_num,
+                dry_run=body.dry_run,
+                quiet=True,
+            )
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"revise failed: {e}")
 
