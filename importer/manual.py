@@ -139,7 +139,7 @@ def _resolve_card_interactive(card_name: str, set_name: str) -> str | None:
 
 def _get_or_create_card(api_card: dict) -> str:
     """Get existing card_master entry or create a new one."""
-    from db.connection import find_card_by_external_id
+    from db.connection import find_card_by_external_id, find_card_by_number_set
     existing = find_card_by_external_id(api_card["id"])
     if existing:
         return str(existing["id"])
@@ -156,6 +156,16 @@ def _get_or_create_card(api_card: dict) -> str:
         release_year = fields.get("release_year"),
         total_cards  = fields.get("total_cards"),
     )
+
+    # A card can already exist locally without an external_id (e.g.
+    # hand-entered earlier because the API didn't index this printing yet
+    # — common for secret rares) — fall back to the set+number natural key
+    # before inserting, otherwise this collides with idx_card_master_unique
+    # (set_id, card_number) on a card that's already there under a
+    # different/missing external_id.
+    existing_by_number = find_card_by_number_set(set_id, fields["card_number"])
+    if existing_by_number:
+        return str(existing_by_number[0]["id"])
 
     card_id = insert_card_master(
         set_id           = set_id,
