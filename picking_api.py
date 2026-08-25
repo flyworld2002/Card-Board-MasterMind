@@ -68,7 +68,8 @@ from pydantic import BaseModel
 from importer.ebay_picking import pull_picking
 from importer.ebay_pushprices import (
     push_prices, push_single_card_live, remove_single_card_live, stage_card_picture,
-    stage_nav_image, revise_single_variation_qty, revise_multiple_variation_qty, push_card_photo_live,
+    stage_nav_image, revise_single_variation_qty, revise_multiple_variation_qty,
+    pull_live_variation_state, pull_live_listing_state, push_card_photo_live,
 )
 from importer.ebay_create_listing import (
     list_business_policies, clone_listing_metadata, set_manual_listing_metadata,
@@ -217,6 +218,16 @@ class ReviseQtyBatchRequest(BaseModel):
     changes: list[ReviseQtyBatchItem]
     account_num: int = 1
     dry_run: bool = False
+
+
+class PullLiveVariationRequest(BaseModel):
+    platform_listing_id: str
+    account_num: int = 1
+
+
+class PullLiveListingRequest(BaseModel):
+    listing_id: str
+    account_num: int = 1
 
 
 class MarketPriceRefreshRequest(BaseModel):
@@ -675,6 +686,58 @@ def revise_variation_qty_batch_endpoint(body: ReviseQtyBatchRequest, x_picking_t
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"revise failed: {e}")
 
+    return result
+
+
+@app.post("/api/pull-live-variation")
+def pull_live_variation_endpoint(body: PullLiveVariationRequest, x_picking_token: str = Header(default="")):
+    """
+    Read-only refresh: pulls this one variation's ACTUAL live price/qty
+    from eBay and corrects our local record to match — no ReviseFixedPriceItem
+    call, nothing pushed. Same lock as the revise endpoints (it writes
+    pushed_price/pushed_qty/quantity_listed too), so it can't race a real
+    push landing on the same row mid-refresh.
+    """
+    if x_picking_token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="bad token")
+
+    with _revise_qty_lock:
+        try:
+            result = pull_live_variation_state(
+                platform_listing_id=body.platform_listing_id,
+                account_num=body.account_num,
+                quiet=True,
+            )
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"pull failed: {e}")
+
+    if not result.get("refreshed"):
+        raise HTTPException(status_code=502, detail=result.get("error", "pull failed"))
+    return result
+
+
+@app.post("/api/pull-live-listing")
+def pull_live_listing_endpoint(body: PullLiveListingRequest, x_picking_token: str = Header(default="")):
+    """
+    Whole-listing read-only refresh — one GetItem call corrects every
+    tracked row's pushed_price/pushed_qty/quantity_listed to match what's
+    actually live. Same lock as the revise endpoints.
+    """
+    if x_picking_token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="bad token")
+
+    with _revise_qty_lock:
+        try:
+            result = pull_live_listing_state(
+                listing_id=body.listing_id,
+                account_num=body.account_num,
+                quiet=True,
+            )
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"pull failed: {e}")
+
+    if result.get("error"):
+        raise HTTPException(status_code=502, detail=result["error"])
     return result
 
 

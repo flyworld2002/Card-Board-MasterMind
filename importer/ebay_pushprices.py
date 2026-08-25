@@ -1220,6 +1220,135 @@ def revise_single_variation_qty(platform_listing_id: str, new_qty: int, account_
             "old_qty": pl_row["quantity_listed"], "new_qty": new_qty, "revised": True, "dry_run": False}
 
 
+def pull_live_variation_state(platform_listing_id: str, account_num: int = 1, quiet: bool = False) -> dict:
+    """
+    Read-only counterpart to revise_single_variation_qty() — fetches this
+    one variation's ACTUAL live price/qty from eBay (GetItem, no
+    ReviseFixedPriceItem call, nothing pushed) and corrects our local
+    pushed_price/pushed_qty/quantity_listed to match reality.
+
+    Built for the "eBay: $X / N" sub-line on the Listing Templates roster
+    table (resolvedPriceCellHTML/resolvedQtyCellHTML in listing-pricing.js)
+    — that sub-line reads pushed_price/pushed_qty, which only change on a
+    push FROM us. If the card sold through eBay itself, eBay's own live
+    qty already auto-decremented independent of anything we did, and our
+    stale pushed_qty would read as "unpushed" (looks worse than reality)
+    rather than "already correct." This lets a row be resynced to truth
+    without waiting for/forcing an actual push.
+    """
+    def p(msg):
+        if not quiet:
+            print(msg)
+
+    with db_cursor() as cur:
+        cur.execute(
+            "SELECT id, listing_id, external_id, pushed_price, pushed_qty, quantity_listed "
+            "FROM platform_listings WHERE id = %s",
+            (platform_listing_id,),
+        )
+        pl_row = cur.fetchone()
+        if pl_row is None:
+            return {"platform_listing_id": platform_listing_id, "refreshed": False,
+                     "error": "no such platform_listings row"}
+        if not pl_row["external_id"]:
+            return {"platform_listing_id": platform_listing_id, "refreshed": False,
+                     "error": "no external_id on this row — can't locate the live variation"}
+
+        listing_id = pl_row["listing_id"]
+        external_id = pl_row["external_id"]
+
+        item = fetch_item(listing_id, account_num=account_num)
+        variations = deep_copy_variations(item)
+        normalize_quantities(variations)
+        strip_selling_status(variations)
+
+        specifics_set = get_specifics_set(variations)
+        specific_name = next(iter(specifics_set), None)
+        var_el = find_variation_by_specifics(variations, specific_name, external_id) if specific_name else None
+        if var_el is None:
+            return {"platform_listing_id": platform_listing_id, "refreshed": False,
+                     "error": f"variation {external_id!r} not found live — mismatch, needs manual reconcile in Seller Hub"}
+
+        price_el = _find(var_el, "StartPrice")
+        qty_el = _find(var_el, "Quantity")
+        live_price = float(price_el.text) if price_el is not None and price_el.text else None
+        live_qty = int(qty_el.text) if qty_el is not None and qty_el.text else None
+
+        cur.execute(
+            "UPDATE platform_listings SET pushed_price = %s, pushed_qty = %s, quantity_listed = %s, "
+            "pushed_at = now() WHERE id = %s",
+            (live_price, live_qty, live_qty, platform_listing_id),
+        )
+
+    p(f"[{listing_id}] pulled live state for {external_id!r}: "
+      f"price {pl_row['pushed_price']} -> {live_price}, qty {pl_row['pushed_qty']} -> {live_qty}")
+    return {"platform_listing_id": platform_listing_id, "external_id": external_id,
+            "live_price": live_price, "live_qty": live_qty, "refreshed": True}
+
+
+def pull_live_listing_state(listing_id: str, account_num: int = 1, quiet: bool = False) -> dict:
+    """
+    Whole-listing version of pull_live_variation_state() — one GetItem call
+    already returns every variation's live price/qty, so refreshing every
+    tracked row on a listing costs exactly the same one API call as
+    refreshing a single row, not one call per row. Matches every currently-
+    tracked (status active/out_of_stock) platform_listings row on this
+    listing_id by external_id and corrects pushed_price/pushed_qty/
+    quantity_listed to what's actually live.
+    """
+    def p(msg):
+        if not quiet:
+            print(msg)
+
+    with db_cursor() as cur:
+        cur.execute(
+            "SELECT id, external_id, pushed_price, pushed_qty FROM platform_listings "
+            "WHERE listing_id = %s AND status IN ('active', 'out_of_stock')",
+            (listing_id,),
+        )
+        pl_rows = cur.fetchall()
+        if not pl_rows:
+            return {"listing_id": listing_id, "refreshed": [], "not_found": [],
+                     "error": "no tracked active/out_of_stock rows for this listing"}
+
+        item = fetch_item(listing_id, account_num=account_num)
+        variations = deep_copy_variations(item)
+        normalize_quantities(variations)
+        strip_selling_status(variations)
+
+        live_by_external_id = {}
+        for var_el in _findall(variations, "Variation"):
+            specs = _find(var_el, "VariationSpecifics")
+            price_el = _find(var_el, "StartPrice")
+            qty_el = _find(var_el, "Quantity")
+            for nvl in _findall(specs, "NameValueList"):
+                val_el = _find(nvl, "Value")
+                if val_el is not None and val_el.text:
+                    live_by_external_id[val_el.text] = (
+                        float(price_el.text) if price_el is not None and price_el.text else None,
+                        int(qty_el.text) if qty_el is not None and qty_el.text else None,
+                    )
+
+        refreshed, not_found = [], []
+        for pl_row in pl_rows:
+            live = live_by_external_id.get(pl_row["external_id"])
+            if live is None:
+                not_found.append(pl_row["external_id"])
+                continue
+            live_price, live_qty = live
+            cur.execute(
+                "UPDATE platform_listings SET pushed_price = %s, pushed_qty = %s, quantity_listed = %s, "
+                "pushed_at = now() WHERE id = %s",
+                (live_price, live_qty, live_qty, pl_row["id"]),
+            )
+            refreshed.append({"platform_listing_id": pl_row["id"], "external_id": pl_row["external_id"],
+                               "live_price": live_price, "live_qty": live_qty})
+
+    p(f"[{listing_id}] pulled live state for {len(refreshed)} row(s)"
+      + (f", {len(not_found)} not found live" if not_found else ""))
+    return {"listing_id": listing_id, "refreshed": refreshed, "not_found": not_found}
+
+
 def revise_multiple_variation_qty(listing_id: str, changes: list[dict], account_num: int = 1,
                                    dry_run: bool = False, quiet: bool = False) -> dict:
     """
