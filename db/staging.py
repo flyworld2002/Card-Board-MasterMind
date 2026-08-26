@@ -7,9 +7,11 @@ from datetime import datetime, timezone
 from db.connection import db_cursor
 
 
-def create_batch_id() -> str:
-    """Generate a unique batch ID based on current timestamp."""
-    return datetime.now(timezone.utc).strftime("batch_%Y%m%d_%H%M%S")
+def create_batch_id(prefix: str = "batch") -> str:
+    """Generate a unique batch ID based on current timestamp, tagged with
+    a source-specific prefix (e.g. "TCGP" for TCGPlayer imports) so batches
+    are identifiable at a glance in the staging UI's batch filter."""
+    return datetime.now(timezone.utc).strftime(f"{prefix}_%Y%m%d_%H%M%S")
 
 
 def insert_staging_row(batch_id: str, order_number: str, order_date,

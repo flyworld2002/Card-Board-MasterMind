@@ -225,7 +225,7 @@ def import_from_html(path: str, dry_run: bool = False,
         print(f"No HTML files found in {path}")
         return {}
 
-    batch_id = create_batch_id()
+    batch_id = create_batch_id(prefix="TCGP")
     _print(verbose, f"\n=== TCGPlayer HTML Import ===")
     _print(verbose, f"Batch:  {batch_id}")
     _print(verbose, f"Files:  {len(html_files)}\n")
