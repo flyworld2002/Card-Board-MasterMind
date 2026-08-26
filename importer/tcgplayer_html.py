@@ -213,6 +213,57 @@ def _parse_items(text: str) -> list[dict]:
     return items
 
 
+def _extract_order_totals(text: str) -> dict:
+    """
+    Pull Subtotal/Shipping/Sales Tax off the order summary block -- same
+    "Label:" line immediately followed by a "$X.XX" line layout as the
+    card price lines _parse_items reads. Any field not present (e.g. a
+    tax-exempt order has no Sales Tax line at all) defaults to 0.0.
+    """
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    totals = {"subtotal": 0.0, "shipping": 0.0, "tax": 0.0}
+    for i, line in enumerate(lines[:-1]):
+        m = re.match(r'^\$([\d,]+\.\d{2})$', lines[i + 1])
+        if not m:
+            continue
+        low = line.lower()
+        value = float(m.group(1).replace(",", ""))
+        if low.startswith("subtotal:"):
+            totals["subtotal"] = value
+        elif low.startswith("shipping:"):
+            totals["shipping"] = value
+        elif low.startswith("sales tax"):
+            totals["tax"] = value
+    return totals
+
+
+def _apply_shipping_and_tax(items: list[dict], order_text: str, verbose: bool):
+    """
+    Spreads this order's shipping + sales tax proportionally across its
+    cards by value, so each card's cost_basis (staging.price flows
+    straight into inventory.cost_basis for TCGPlayer rows -- see
+    push_staging_row_to_inventory.sql) reflects its true landed cost
+    instead of just the raw per-card price. Mutates items in place.
+    """
+    totals = _extract_order_totals(order_text)
+    surcharge = totals["shipping"] + totals["tax"]
+    if surcharge <= 0:
+        return
+
+    # Prefer the page's own Subtotal (what TCGPlayer actually computed the
+    # surcharge against) over re-summing parsed items, in case a card was
+    # missed/mis-parsed -- falls back to the item sum if Subtotal wasn't found.
+    order_subtotal = totals["subtotal"] or sum(it["price"] * it["quantity"] for it in items)
+    if order_subtotal <= 0:
+        return
+
+    rate = surcharge / order_subtotal
+    _print(verbose, f"  Spreading shipping (${totals['shipping']:.2f}) + tax (${totals['tax']:.2f}) "
+                     f"across {len(items)} card(s) proportionally ({rate:.1%} of card value)")
+    for it in items:
+        it["price"] = round(it["price"] * (1 + rate), 2)
+
+
 def import_from_html(path: str, dry_run: bool = False,
                      verbose: bool = True,
                      only_order: str = None) -> dict:
@@ -315,6 +366,7 @@ def _process_file(html_file: Path, batch_id: str, game_id: str,
         order_text = _extract_order_section(text, order_num)
         order_date = _extract_date(order_text)
         items      = _parse_items(order_text)
+        _apply_shipping_and_tax(items, order_text, verbose)
 
         _print(verbose, f"\n  [{order_num}] {order_date.strftime('%Y-%m-%d')} — {len(items)} item(s)")
 
