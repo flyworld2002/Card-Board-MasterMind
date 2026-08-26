@@ -83,6 +83,7 @@ from importer.ebay_descriptions import (
 from importer.job_runner import start_job, get_job, list_jobs
 from importer.market_price_refresh import refresh_market_prices
 from importer.excel_staging import import_from_excel
+from importer.tcgplayer_html import import_from_html
 from importer.card_photos import list_card_photos, create_card_photo, assign_card_photo
 
 load_dotenv()
@@ -1020,6 +1021,49 @@ async def excel_import_endpoint(
 
     label = f"Excel import — {file.filename or 'upload.xlsx'}"
     job_id = start_job("excel_import", label, _run_excel_import_and_cleanup,
+                        path=tmp.name, dry_run=dry_run)
+    return {"job_id": job_id}
+
+
+def _run_tcgplayer_html_import_and_cleanup(job_id, path, dry_run):
+    """job_runner.start_job() target — deletes the temp upload once the
+    import finishes (success or failure), same cleanup pattern as
+    _run_excel_import_and_cleanup."""
+    try:
+        return import_from_html(path, dry_run=dry_run, verbose=False)
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+@app.post("/api/jobs/tcgplayer-html-import")
+async def tcgplayer_html_import_endpoint(
+    file: UploadFile = File(...),
+    dry_run: bool = Form(True),
+    x_picking_token: str = Header(default=""),
+):
+    """
+    Uploads a saved TCGPlayer order confirmation page (File > Save Page As
+    > Webpage, HTML only) and runs it through the same HTML-to-staging
+    importer as --tcgplayer-html, on a background thread — matching does
+    live PokemonTCG API calls, which can be slow/flaky, so this returns a
+    job_id immediately instead of blocking the request. Poll GET
+    /api/jobs/{job_id} for progress, same convention as
+    /api/jobs/excel-import.
+    """
+    if x_picking_token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="bad token")
+
+    contents = await file.read()
+    suffix = Path(file.filename or "order.html").suffix or ".html"
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    tmp.write(contents)
+    tmp.close()
+
+    label = f"TCGPlayer import — {file.filename or 'order.html'}"
+    job_id = start_job("tcgplayer_html_import", label, _run_tcgplayer_html_import_and_cleanup,
                         path=tmp.name, dry_run=dry_run)
     return {"job_id": job_id}
 
