@@ -122,6 +122,21 @@ def find_set_by_name(name: str) -> dict | None:
         return cur.fetchone()
 
 
+def find_tcgplayer_set_alias(tcgplayer_label: str) -> dict | None:
+    """Look up a cleaned TCGPlayer set label (prefix already stripped, e.g.
+    "Ascended Heroes") in tcgplayer_set_aliases. Returns a row with set_id
+    (our own card_sets.id, for sets the PokemonTCG API doesn't index) and/or
+    api_set_id (for building live API queries), or None if unmapped."""
+    if not tcgplayer_label:
+        return None
+    with db_cursor() as cur:
+        cur.execute(
+            "SELECT set_id, api_set_id FROM tcgplayer_set_aliases WHERE tcgplayer_label = %s",
+            (tcgplayer_label,)
+        )
+        return cur.fetchone()
+
+
 def find_set_by_code(set_code: str) -> dict | None:
     """Match on the PokemonTCG API's short set ID (e.g. "me2pt5"), stored
     in card_sets.set_code -- more reliable than find_set_by_name for a
