@@ -489,16 +489,29 @@ def _process_file(html_file: Path, batch_id: str, game_id: str,
         # ── Pass B: PokemonTCG API fallback for everything not resolved
         #    locally, fired in parallel -- each is an independent HTTP call
         #    (same ThreadPoolExecutor pattern as importer/excel_staging.py
-        #    and importer/market_price_refresh.py).
+        #    and importer/market_price_refresh.py). Reports its own
+        #    api_done/api_total via update_job separately from done/total
+        #    (which only advances once a card is actually written in Pass
+        #    C) -- otherwise this phase looks completely frozen from the
+        #    outside for however long it takes, even though work is
+        #    actively happening across all workers.
         if needs_api:
             _print(verbose, f"  Checking PokemonTCG API for {len(needs_api)} "
                             f"card(s) not found locally (parallel, {API_WORKERS} workers)...")
+            if job_id:
+                from importer.job_runner import update_job
+                update_job(job_id, api_done=0, api_total=len(needs_api))
             api_raw = {}
+            api_done = 0
             with ThreadPoolExecutor(max_workers=API_WORKERS) as pool:
                 futures = {pool.submit(_search_api, items[i]): i for i in needs_api}
                 for f in as_completed(futures):
                     idx = futures[f]
                     api_raw[idx] = f.result()
+                    api_done += 1
+                    if job_id:
+                        from importer.job_runner import update_job
+                        update_job(job_id, api_done=api_done, api_total=len(needs_api))
             for idx in needs_api:
                 results, error = api_raw[idx]
                 if error:
