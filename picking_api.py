@@ -1030,7 +1030,7 @@ def _run_tcgplayer_html_import_and_cleanup(job_id, path, dry_run):
     import finishes (success or failure), same cleanup pattern as
     _run_excel_import_and_cleanup."""
     try:
-        return import_from_html(path, dry_run=dry_run, verbose=False)
+        return import_from_html(path, dry_run=dry_run, verbose=False, job_id=job_id)
     finally:
         try:
             os.remove(path)

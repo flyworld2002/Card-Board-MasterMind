@@ -6,12 +6,13 @@ Imports TCGPlayer orders from saved HTML files into staging.
 import re
 from pathlib import Path
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from bs4 import BeautifulSoup
 
 from db.connection import (
     get_game_id, get_or_create_set, find_card_by_external_id,
-    find_set_by_code, find_card_by_number_set,
+    find_set_by_code, find_card_by_number_set, find_card_by_name_set,
     insert_card_master, insert_card_attributes
 )
 from db.staging import create_batch_id, insert_staging_row
@@ -21,6 +22,7 @@ from utils.pokemon_api import (
 from utils.set_name_map import get_set_alias
 
 ORDER_NUM_RE = re.compile(r'[A-F0-9]{8}-[A-F0-9]{6}-[A-F0-9]{5}')
+API_WORKERS = 15  # matches excel_staging.py / market_price_refresh.py's precedent
 
 CONDITION_MAP = {
     "near mint":                          "Near Mint",
@@ -294,7 +296,12 @@ def _apply_shipping_and_tax(items: list[dict], order_text: str, verbose: bool):
 
 def import_from_html(path: str, dry_run: bool = False,
                      verbose: bool = True,
-                     only_order: str = None) -> dict:
+                     only_order: str = None,
+                     job_id: str = None) -> dict:
+    """job_id is optional -- when run via job_runner.start_job() (the web
+    upload path), progress is reported through update_job() so the Jobs
+    page (and the Staging Review import modal) can show live status; a
+    direct CLI call just omits it."""
     p = Path(path).expanduser()
     if not p.exists():
         print(f"Path not found: {path}")
@@ -323,7 +330,8 @@ def import_from_html(path: str, dry_run: bool = False,
     for html_file in html_files:
         _print(verbose, f"Processing {html_file.name}...")
         result = _process_file(html_file, batch_id, game_id, dry_run, verbose,
-                               only_order=only_order, corrections=corrections)
+                               only_order=only_order, corrections=corrections,
+                               job_id=job_id)
         for k in totals:
             totals[k] += result[k]
 
@@ -351,7 +359,8 @@ def import_from_html(path: str, dry_run: bool = False,
 
 def _process_file(html_file: Path, batch_id: str, game_id: str,
                   dry_run: bool, verbose: bool,
-                  only_order: str = None, corrections: list = None) -> dict:
+                  only_order: str = None, corrections: list = None,
+                  job_id: str = None) -> dict:
     with open(html_file, encoding="utf-8", errors="ignore") as f:
         content = f.read()
 
@@ -372,25 +381,12 @@ def _process_file(html_file: Path, batch_id: str, game_id: str,
     _print(verbose, f"  Orders: {', '.join(order_numbers)}")
     staged = matched = ambiguous = not_found = 0
 
+    # Parse every order's items up front so the total item count is known
+    # before processing starts -- lets progress be reported as an actual
+    # done/total (via update_job below) instead of just a spinner. Cheap:
+    # parsing is pure string work, and a file normally has one order.
+    parsed_orders = []
     for order_num in order_numbers:
-        # Card-level dedup: fetch all existing staging rows for this order
-        existing_cards = {}  # key: (card_name, set_name, condition) -> status
-        if not dry_run:
-            from db.connection import db_cursor
-            with db_cursor() as cur:
-                cur.execute("""
-                    SELECT card_name, set_name, condition, status
-                    FROM staging
-                    WHERE order_number = %s
-                """, (order_num,))
-                for r in cur.fetchall():
-                    key = (r["card_name"], r["set_name"] or "", r["condition"])
-                    # Keep the "best" status: processed > approved > pending
-                    prev = existing_cards.get(key)
-                    rank = {"processed": 2, "approved": 1, "pending": 0}
-                    if prev is None or rank.get(r["status"], -1) > rank.get(prev, -1):
-                        existing_cards[key] = r["status"]
-
         order_text = _extract_order_section(text, order_num)
         order_date = _extract_date(order_text)
         items      = _parse_items(order_text)
@@ -400,20 +396,69 @@ def _process_file(html_file: Path, batch_id: str, game_id: str,
         for it in items:
             it["_source_notes"] = _build_source_notes(it)
         _apply_shipping_and_tax(items, order_text, verbose)
+        parsed_orders.append((order_num, order_date, items))
+
+    total_items = sum(len(items) for _, _, items in parsed_orders)
+    done = 0
+    if job_id:
+        from importer.job_runner import update_job
+        update_job(job_id, done=0, total=total_items,
+                   staged=0, matched=0, ambiguous=0, not_found=0)
+
+    def _report_progress():
+        if job_id:
+            from importer.job_runner import update_job
+            update_job(job_id, done=done, total=total_items,
+                       staged=staged, matched=matched,
+                       ambiguous=ambiguous, not_found=not_found)
+
+    for order_num, order_date, items in parsed_orders:
+        # Card-level dedup: fetch all existing staging rows for this order.
+        # Keyed on (card_name, condition) only -- NOT set_name. Confirmed
+        # real bug (2026-08-26): once a row is manually matched/created
+        # through the Staging Review UI, its set_name gets normalized to
+        # the linked card's canonical card_sets.name (e.g. "Mega Evolution
+        # Black Star Promos"), which no longer equals the raw label this
+        # parser produces fresh on every re-import ("ME: Mega Evolution
+        # Promo") -- keying on the 3-tuple silently missed the dedup match
+        # and created duplicate staging rows for every manually-fixed card
+        # on a re-import. card_name+condition is a weaker key (could in
+        # theory merge two genuinely different same-named cards from
+        # different sets bought in one order), but that's a rare edge case
+        # and a safe failure mode (one gets skipped) versus the demonstrated
+        # alternative (silent duplicate rows on every re-import).
+        existing_cards = {}  # key: (card_name, condition) -> status
+        if not dry_run:
+            from db.connection import db_cursor
+            with db_cursor() as cur:
+                cur.execute("""
+                    SELECT card_name, condition, status
+                    FROM staging
+                    WHERE order_number = %s
+                """, (order_num,))
+                for r in cur.fetchall():
+                    key = (r["card_name"], r["condition"])
+                    # Keep the "best" status: processed > approved > pending
+                    prev = existing_cards.get(key)
+                    rank = {"processed": 2, "approved": 1, "pending": 0}
+                    if prev is None or rank.get(r["status"], -1) > rank.get(prev, -1):
+                        existing_cards[key] = r["status"]
 
         _print(verbose, f"\n  [{order_num}] {order_date.strftime('%Y-%m-%d')} — {len(items)} item(s)")
 
-        for item in items:
-            card_key = (item["card_name"], item.get("set_name", ""), item["condition"])
+        # ── Pass A: dedup-check + local-first resolution for every item in
+        #    this order (fast, no network call) -- anything still
+        #    unresolved after this gets queued for the parallel API pass.
+        resolutions = {}   # idx -> ("skip", card_status) | (card_id, status, options)
+        needs_api   = []   # indices needing the API
+
+        for idx, item in enumerate(items):
+            card_key = (item["card_name"], item["condition"])
 
             if not dry_run and card_key in existing_cards:
                 card_status = existing_cards[card_key]
                 if card_status in ("approved", "processed"):
-                    _print(verbose,
-                        f"  ~ Qty:{item['quantity']:<3} Name:{item['card_name']:<28} "
-                        f"SKIPPED — already {card_status}")
-                    staged += 1
-                    matched += 1
+                    resolutions[idx] = ("skip", card_status)
                     continue
                 elif card_status == "pending":
                     # Delete stale pending row and reimport
@@ -422,13 +467,65 @@ def _process_file(html_file: Path, batch_id: str, game_id: str,
                             DELETE FROM staging
                             WHERE order_number = %s
                               AND card_name = %s
-                              AND COALESCE(set_name, '') = %s
                               AND condition = %s
                               AND status = 'pending'
-                        """, (order_num, item["card_name"],
-                              item.get("set_name", ""), item["condition"]))
+                        """, (order_num, item["card_name"], item["condition"]))
 
-            card_id, status, options = _resolve_card(item, game_id, dry_run)
+            local, api_fallback_ok = _resolve_local(item)
+            if local:
+                resolutions[idx] = local
+            elif not api_fallback_ok:
+                # Set is only known locally (no api_set_id) -- an
+                # unfiltered API search here would risk matching an
+                # unrelated card in some other set. Land unmatched
+                # instead of guessing wrong.
+                _print(verbose, f"    x {item['card_name']} #{item.get('card_number') or '—'} "
+                                f"({item.get('set_name')}) -- no local match and this set has no "
+                                f"PokemonTCG API entry to search safely -- leaving unmatched for manual review")
+                resolutions[idx] = (None, "not_found", [])
+            else:
+                needs_api.append(idx)
+
+        # ── Pass B: PokemonTCG API fallback for everything not resolved
+        #    locally, fired in parallel -- each is an independent HTTP call
+        #    (same ThreadPoolExecutor pattern as importer/excel_staging.py
+        #    and importer/market_price_refresh.py).
+        if needs_api:
+            _print(verbose, f"  Checking PokemonTCG API for {len(needs_api)} "
+                            f"card(s) not found locally (parallel, {API_WORKERS} workers)...")
+            api_raw = {}
+            with ThreadPoolExecutor(max_workers=API_WORKERS) as pool:
+                futures = {pool.submit(_search_api, items[i]): i for i in needs_api}
+                for f in as_completed(futures):
+                    idx = futures[f]
+                    api_raw[idx] = f.result()
+            for idx in needs_api:
+                results, error = api_raw[idx]
+                if error:
+                    item = items[idx]
+                    _print(verbose, f"    x API error for {item['card_name']} #{item.get('card_number')} "
+                                    f"({item.get('set_name')}) -- leaving unmatched for manual review: {error}")
+                    resolutions[idx] = (None, "not_found", [])
+                else:
+                    resolutions[idx] = _finalize_api_results(items[idx], results, game_id, dry_run)
+
+        # ── Pass C: write to staging, in original item order (sequential --
+        #    avoids concurrent-insert races on shared resources).
+        for idx, item in enumerate(items):
+            resolution = resolutions[idx]
+
+            if resolution[0] == "skip":
+                card_status = resolution[1]
+                _print(verbose,
+                    f"  ~ Qty:{item['quantity']:<3} Name:{item['card_name']:<28} "
+                    f"SKIPPED — already {card_status}")
+                staged += 1
+                matched += 1
+                done += 1
+                _report_progress()
+                continue
+
+            card_id, status, options = resolution
 
             if not dry_run:
                 insert_staging_row(
@@ -502,6 +599,9 @@ def _process_file(html_file: Path, batch_id: str, game_id: str,
             else:
                 not_found += 1
 
+            done += 1
+            _report_progress()
+
             # Auto-approve all matched rows for this order
             if not dry_run:
                 with db_cursor() as cur:
@@ -517,51 +617,88 @@ def _process_file(html_file: Path, batch_id: str, game_id: str,
             "ambiguous": ambiguous, "not_found": not_found}
 
 
-def _resolve_card(item: dict, game_id: str, dry_run: bool) -> tuple:
-    # Step 0: check our own DB first, by (set, card number) -- the
-    # reliable natural key within a set (same shortcut the Excel importer
-    # uses via find_card_by_number_set). Skips the external API entirely
-    # for a card we've already matched before, so re-importing known cards
-    # isn't at the mercy of the PokemonTCG API's frequent flakiness/
-    # outages. Resolved via tcgplayer_set_aliases (get_set_alias) --
-    # TCGPlayer's raw label ("ME: Ascended Heroes") essentially never
-    # matches card_sets.name exactly ("Ascended Heroes"), so a
-    # find_set_by_name() lookup here would silently never hit. Falls
-    # through to the live API for anything not found here (new cards,
-    # unmapped sets, or a card_number format mismatch).
+def _resolve_local(item: dict) -> tuple:
+    """Step 0: check our own DB first, by (set, card number) -- the
+    reliable natural key within a set (same shortcut the Excel importer
+    uses via find_card_by_number_set). Skips the external API entirely
+    for a card we've already matched before, so re-importing known cards
+    isn't at the mercy of the PokemonTCG API's frequent flakiness/
+    outages. Resolved via tcgplayer_set_aliases (get_set_alias) --
+    TCGPlayer's raw label ("ME: Ascended Heroes") essentially never
+    matches card_sets.name exactly ("Ascended Heroes"), so a
+    find_set_by_name() lookup here would silently never hit.
+
+    Returns (resolution, api_fallback_ok):
+      resolution: (card_id, "matched", []) on a confident match (by
+        number, or by name alone within a known set if the number didn't
+        match/wasn't printed at all), else None.
+      api_fallback_ok: False when this item's set is only known LOCALLY
+        (alias.set_id, no api_set_id) -- search_cards() would then run
+        with NO set filter at all, risking a match against an unrelated
+        card that happens to share the same name+number in a totally
+        different set. Confirmed real: an unrelated "Drifblim" print
+        from "Supreme Victors" matched over the correct Mega Evolution
+        Promo one once its printed number ("006") didn't match
+        card_master's real number ("3", corrected 2026-08-26). Caller
+        should land the card as not_found instead of trying the API in
+        that case, rather than risk a wrong match.
+    """
     card_number = item.get("card_number")
     set_name    = item.get("set_name")
-    if card_number and set_name:
-        alias = get_set_alias(set_name)
-        set_id = None
-        if alias:
-            if alias.get("set_id"):
-                set_id = str(alias["set_id"])
-            elif alias.get("api_set_id"):
-                existing_set = find_set_by_code(alias["api_set_id"])
-                if existing_set:
-                    set_id = str(existing_set["id"])
-        if set_id:
-            # Try both as-parsed and leading-zero-stripped -- TCGPlayer
-            # zero-pads ("Charcadet - 022") but card_master often doesn't
-            # ("22"), same normalization search_cards() already does for
-            # the API path via numbers_to_try.
-            numbers_to_try = [card_number]
-            stripped = card_number.lstrip("0") or card_number
-            if stripped != card_number:
-                numbers_to_try.append(stripped)
-            for num in numbers_to_try:
-                local_matches = find_card_by_number_set(set_id, num)
-                if len(local_matches) == 1:
-                    row = local_matches[0]
-                    return str(row["id"]), "matched", []
+    if not set_name:
+        return None, True
 
-    # search_cards() -> _api_search() already retries transient failures
-    # (5 attempts, 5s apart) before giving up; if it still raises after
-    # that (API outage, connection error, etc.), don't let it take down
-    # the rest of this order/file -- land the row in staging unmatched,
-    # same as a genuine "not found", so it's just one more row to
-    # manually match/review instead of losing the whole import.
+    alias = get_set_alias(set_name)
+    set_id = None
+    api_fallback_ok = True
+    if alias:
+        if alias.get("set_id"):
+            set_id = str(alias["set_id"])
+            if not alias.get("api_set_id"):
+                api_fallback_ok = False
+        elif alias.get("api_set_id"):
+            existing_set = find_set_by_code(alias["api_set_id"])
+            if existing_set:
+                set_id = str(existing_set["id"])
+
+    if not set_id:
+        return None, api_fallback_ok
+
+    if card_number:
+        # Try both as-parsed and leading-zero-stripped -- TCGPlayer
+        # zero-pads ("Charcadet - 022") but card_master often doesn't
+        # ("22"), same normalization search_cards() already does for
+        # the API path.
+        numbers_to_try = [card_number]
+        stripped = card_number.lstrip("0") or card_number
+        if stripped != card_number:
+            numbers_to_try.append(stripped)
+        for num in numbers_to_try:
+            local_matches = find_card_by_number_set(set_id, num)
+            if len(local_matches) == 1:
+                row = local_matches[0]
+                return (str(row["id"]), "matched", []), api_fallback_ok
+
+    # No number printed, or it didn't match anything -- but the set IS
+    # known for certain, so try name-only within just that set before
+    # giving up. Only trusted when it's an unambiguous single match
+    # (a popular name can have multiple prints within one set).
+    name_matches = find_card_by_name_set(item["card_name"], set_id)
+    if len(name_matches) == 1:
+        return (str(name_matches[0]["id"]), "matched", []), api_fallback_ok
+
+    return None, api_fallback_ok
+
+
+def _search_api(item: dict) -> tuple:
+    """Wraps search_cards() for use inside a ThreadPoolExecutor worker --
+    returns (results, None) on success or (None, error_message) on
+    failure, never raises. search_cards() -> _api_search() already
+    retries transient failures (5 attempts, 5s apart) before giving up;
+    if it still raises after that (API outage, connection error, etc.),
+    this must not propagate -- a raised exception inside a worker thread
+    would otherwise surface via future.result() and take down the whole
+    parallel batch (and the rest of the import) over one bad card."""
     try:
         results = search_cards(
             name        = item["card_name"],
@@ -569,11 +706,19 @@ def _resolve_card(item: dict, game_id: str, dry_run: bool) -> tuple:
             card_number = item.get("card_number"),
             variant     = item.get("foil_pattern") or item.get("foil_type"),
         )
+        return results, None
     except Exception as e:
-        print(f"    x API error for {item['card_name']} #{item.get('card_number')} "
-              f"({item.get('set_name')}) -- leaving unmatched for manual review: {e}")
-        return None, "not_found", []
+        return None, str(e)
 
+
+def _finalize_api_results(item: dict, results: list, game_id: str, dry_run: bool) -> tuple:
+    """Turns already-fetched search_cards() results into a
+    (card_id, status, options) resolution -- ambiguous/not_found/reuse-or-
+    create card_master. Decoupled from making the API call itself so the
+    call can run in parallel (see _search_api) while this part -- which
+    writes to card_master/card_sets -- stays sequential, avoiding a
+    concurrent-insert race on get_or_create_set/insert_card_master (same
+    reasoning as importer/excel_staging.py's _finalize_api_match)."""
     if not results:
         return None, "not_found", []
 
@@ -639,6 +784,27 @@ def _resolve_card(item: dict, game_id: str, dry_run: bool) -> tuple:
     )
     insert_card_attributes(card_id, **attr_fields)
     return card_id, "matched", api_info
+
+
+def _resolve_card(item: dict, game_id: str, dry_run: bool) -> tuple:
+    """Convenience wrapper composing _resolve_local + _search_api +
+    _finalize_api_results sequentially for a single card. _process_file's
+    real import path uses the split functions directly (parallel API
+    lookups across a whole order's unresolved cards); this wrapper exists
+    for simple/CLI-style single-card resolution and ad-hoc testing."""
+    local, api_fallback_ok = _resolve_local(item)
+    if local:
+        return local
+    if not api_fallback_ok:
+        return None, "not_found", []
+
+    results, error = _search_api(item)
+    if error:
+        print(f"    x API error for {item['card_name']} #{item.get('card_number')} "
+              f"({item.get('set_name')}) -- leaving unmatched for manual review: {error}")
+        return None, "not_found", []
+
+    return _finalize_api_results(item, results, game_id, dry_run)
 
 
 def _extract_order_section(full_text: str, order_num: str) -> str:
