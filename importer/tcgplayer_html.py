@@ -183,6 +183,7 @@ def _parse_items(text: str) -> list[dict]:
         condition             = CONDITION_MAP.get(raw_cond.lower(), "Near Mint")
         foil_type_raw         = _extract_foil_type(raw_cond)
         foil_type, foil_pattern = _extract_foil_fields(item_variant, foil_type_raw)
+        rarity                = rar_line.split(":", 1)[1].strip()
 
         # Skip bad names
         if not card_name or card_name.lower() in BAD_NAMES:
@@ -207,10 +208,37 @@ def _parse_items(text: str) -> list[dict]:
             "condition":    condition,
             "quantity":     qty,
             "price":        price,
+            "rarity":       rarity,
+            "raw_condition": raw_cond,
+            "raw_variant":  item_variant,
         })
 
         i += 1
     return items
+
+
+def _build_source_notes(item: dict) -> str:
+    """
+    Renders exactly what TCGPlayer's page said for this line into a
+    human-readable reference string, stored on the staging row's `notes`
+    column -- so a manual match (ambiguous/not_found rows especially) has
+    the raw source to check against instead of just our parsed/normalized
+    fields, which can differ from the source (e.g. no card number printed
+    at all, or a rarity that helps disambiguate multiple same-named cards).
+    """
+    parts = [f"TCGPlayer: {item['card_name']}"]
+    if item.get("card_number"):
+        parts.append(f"#{item['card_number']}")
+    else:
+        parts.append("(no # printed)")
+    parts.append(f"| Set: {item.get('set_name') or '?'}")
+    if item.get("rarity"):
+        parts.append(f"| Rarity: {item['rarity']}")
+    if item.get("raw_variant"):
+        parts.append(f"| Variant: {item['raw_variant']}")
+    parts.append(f"| Condition: {item.get('raw_condition') or item.get('condition') or '?'}")
+    parts.append(f"| ${item['price']:.2f} x{item['quantity']}")
+    return " ".join(parts)
 
 
 def _extract_order_totals(text: str) -> dict:
@@ -366,6 +394,11 @@ def _process_file(html_file: Path, batch_id: str, game_id: str,
         order_text = _extract_order_section(text, order_num)
         order_date = _extract_date(order_text)
         items      = _parse_items(order_text)
+        # Snapshot the source-notes string BEFORE the surcharge distribution
+        # below mutates item["price"] -- notes should reflect what
+        # TCGPlayer's page actually said, not the tax/shipping-adjusted price.
+        for it in items:
+            it["_source_notes"] = _build_source_notes(it)
         _apply_shipping_and_tax(items, order_text, verbose)
 
         _print(verbose, f"\n  [{order_num}] {order_date.strftime('%Y-%m-%d')} — {len(items)} item(s)")
@@ -412,6 +445,7 @@ def _process_file(html_file: Path, batch_id: str, game_id: str,
                     card_id      = card_id,
                     match_status = status,
                     match_options= options,
+                    notes        = item["_source_notes"],
                 )
                 # Store market price from API response if available
                 api_market = (options[0].get("market_price")
