@@ -122,6 +122,21 @@ def find_set_by_name(name: str) -> dict | None:
         return cur.fetchone()
 
 
+def find_set_by_code(set_code: str) -> dict | None:
+    """Match on the PokemonTCG API's short set ID (e.g. "me2pt5"), stored
+    in card_sets.set_code -- more reliable than find_set_by_name for a
+    source like TCGPlayer whose raw set label ("ME: Ascended Heroes")
+    rarely matches card_sets.name exactly ("Ascended Heroes")."""
+    if not set_code:
+        return None
+    with db_cursor() as cur:
+        cur.execute(
+            "SELECT * FROM card_sets WHERE LOWER(set_code) = LOWER(%s)",
+            (set_code,)
+        )
+        return cur.fetchone()
+
+
 def insert_card_master(set_id: str, name: str, card_number: str,
                        rarity: str = None, variant: str = None,
                        finish: str = None, is_promo: bool = False,

@@ -11,12 +11,14 @@ from bs4 import BeautifulSoup
 
 from db.connection import (
     get_game_id, get_or_create_set, find_card_by_external_id,
+    find_set_by_code, find_card_by_number_set,
     insert_card_master, insert_card_attributes
 )
 from db.staging import create_batch_id, insert_staging_row
 from utils.pokemon_api import (
     search_cards, parse_card_master_fields, parse_card_attribute_fields
 )
+from utils.set_name_map import get_set_id
 
 ORDER_NUM_RE = re.compile(r'[A-F0-9]{8}-[A-F0-9]{6}-[A-F0-9]{5}')
 
@@ -430,6 +432,29 @@ def _process_file(html_file: Path, batch_id: str, game_id: str,
 
 
 def _resolve_card(item: dict, game_id: str, dry_run: bool) -> tuple:
+    # Step 0: check our own DB first, by (set, card number) -- the
+    # reliable natural key within a set (same shortcut the Excel importer
+    # uses via find_card_by_number_set). Skips the external API entirely
+    # for a card we've already matched before, so re-importing known cards
+    # isn't at the mercy of the PokemonTCG API's frequent flakiness/
+    # outages. Resolved through the same TCGPlayer-label -> API-set-ID
+    # mapping search_cards() uses (get_set_id), matched against
+    # card_sets.set_code -- TCGPlayer's raw label ("ME: Ascended Heroes")
+    # essentially never matches card_sets.name exactly ("Ascended
+    # Heroes"), so a find_set_by_name() lookup here would silently never
+    # hit. Falls through to the live API for anything not found here
+    # (new cards, unmapped sets, or a card_number format mismatch).
+    card_number = item.get("card_number")
+    set_name    = item.get("set_name")
+    if card_number and set_name:
+        set_code     = get_set_id(set_name)
+        existing_set = find_set_by_code(set_code) if set_code else None
+        if existing_set:
+            local_matches = find_card_by_number_set(str(existing_set["id"]), card_number)
+            if len(local_matches) == 1:
+                row = local_matches[0]
+                return str(row["id"]), "matched", []
+
     results = search_cards(
         name        = item["card_name"],
         set_name    = item.get("set_name"),
