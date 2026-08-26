@@ -455,12 +455,23 @@ def _resolve_card(item: dict, game_id: str, dry_run: bool) -> tuple:
                 row = local_matches[0]
                 return str(row["id"]), "matched", []
 
-    results = search_cards(
-        name        = item["card_name"],
-        set_name    = item.get("set_name"),
-        card_number = item.get("card_number"),
-        variant     = item.get("foil_pattern") or item.get("foil_type"),
-    )
+    # search_cards() -> _api_search() already retries transient failures
+    # (5 attempts, 5s apart) before giving up; if it still raises after
+    # that (API outage, connection error, etc.), don't let it take down
+    # the rest of this order/file -- land the row in staging unmatched,
+    # same as a genuine "not found", so it's just one more row to
+    # manually match/review instead of losing the whole import.
+    try:
+        results = search_cards(
+            name        = item["card_name"],
+            set_name    = item.get("set_name"),
+            card_number = item.get("card_number"),
+            variant     = item.get("foil_pattern") or item.get("foil_type"),
+        )
+    except Exception as e:
+        print(f"    x API error for {item['card_name']} #{item.get('card_number')} "
+              f"({item.get('set_name')}) -- leaving unmatched for manual review: {e}")
+        return None, "not_found", []
 
     if not results:
         return None, "not_found", []
