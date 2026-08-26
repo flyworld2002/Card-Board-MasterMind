@@ -660,8 +660,8 @@ def _filter_by_variant(results: list, variant: str) -> list:
 
 def _api_search(q: str, page_size: int = 20) -> list[dict]:
     import time
-    max_retries = 5
-    retry_delay = 5  # seconds between retries
+    max_retries = 4
+    retry_delay = 3  # seconds between retries
 
     for attempt in range(1, max_retries + 1):
         try:
