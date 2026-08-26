@@ -11,14 +11,14 @@ from bs4 import BeautifulSoup
 
 from db.connection import (
     get_game_id, get_or_create_set, find_card_by_external_id,
-    find_set_by_code, find_card_by_number_set,
+    find_set_by_code, find_set_by_name, find_card_by_number_set,
     insert_card_master, insert_card_attributes
 )
 from db.staging import create_batch_id, insert_staging_row
 from utils.pokemon_api import (
     search_cards, parse_card_master_fields, parse_card_attribute_fields
 )
-from utils.set_name_map import get_set_id
+from utils.set_name_map import get_set_id, get_local_set_name
 
 ORDER_NUM_RE = re.compile(r'[A-F0-9]{8}-[A-F0-9]{6}-[A-F0-9]{5}')
 
@@ -499,13 +499,28 @@ def _resolve_card(item: dict, game_id: str, dry_run: bool) -> tuple:
     card_number = item.get("card_number")
     set_name    = item.get("set_name")
     if card_number and set_name:
-        set_code     = get_set_id(set_name)
-        existing_set = find_set_by_code(set_code) if set_code else None
+        # Some TCGPlayer labels (promo sets the PokemonTCG API doesn't
+        # index at all, e.g. "ME: Mega Evolution Promo") have no API set
+        # ID to resolve through -- check the local-name override first.
+        local_name   = get_local_set_name(set_name)
+        existing_set = find_set_by_name(local_name) if local_name else None
+        if not existing_set:
+            set_code     = get_set_id(set_name)
+            existing_set = find_set_by_code(set_code) if set_code else None
         if existing_set:
-            local_matches = find_card_by_number_set(str(existing_set["id"]), card_number)
-            if len(local_matches) == 1:
-                row = local_matches[0]
-                return str(row["id"]), "matched", []
+            # Try both as-parsed and leading-zero-stripped -- TCGPlayer
+            # zero-pads ("Charcadet - 022") but card_master often doesn't
+            # ("22"), same normalization search_cards() already does for
+            # the API path via numbers_to_try.
+            numbers_to_try = [card_number]
+            stripped = card_number.lstrip("0") or card_number
+            if stripped != card_number:
+                numbers_to_try.append(stripped)
+            for num in numbers_to_try:
+                local_matches = find_card_by_number_set(str(existing_set["id"]), num)
+                if len(local_matches) == 1:
+                    row = local_matches[0]
+                    return str(row["id"]), "matched", []
 
     # search_cards() -> _api_search() already retries transient failures
     # (5 attempts, 5s apart) before giving up; if it still raises after

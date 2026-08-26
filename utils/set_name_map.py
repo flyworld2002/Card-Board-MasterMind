@@ -204,6 +204,11 @@ TCGPLAYER_TO_ID = {
 }
 
 
+def _strip_tcgplayer_prefix(tcgplayer_set: str) -> str:
+    """Strip TCGPlayer's prefix: "SV08:", "ME02:", "SV:", "SWSH:", "SVE:", etc."""
+    return re.sub(r'^[A-Z]+\d*(?:pt\d+)?:\s*', '', tcgplayer_set).strip()
+
+
 def get_set_id(tcgplayer_set: str) -> str | None:
     """
     Convert TCGPlayer set label to API set ID.
@@ -220,8 +225,7 @@ def get_set_id(tcgplayer_set: str) -> str | None:
     if not tcgplayer_set:
         return None
 
-    # Strip TCGPlayer prefix: "SV08:", "ME02:", "SV:", "SWSH:", "SVE:", etc.
-    cleaned = re.sub(r'^[A-Z]+\d*(?:pt\d+)?:\s*', '', tcgplayer_set).strip()
+    cleaned = _strip_tcgplayer_prefix(tcgplayer_set)
 
     # Direct lookup
     set_id = TCGPLAYER_TO_ID.get(cleaned)
@@ -236,6 +240,31 @@ def get_set_id(tcgplayer_set: str) -> str | None:
             return set_id
 
     return None
+
+
+# TCGPlayer set labels with NO corresponding PokemonTCG API set at all --
+# confirmed against the live API's /v2/sets list (2026-08-26): Mega
+# Evolution's promo cards aren't indexed there (only me1-me5, the main
+# sets), so get_set_id() can never resolve this one no matter what's added
+# to TCGPLAYER_TO_ID. Maps straight to our own card_sets.name instead, for
+# the local-first lookup in tcgplayer_html.py's _resolve_card().
+# Deliberately NOT added to TCGPLAYER_TO_ID: feeding a fake/local-only code
+# into search_cards() as api_set_id would make the API search strictly
+# worse -- once api_set_id is set, search_cards() gives up (returns [])
+# rather than falling back to an unfiltered name-only match once it's set
+# but never matches any real card's set.id.
+TCGPLAYER_TO_LOCAL_SET_NAME = {
+    "Mega Evolution Promo": "Mega Evolution Black Star Promos",
+}
+
+
+def get_local_set_name(tcgplayer_set: str) -> str | None:
+    """TCGPlayer label -> our card_sets.name, for sets the PokemonTCG API
+    doesn't index at all. Returns None if this label has no override."""
+    if not tcgplayer_set:
+        return None
+    cleaned = _strip_tcgplayer_prefix(tcgplayer_set)
+    return TCGPLAYER_TO_LOCAL_SET_NAME.get(cleaned)
 
 
 # Keep clean_set_name for backwards compatibility
