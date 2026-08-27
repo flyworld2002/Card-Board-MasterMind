@@ -61,24 +61,32 @@ FOIL_PATTERNS = {
 
 
 def _extract_foil_type(condition_raw: str):
+    """Returns a foil_types.code value directly ("non_holo"/"holo"/
+    "reverse_holo") -- Staging Review's Foil type dropdown selects by
+    that exact DB code, not a display label."""
     lower = condition_raw.lower()
     if "reverse holofoil" in lower:
-        return "reverse holo"
+        return "reverse_holo"
     if "holofoil" in lower:
         return "holo"
-    return None
+    return "non_holo"
 
 
 def _extract_foil_fields(variant_raw, foil_type):
     """
-    Split variant into (foil_type, foil_pattern).
+    Split variant into (foil_type, foil_pattern). foil_type is always a
+    real foil_types.code ("non_holo"/"holo"/"reverse_holo") coming in via
+    _extract_foil_type; foil_pattern is left as the RAW TCGPlayer text
+    here -- _process_file resolves it to a real foil_patterns.code
+    afterward (needs a DB lookup, which this pure parsing function
+    doesn't have).
 
     Examples:
-        "Cosmos Holo" + "Holo"    → ("Holo", "Cosmos Holo")
-        "Reverse Holo" + anything → ("Reverse Holo", None)
+        "Cosmos Holo" + "holo"    → ("holo", "Cosmos Holo")
+        "Reverse Holo" + anything → ("reverse_holo", None)
         "Master Ball Pattern"     → (foil_type, "Master Ball Pattern")
-        None + "Holo"             → ("Holo", None)
-        None + None               → (None, None)
+        None + "holo"             → ("holo", None)
+        None + "non_holo"         → ("non_holo", None)
     """
     if not variant_raw:
         return foil_type, None
@@ -86,9 +94,9 @@ def _extract_foil_fields(variant_raw, foil_type):
     if v_lower in FOIL_PATTERNS:
         return foil_type, variant_raw
     if v_lower in ("reverse holo", "reverse holofoil"):
-        return "reverse Holo", None
+        return "reverse_holo", None
     if v_lower in FINISH_LABELS:
-        return foil_type or "holo", None
+        return foil_type if foil_type != "non_holo" else "holo", None
     return foil_type, variant_raw
 
 
@@ -217,6 +225,40 @@ def _parse_items(text: str) -> list[dict]:
 
         i += 1
     return items
+
+
+def _load_foil_pattern_codes() -> dict:
+    """Maps foil_patterns.display_name.lower() -> code, loaded fresh from
+    the DB each import (tiny table, cheap) -- a new pattern added to
+    Staging Review's dropdown is picked up automatically, no code deploy
+    needed, same reasoning as tcgplayer_set_aliases."""
+    from db.connection import db_cursor
+    with db_cursor() as cur:
+        cur.execute("SELECT code, display_name FROM foil_patterns")
+        return {r["display_name"].lower(): r["code"] for r in cur.fetchall()}
+
+
+def _resolve_foil_pattern_code(raw_variant: str, pattern_codes: dict) -> str | None:
+    """TCGPlayer's raw variant text ("Poke Ball Pattern", "Poke Ball",
+    "Energy Symbol Pattern") -> the DB's real foil_patterns.code
+    ("poke_ball", "energy_symbol"). Without this, Staging Review's
+    Pattern dropdown shows the raw text as an unmatched custom value
+    instead of selecting the actual option -- confirmed live, 2026-08-27:
+    "Poke Ball Pattern" and "Energy Symbol Pattern" (TCGPlayer's own
+    labels) don't match any foil_patterns row, whose display_name is
+    just "Poke Ball" / "Energy Symbol", no "Pattern" suffix. Returns None
+    (caller keeps the raw text) if nothing matches -- e.g. a genuinely
+    new pattern not in the dropdown yet."""
+    if not raw_variant:
+        return None
+    candidates = [raw_variant.strip().lower()]
+    stripped = re.sub(r'\s*pattern\s*$', '', raw_variant, flags=re.I).strip()
+    if stripped and stripped.lower() != candidates[0]:
+        candidates.append(stripped.lower())
+    for c in candidates:
+        if c in pattern_codes:
+            return pattern_codes[c]
+    return None
 
 
 def _build_source_notes(item: dict) -> str:
@@ -381,6 +423,8 @@ def _process_file(html_file: Path, batch_id: str, game_id: str,
     _print(verbose, f"  Orders: {', '.join(order_numbers)}")
     staged = matched = ambiguous = not_found = 0
 
+    pattern_codes = _load_foil_pattern_codes()
+
     # Parse every order's items up front so the total item count is known
     # before processing starts -- lets progress be reported as an actual
     # done/total (via update_job below) instead of just a spinner. Cheap:
@@ -395,6 +439,9 @@ def _process_file(html_file: Path, batch_id: str, game_id: str,
         # TCGPlayer's page actually said, not the tax/shipping-adjusted price.
         for it in items:
             it["_source_notes"] = _build_source_notes(it)
+            code = _resolve_foil_pattern_code(it.get("foil_pattern"), pattern_codes)
+            if code:
+                it["foil_pattern"] = code
         _apply_shipping_and_tax(items, order_text, verbose)
         parsed_orders.append((order_num, order_date, items))
 
