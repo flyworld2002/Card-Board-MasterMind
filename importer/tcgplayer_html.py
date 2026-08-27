@@ -19,7 +19,14 @@ from db.staging import create_batch_id, insert_staging_row
 from utils.pokemon_api import (
     search_cards, parse_card_master_fields, parse_card_attribute_fields
 )
-from utils.set_name_map import get_set_alias
+from utils.set_name_map import get_set_alias, _strip_tcgplayer_prefix
+
+# Poke Ball / Master Ball pattern cards in these specific sets are genuine
+# Reverse Holo prints, not straight Holo, regardless of what TCGPlayer's
+# condition text says ("Holofoil", not "Reverse Holofoil") -- per Fei,
+# 2026-08-27.
+REVERSE_HOLO_PATTERN_SETS = {"Prismatic Evolutions", "Black Bolt", "White Flare"}
+REVERSE_HOLO_OVERRIDE_PATTERNS = {"poke_ball", "master_ball"}
 
 ORDER_NUM_RE = re.compile(r'[A-F0-9]{8}-[A-F0-9]{6}-[A-F0-9]{5}')
 API_WORKERS = 15  # matches excel_staging.py / market_price_refresh.py's precedent
@@ -442,6 +449,9 @@ def _process_file(html_file: Path, batch_id: str, game_id: str,
             code = _resolve_foil_pattern_code(it.get("foil_pattern"), pattern_codes)
             if code:
                 it["foil_pattern"] = code
+            cleaned_set = _strip_tcgplayer_prefix(it.get("set_name") or "")
+            if cleaned_set in REVERSE_HOLO_PATTERN_SETS and it.get("foil_pattern") in REVERSE_HOLO_OVERRIDE_PATTERNS:
+                it["foil_type"] = "reverse_holo"
         _apply_shipping_and_tax(items, order_text, verbose)
         parsed_orders.append((order_num, order_date, items))
 
