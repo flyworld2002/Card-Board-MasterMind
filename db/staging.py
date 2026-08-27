@@ -25,7 +25,8 @@ def insert_staging_row(batch_id: str, order_number: str, order_date,
                        is_shiny: bool = False,
                        variation_name: str = None,
                        listing_price: float = None,
-                       notes: str = None) -> str:
+                       notes: str = None,
+                       card_number: str = None) -> str:
     """Insert one card into staging. Returns the staging row UUID."""
     import json
     with db_cursor() as cur:
@@ -36,8 +37,9 @@ def insert_staging_row(batch_id: str, order_number: str, order_date,
                  foil_type, foil_pattern, texture, material, size,
                  stamp_type, source_type, is_shiny, variation_name,
                  listing_price,
-                 quantity, price, card_id, match_status, match_options, notes)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                 quantity, price, card_id, match_status, match_options, notes,
+                 card_number)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             RETURNING id
         """, (
             batch_id, order_number, order_date, source,
@@ -47,7 +49,8 @@ def insert_staging_row(batch_id: str, order_number: str, order_date,
             listing_price,
             quantity, price, card_id, match_status,
             json.dumps(match_options) if match_options else None,
-            notes
+            notes,
+            card_number
         ))
         return str(cur.fetchone()["id"])
 

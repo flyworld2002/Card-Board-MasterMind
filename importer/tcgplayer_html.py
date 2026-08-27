@@ -556,6 +556,7 @@ def _process_file(html_file: Path, batch_id: str, game_id: str,
                     match_status = status,
                     match_options= options,
                     notes        = item["_source_notes"],
+                    card_number  = item.get("card_number"),
                 )
                 # Store market price from API response if available
                 api_market = (options[0].get("market_price")
