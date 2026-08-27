@@ -556,7 +556,12 @@ def _process_file(html_file: Path, batch_id: str, game_id: str,
                     match_status = status,
                     match_options= options,
                     notes        = item["_source_notes"],
-                    card_number  = item.get("card_number"),
+                    # Strip leading zeros ("093" -> "93") -- card_master
+                    # stores promo/secret-rare numbers without padding, so
+                    # the raw TCGPlayer-printed form otherwise triggers a
+                    # false "number mismatch" warning in Staging Review
+                    # even when the match is exactly correct.
+                    card_number  = (item.get("card_number") or "").lstrip("0") or item.get("card_number"),
                 )
                 # Store market price from API response if available
                 api_market = (options[0].get("market_price")
