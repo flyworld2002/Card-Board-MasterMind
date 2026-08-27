@@ -28,6 +28,11 @@ from utils.set_name_map import get_set_alias, _strip_tcgplayer_prefix
 REVERSE_HOLO_PATTERN_SETS = {"Prismatic Evolutions", "Black Bolt", "White Flare"}
 REVERSE_HOLO_OVERRIDE_PATTERNS = {"poke_ball", "master_ball"}
 
+# "Cosmos Holo" belongs in the Texture axis (textures.code = "cosmos"),
+# not Pattern -- foil_patterns has no matching code for it at all, so it
+# was landing as unmatched free text. Per Fei, 2026-08-27.
+COSMOS_TEXTURE_VARIANTS = {"cosmos holo", "cosmo holo", "cosmos holo v"}
+
 ORDER_NUM_RE = re.compile(r'[A-F0-9]{8}-[A-F0-9]{6}-[A-F0-9]{5}')
 API_WORKERS = 15  # matches excel_staging.py / market_price_refresh.py's precedent
 
@@ -446,6 +451,9 @@ def _process_file(html_file: Path, batch_id: str, game_id: str,
         # TCGPlayer's page actually said, not the tax/shipping-adjusted price.
         for it in items:
             it["_source_notes"] = _build_source_notes(it)
+            if (it.get("foil_pattern") or "").strip().lower() in COSMOS_TEXTURE_VARIANTS:
+                it["texture"] = "cosmos"
+                it["foil_pattern"] = None
             code = _resolve_foil_pattern_code(it.get("foil_pattern"), pattern_codes)
             if code:
                 it["foil_pattern"] = code
@@ -607,6 +615,7 @@ def _process_file(html_file: Path, batch_id: str, game_id: str,
                     condition    = item["condition"],
                     foil_type    = item.get("foil_type"),
                     foil_pattern = item.get("foil_pattern"),
+                    texture      = item.get("texture"),
                     quantity     = item["quantity"],
                     price        = item["price"],
                     card_id      = card_id,
