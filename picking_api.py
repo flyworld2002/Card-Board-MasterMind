@@ -205,6 +205,7 @@ class PushCardPhotoRequest(BaseModel):
 class ReviseQtyRequest(BaseModel):
     platform_listing_id: str
     new_qty: int
+    new_price: float | None = None
     account_num: int = 1
     dry_run: bool = False
 
@@ -212,6 +213,7 @@ class ReviseQtyRequest(BaseModel):
 class ReviseQtyBatchItem(BaseModel):
     platform_listing_id: str
     new_qty: int
+    new_price: float | None = None
 
 
 class ReviseQtyBatchRequest(BaseModel):
@@ -650,7 +652,8 @@ def revise_variation_qty_endpoint(body: ReviseQtyRequest, x_picking_token: str =
         try:
             result = revise_single_variation_qty(platform_listing_id=body.platform_listing_id,
                                                   new_qty=body.new_qty, account_num=body.account_num,
-                                                  dry_run=body.dry_run, quiet=True)
+                                                  dry_run=body.dry_run, quiet=True,
+                                                  new_price=body.new_price)
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"revise failed: {e}")
 

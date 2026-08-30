@@ -1136,17 +1136,20 @@ def stage_nav_image(template_id: str, source_url: str = None, image_bytes: bytes
 
 
 def revise_single_variation_qty(platform_listing_id: str, new_qty: int, account_num: int = 1,
-                                 dry_run: bool = False, quiet: bool = False) -> dict:
+                                 dry_run: bool = False, quiet: bool = False,
+                                 new_price: float = None) -> dict:
     """
-    Directly revises ONE existing live variation's quantity — price
-    untouched, only <Quantity>. Deliberately works whether or not the
+    Directly revises ONE existing live variation's quantity and,
+    optionally, its price (<StartPrice> is only included when new_price
+    is given — omitting it leaves the live price untouched, same as
+    before this parameter existed). Deliberately works whether or not the
     listing has a listing_templates row: everything needed
     (listing_id, external_id, account, platform) already lives on the
     platform_listings row itself, so this never touches
     listing_card_assignments/resolve_listing_prices() at all. Built for
-    "Balance Qty" — redistributing a card's shared inventory across
-    every listing that currently offers it, including ones never
-    onboarded into a template.
+    "Balance Qty" — redistributing a card's shared inventory (and, since
+    2026-08-30, its price) across every listing that currently offers it,
+    including ones never onboarded into a template.
     """
     def p(msg):
         if not quiet:
@@ -1155,10 +1158,13 @@ def revise_single_variation_qty(platform_listing_id: str, new_qty: int, account_
     if new_qty < 0:
         return {"platform_listing_id": platform_listing_id, "revised": False, "dry_run": dry_run,
                  "error": "quantity can't be negative"}
+    if new_price is not None and new_price <= 0:
+        return {"platform_listing_id": platform_listing_id, "revised": False, "dry_run": dry_run,
+                 "error": "price must be positive"}
 
     with db_cursor() as cur:
         cur.execute(
-            "SELECT id, platform, listing_id, external_id, account, quantity_listed "
+            "SELECT id, platform, listing_id, external_id, account, quantity_listed, pushed_price "
             "FROM platform_listings WHERE id = %s",
             (platform_listing_id,),
         )
@@ -1191,13 +1197,16 @@ def revise_single_variation_qty(platform_listing_id: str, new_qty: int, account_
                      "error": f"variation {external_id!r} not found live — mismatch, needs manual reconcile in Seller Hub"}
 
         if dry_run:
-            p(f"[DRY-RUN] would revise {external_id!r} on {listing_id}: "
-              f"qty {pl_row['quantity_listed']} -> {new_qty}")
+            msg = f"[DRY-RUN] would revise {external_id!r} on {listing_id}: qty {pl_row['quantity_listed']} -> {new_qty}"
+            if new_price is not None:
+                msg += f", price {pl_row['pushed_price']} -> {new_price}"
+            p(msg)
             return {"platform_listing_id": platform_listing_id, "external_id": external_id,
                      "old_qty": pl_row["quantity_listed"], "new_qty": new_qty,
+                     "old_price": pl_row["pushed_price"], "new_price": new_price,
                      "revised": False, "dry_run": True}
 
-        set_variation_price_qty(var_el, quantity=new_qty)
+        set_variation_price_qty(var_el, start_price=new_price, quantity=new_qty)
 
         xml = build_revise_xml(listing_id, variations, "ReviseFixedPriceItem", account_num=account_num)
         _post("ReviseFixedPriceItem", xml, account_num=account_num)
@@ -1210,14 +1219,20 @@ def revise_single_variation_qty(platform_listing_id: str, new_qty: int, account_
         # reviving it with real stock would make every other listing
         # sharing this variant silently overcount what's actually available.
         cur.execute(
-            "UPDATE platform_listings SET quantity_listed = %s, pushed_qty = %s, pushed_at = now(), "
+            "UPDATE platform_listings SET quantity_listed = %s, pushed_qty = %s, "
+            "pushed_price = COALESCE(%s, pushed_price), pushed_at = now(), "
             "status = %s WHERE id = %s",
-            (new_qty, new_qty, 'active' if new_qty > 0 else 'out_of_stock', platform_listing_id),
+            (new_qty, new_qty, new_price, 'active' if new_qty > 0 else 'out_of_stock', platform_listing_id),
         )
 
-    p(f"[{listing_id}] revised {external_id!r} quantity {pl_row['quantity_listed']} -> {new_qty}")
+    msg = f"[{listing_id}] revised {external_id!r} quantity {pl_row['quantity_listed']} -> {new_qty}"
+    if new_price is not None:
+        msg += f", price {pl_row['pushed_price']} -> {new_price}"
+    p(msg)
     return {"platform_listing_id": platform_listing_id, "external_id": external_id,
-            "old_qty": pl_row["quantity_listed"], "new_qty": new_qty, "revised": True, "dry_run": False}
+            "old_qty": pl_row["quantity_listed"], "new_qty": new_qty,
+            "old_price": pl_row["pushed_price"], "new_price": new_price,
+            "revised": True, "dry_run": False}
 
 
 def pull_live_listing_state(listing_id: str, account_num: int = 1, quiet: bool = False) -> dict:
@@ -1285,12 +1300,13 @@ def pull_live_listing_state(listing_id: str, account_num: int = 1, quiet: bool =
 def revise_multiple_variation_qty(listing_id: str, changes: list[dict], account_num: int = 1,
                                    dry_run: bool = False, quiet: bool = False) -> dict:
     """
-    Revises MULTIPLE existing live variations' quantities on the SAME
-    listing in a single eBay ReviseFixedPriceItem call — price untouched,
-    only <Quantity> per changed variation. `changes` is a list of
-    {"platform_listing_id": ..., "new_qty": ...} dicts, all belonging to
-    listing_id. Same no-template-required design as
-    revise_single_variation_qty (everything needed lives on
+    Revises MULTIPLE existing live variations' quantities (and, since
+    2026-08-30, optionally their prices) on the SAME listing in a single
+    eBay ReviseFixedPriceItem call. `changes` is a list of
+    {"platform_listing_id": ..., "new_qty": ..., "new_price": ...} dicts
+    (new_price optional/omittable, leaves that variation's live price
+    untouched), all belonging to listing_id. Same no-template-required
+    design as revise_single_variation_qty (everything needed lives on
     platform_listings itself) — built so group-level "Balance Qty" (many
     cards sharing one listing) sends one live eBay call per LISTING
     instead of one call per (card, listing) pair. Found the hard way
@@ -1309,7 +1325,7 @@ def revise_multiple_variation_qty(listing_id: str, changes: list[dict], account_
     with db_cursor() as cur:
         pl_ids = [c["platform_listing_id"] for c in changes]
         cur.execute(
-            "SELECT id, external_id, quantity_listed FROM platform_listings "
+            "SELECT id, external_id, quantity_listed, pushed_price FROM platform_listings "
             "WHERE id = ANY(%s::uuid[]) AND listing_id = %s",
             (pl_ids, listing_id),
         )
@@ -1331,10 +1347,11 @@ def revise_multiple_variation_qty(listing_id: str, changes: list[dict], account_
         specifics_set = get_specifics_set(variations)
         specific_name = next(iter(specifics_set), None)
 
-        to_push = []  # (platform_listing_id, external_id, old_qty, new_qty, var_el)
+        to_push = []  # (platform_listing_id, external_id, old_qty, new_qty, old_price, new_price, var_el)
         for change in changes:
             pl_id = change["platform_listing_id"]
             new_qty = change["new_qty"]
+            new_price = change.get("new_price")
             pl_row = pl_by_id.get(pl_id)
             if pl_row is None:
                 results.append({"platform_listing_id": pl_id, "revised": False,
@@ -1342,6 +1359,9 @@ def revise_multiple_variation_qty(listing_id: str, changes: list[dict], account_
                 continue
             if new_qty < 0:
                 results.append({"platform_listing_id": pl_id, "revised": False, "error": "quantity can't be negative"})
+                continue
+            if new_price is not None and new_price <= 0:
+                results.append({"platform_listing_id": pl_id, "revised": False, "error": "price must be positive"})
                 continue
             external_id = pl_row["external_id"]
             if not external_id:
@@ -1353,33 +1373,45 @@ def revise_multiple_variation_qty(listing_id: str, changes: list[dict], account_
                 results.append({"platform_listing_id": pl_id, "revised": False,
                                  "error": f"variation {external_id!r} not found live — mismatch, needs manual reconcile in Seller Hub"})
                 continue
-            to_push.append((pl_id, external_id, pl_row["quantity_listed"], new_qty, var_el))
+            to_push.append((pl_id, external_id, pl_row["quantity_listed"], new_qty,
+                             pl_row["pushed_price"], new_price, var_el))
 
         if dry_run:
-            for pl_id, external_id, old_qty, new_qty, _ in to_push:
-                p(f"[DRY-RUN] would revise {external_id!r} on {listing_id}: qty {old_qty} -> {new_qty}")
+            for pl_id, external_id, old_qty, new_qty, old_price, new_price, _ in to_push:
+                msg = f"[DRY-RUN] would revise {external_id!r} on {listing_id}: qty {old_qty} -> {new_qty}"
+                if new_price is not None:
+                    msg += f", price {old_price} -> {new_price}"
+                p(msg)
                 results.append({"platform_listing_id": pl_id, "external_id": external_id,
-                                 "old_qty": old_qty, "new_qty": new_qty, "revised": False, "dry_run": True})
+                                 "old_qty": old_qty, "new_qty": new_qty,
+                                 "old_price": old_price, "new_price": new_price,
+                                 "revised": False, "dry_run": True})
             return {"listing_id": listing_id, "dry_run": True, "results": results}
 
         if not to_push:
             return {"listing_id": listing_id, "dry_run": False, "results": results}
 
-        for _, _, _, new_qty, var_el in to_push:
-            set_variation_price_qty(var_el, quantity=new_qty)
+        for _, _, _, new_qty, _, new_price, var_el in to_push:
+            set_variation_price_qty(var_el, start_price=new_price, quantity=new_qty)
 
         xml = build_revise_xml(listing_id, variations, "ReviseFixedPriceItem", account_num=account_num)
         _post("ReviseFixedPriceItem", xml, account_num=account_num)
 
-        for pl_id, external_id, old_qty, new_qty, _ in to_push:
+        for pl_id, external_id, old_qty, new_qty, old_price, new_price, _ in to_push:
             cur.execute(
-                "UPDATE platform_listings SET quantity_listed = %s, pushed_qty = %s, pushed_at = now(), "
+                "UPDATE platform_listings SET quantity_listed = %s, pushed_qty = %s, "
+                "pushed_price = COALESCE(%s, pushed_price), pushed_at = now(), "
                 "status = %s WHERE id = %s",
-                (new_qty, new_qty, 'active' if new_qty > 0 else 'out_of_stock', pl_id),
+                (new_qty, new_qty, new_price, 'active' if new_qty > 0 else 'out_of_stock', pl_id),
             )
-            p(f"[{listing_id}] revised {external_id!r} quantity {old_qty} -> {new_qty}")
+            msg = f"[{listing_id}] revised {external_id!r} quantity {old_qty} -> {new_qty}"
+            if new_price is not None:
+                msg += f", price {old_price} -> {new_price}"
+            p(msg)
             results.append({"platform_listing_id": pl_id, "external_id": external_id,
-                             "old_qty": old_qty, "new_qty": new_qty, "revised": True, "dry_run": False})
+                             "old_qty": old_qty, "new_qty": new_qty,
+                             "old_price": old_price, "new_price": new_price,
+                             "revised": True, "dry_run": False})
 
     return {"listing_id": listing_id, "dry_run": False, "results": results}
 
