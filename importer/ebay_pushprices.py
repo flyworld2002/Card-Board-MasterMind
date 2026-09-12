@@ -557,6 +557,27 @@ def push_prices(listing_id: str, account_num: int = 1, platform: str = "ebay",
         normalize_quantities(variations)
         strip_selling_status(variations)
 
+        # Pictures are pushed through their own dedicated path
+        # (push_card_photo_live()) and never change as part of a routine
+        # price/qty revise, so resending the full <Pictures> block here is
+        # pure dead weight -- and a real bug found 2026-09-12: a listing
+        # with a large enough Pictures block (182 VariationSpecificPictureSet
+        # entries, confirmed via live testing -- every picture URL checked
+        # reachable, no structural anomalies) makes eBay's ReviseFixedPriceItem
+        # fail with a generic "System error" (error code 10007) on every
+        # single attempt, regardless of how few <Variation> rows are being
+        # revised or how small the rest of the payload is (isolated by
+        # trimming both independently). A smaller listing (104 entries) pushed
+        # fine at the same time on the same account, so this is a real,
+        # volume-sensitive limit on eBay's Pictures-processing path, not a
+        # data problem on our side. set_variation_picture() (called below by
+        # _do_promotions() when a newly-promoted card needs a photo) creates
+        # <Pictures> itself if missing, so dropping the existing block here
+        # is safe either way.
+        pictures_node = _find(variations, "Pictures")
+        if pictures_node is not None:
+            variations.remove(pictures_node)
+
         specifics_set = get_specifics_set(variations)
         specific_name = next(iter(specifics_set), None)
 
@@ -639,6 +660,13 @@ def push_prices(listing_id: str, account_num: int = 1, platform: str = "ebay",
         verify_variations = deep_copy_variations(verify_item)
         normalize_quantities(verify_variations)
         strip_selling_status(verify_variations)
+        # Same fix as above (2026-09-12) — this feeds _retry_dropped_variations()'s
+        # `mini` below, which only trims <Variation> rows, not <Pictures>, so
+        # without this the retry path would still resend the full picture
+        # block on exactly the large listings most likely to need a retry.
+        verify_pictures_node = _find(verify_variations, "Pictures")
+        if verify_pictures_node is not None:
+            verify_variations.remove(verify_pictures_node)
         live_now = {}
         for var in _findall(verify_variations, "Variation"):
             specs = _find(var, "VariationSpecifics")
@@ -819,6 +847,14 @@ def push_single_card_live(row_id: str, account_num: int = 1, platform: str = "eb
         normalize_quantities(variations)
         strip_selling_status(variations)
 
+        # Same fix as push_prices()/push_card_photo_live() (2026-09-12) —
+        # see push_prices()'s comment for the full explanation. This path
+        # also calls set_variation_picture() below, which recreates
+        # <Pictures> fine on its own.
+        pictures_node = _find(variations, "Pictures")
+        if pictures_node is not None:
+            variations.remove(pictures_node)
+
         live_variation_count = len(_findall(variations, "Variation"))
         if live_variation_count >= 250:
             return {"row_id": row_id, "pushed": False, "dry_run": dry_run,
@@ -925,6 +961,13 @@ def remove_single_card_live(row_id: str, account_num: int = 1, platform: str = "
         normalize_quantities(variations)
         strip_selling_status(variations)
 
+        # Same fix as push_prices() (2026-09-12) — see its comment for the
+        # full explanation. This path never touches pictures at all, so
+        # there's nothing to recreate afterward.
+        pictures_node = _find(variations, "Pictures")
+        if pictures_node is not None:
+            variations.remove(pictures_node)
+
         specifics_set = get_specifics_set(variations)
         specific_name = next(iter(specifics_set), None)
         var_el = find_variation_by_specifics(variations, specific_name, external_id) if specific_name else None
@@ -1019,6 +1062,18 @@ def push_card_photo_live(row_id: str, account_num: int = 1, dry_run: bool = Fals
         variations = deep_copy_variations(item)
         normalize_quantities(variations)
         strip_selling_status(variations)
+
+        # Same fix as push_prices()'s multi-variation path (2026-09-12): drop
+        # the existing <Pictures> block before set_variation_picture() below
+        # re-adds it. Without this, a listing with a large enough picture
+        # count resends every OTHER card's picture entry just to change one,
+        # hitting eBay's volume-sensitive "System error" on ReviseFixedPriceItem.
+        # set_variation_picture() recreates <Pictures> from scratch containing
+        # only the one entry it's setting, so this stays a true single-picture
+        # push regardless of how many other cards are on the listing.
+        pictures_node = _find(variations, "Pictures")
+        if pictures_node is not None:
+            variations.remove(pictures_node)
 
         specifics_set = get_specifics_set(variations)
         specific_name = next(iter(specifics_set), None)
@@ -1189,6 +1244,12 @@ def revise_single_variation_qty(platform_listing_id: str, new_qty: int, account_
         normalize_quantities(variations)
         strip_selling_status(variations)
 
+        # Same fix as push_prices() (2026-09-12) — see its comment for the
+        # full explanation.
+        pictures_node = _find(variations, "Pictures")
+        if pictures_node is not None:
+            variations.remove(pictures_node)
+
         specifics_set = get_specifics_set(variations)
         specific_name = next(iter(specifics_set), None)
         var_el = find_variation_by_specifics(variations, specific_name, external_id) if specific_name else None
@@ -1343,6 +1404,12 @@ def revise_multiple_variation_qty(listing_id: str, changes: list[dict], account_
         variations = deep_copy_variations(item)
         normalize_quantities(variations)
         strip_selling_status(variations)
+
+        # Same fix as push_prices() (2026-09-12) — see its comment for the
+        # full explanation.
+        pictures_node = _find(variations, "Pictures")
+        if pictures_node is not None:
+            variations.remove(pictures_node)
 
         specifics_set = get_specifics_set(variations)
         specific_name = next(iter(specifics_set), None)

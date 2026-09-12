@@ -10,6 +10,16 @@ in a single response, so the unit of work here is one card_master row
 (one external_id), not one card_variants row — a card with a holo +
 reverse-holo variant costs one API call, not two.
 
+Scoped to card_variants rows with foil_pattern IS NULL only. The API
+has exactly one reverseHolofoil price per card — no separate pricing
+for foil_pattern variants like the Poke Ball / Master Ball reverse-holo
+chase variants (Prismatic Evolutions, White Flare, Black Bolt). Writing
+the plain reverse-holo price to those too was a real bug (found
+2026-09-11): both the variant fetch and the staleness check now exclude
+foil_pattern IS NOT NULL rows entirely, rather than overwrite them with
+a price that isn't actually theirs. Those variants need a different
+pricing source/manual entry — out of scope here.
+
 For a set-scoped refresh, a card is skipped if every one of its variants
 already has a market_prices row (condition='Near Mint') updated today —
 re-running a set's refresh only re-hits what's actually stale. A single
@@ -52,6 +62,7 @@ def _cards_needing_refresh(set_name: str = None, card_id: str = None) -> list[di
                   AND EXISTS (
                     SELECT 1 FROM card_variants cv
                     WHERE cv.card_id = cm.id
+                      AND cv.foil_pattern IS NULL
                       AND NOT EXISTS (
                         SELECT 1 FROM market_prices mp
                         WHERE mp.variant_id = cv.id AND mp.condition = %s
@@ -67,7 +78,7 @@ def _cards_needing_refresh(set_name: str = None, card_id: str = None) -> list[di
         cur.execute("""
             SELECT id AS variant_id, card_id, foil_type
             FROM card_variants
-            WHERE card_id = ANY(%s::uuid[])
+            WHERE card_id = ANY(%s::uuid[]) AND foil_pattern IS NULL
         """, (card_ids,))
         variants_by_card: dict[str, list[dict]] = {}
         for v in cur.fetchall():
