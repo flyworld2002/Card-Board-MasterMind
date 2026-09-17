@@ -321,33 +321,37 @@ part of any build output.
   variation text no longer matches anything live on eBay at all, a
   pre-existing rename-artifact issue, not something a quantity backfill
   can fix).
-- **Stale external_id text needs manual reconcile — Stellar Crown #76**
-  (Fei to pick up 2026-08-19). `card_master` calls this card
-  "Rhyperior" (#76, Stellar Crown), but the LIVE eBay variation text on
-  two listings still says "Rhyhorn"/"Rhydon" — an old name that no
-  longer matches anything actually live, so a real quantity can't be
-  read for these rows (same class of issue as the "needs manual
-  reconcile in Seller Hub" cases this codebase already flags
-  elsewhere). Affected rows:
-  - `335569556534` (Stellar Crown Common, `non_holo`): `external_id =
-    '076/142 Rhyhorn Holo'`, `variant_id = 978efac2-d63d-461c-b8d2-9c2c2e139ef6`
-  - `335570034662` (Stellar Crown Reverse Holo, `reverse_holo`):
-    - `external_id = '076/142 Rhyhorn Holo'`, same `variant_id =
-      978efac2-d63d-461c-b8d2-9c2c2e139ef6` as above
-    - `external_id = '076/142 Rhydon Reverse Holo RH'`, `variant_id =
-      c52727f0-788d-4d5c-ba8c-7daad0338dc0`
-  Needs checking in Seller Hub what these 2 variations are ACTUALLY
-  called on eBay right now, then either fixing the live eBay text to
-  match "Rhyperior" or updating `platform_listings.external_id` here
-  to match whatever eBay actually shows — whichever is the intended
-  fix. Once `external_id` is correct again, the `quantity_listed`
-  backfill (`fetch_item_variations()` + match by `external_id`, see
-  above) will pick these up cleanly on a re-run.
+- ~~Stale external_id text needs manual reconcile — Stellar Crown #76~~ —
+  **done 2026-08-30**. Checked live via `importer.rename_variation list`
+  on both listings: eBay's actual variation text was already correct
+  ("076/142 Rhyperior Holo" / "076/142 Rhyperior Reverse Holo") — it was
+  only `platform_listings.external_id` here that was stale, still
+  pointing at the old "Rhyhorn"/"Rhydon" text (so no ReviseItem/Seller
+  Hub rename was needed, just a local correction). Fixed all 3 rows'
+  `external_id` to match eBay's real text, and reconciled
+  `quantity_listed`/`pushed_price`/`pushed_qty` against the same live
+  `GetItem` read while at it — one row (`c90ce69e-...`, the Reverse Holo
+  variant on `335570034662`) was also quantity-stale (DB said 16, eBay
+  actually showed 10), skipped by the 2026-08-18 bulk backfill for
+  exactly this reason (its `external_id` didn't match anything live at
+  the time).
 - "Pending shipment" feature: pull paid-but-unshipped eBay orders for a
   pick/pack workflow.
 - Next architecture decision: auto-refreshing inventory as eBay orders
   sell — options being weighed are cron/launchd polling, eBay webhooks, or
   Supabase realtime subscriptions on the frontend Inventory tab.
+- Manual roster reordering UI (`card-board-mastermind-WebInvManagement/listing-pricing.js`)
+  — the Tiers modal has no way to reorder a listing's roster yet.
+  `resolve_listing_prices()` gained a `display_sort = 'manual'` mode
+  (2026-09-18) that sorts by each `listing_card_assignments.priority_rank`
+  row, used to give the ME55 - 30th Celebration listing a custom order
+  (promo pinned to top, main set by number, Classic Collection
+  alphabetically) — but `priority_rank` is currently only ever set
+  automatically (appended at the end when a card is added), with no UI
+  to edit it. Needs a reorder control (drag-and-drop, or up/down buttons,
+  or an editable rank number per row) added to the Tiers modal so Fei can
+  set this up himself instead of asking Claude to hand-write the
+  `priority_rank` values via SQL each time.
 
 ## Secrets
 
