@@ -29,7 +29,7 @@ from db.connection import db_cursor
 from importer.ebay import _post, _find, _findall, _text, NS
 from importer.ebay_auth import get_user_token, get_account_name
 from importer.ebay_variations_xml import (
-    fetch_item, add_variation_row, insert_specifics_value, set_variation_picture,
+    fetch_item, add_variation_row, insert_specifics_value,
 )
 from importer.ebay_listing_sync import _render_variation_name
 from importer.card_photos import resolve_photo_urls
@@ -441,12 +441,20 @@ def create_listing(template_id: str, account_num: int = 1, platform: str = "ebay
                                quantity=r["available_qty"], start_price=float(r["resolved_price"]))
             r["_promoted_name"] = promoted_name
 
-        # Pictures only after every add_variation_row() call, one pass —
-        # same rule set_variation_picture()'s docstring requires.
-        for r in ready:
-            photo_urls = resolve_photo_urls(cur, r)
-            if photo_urls:
-                set_variation_picture(variations, r["_promoted_name"], photo_urls)
+        # Pictures are deliberately NOT embedded in the AddFixedPriceItem
+        # call itself (2026-09-18 fix). A 145-variation / 137-picture
+        # listing created that way came back with zero pictures live —
+        # eBay silently dropped the whole <Pictures> block rather than
+        # erroring, the same "System error" fingerprint already found and
+        # fixed on ReviseFixedPriceItem earlier (see the Pictures-strip
+        # fix in ebay_pushprices.py) just manifesting as a silent drop
+        # instead of an explicit error on create. Confirmed via dry-run
+        # that this function's own XML generation was already correct
+        # (137/137 VariationSpecificPictureSet entries) -- the bug is in
+        # how eBay's AddFixedPriceItem handles a large embedded Pictures
+        # block, not in this code. Pictures are pushed individually via
+        # push_card_photo_live() (proven reliable, ReviseFixedPriceItem,
+        # one variation at a time) right after creation succeeds instead.
 
         total_qty = sum(r["available_qty"] for r in ready)
         min_price = min(float(r["resolved_price"]) for r in ready)
@@ -503,8 +511,33 @@ def create_listing(template_id: str, account_num: int = 1, platform: str = "ebay
             )
 
     p(f"[{new_item_id}] created new listing with {len(ready)} card(s) ({len(not_ready)} left queued).")
+
+    # Pictures pushed one variation at a time, now that the listing (and
+    # every row's platform_listing_id) genuinely exists live -- see the
+    # comment above the AddFixedPriceItem build for why this isn't done
+    # as part of that call. Best-effort: a failure on one card's picture
+    # doesn't roll back the listing itself, which is already live and
+    # correct on qty/price at this point.
+    from importer.ebay_pushprices import push_card_photo_live
+    pictures_pushed, pictures_failed = [], []
+    with db_cursor() as cur:
+        for r in ready:
+            if not resolve_photo_urls(cur, r):
+                continue
+            try:
+                result = push_card_photo_live(row_id=r["row_id"], account_num=account_num, quiet=True)
+                if result.get("pushed"):
+                    pictures_pushed.append(r["row_id"])
+                else:
+                    pictures_failed.append({"row_id": r["row_id"], "card_name": r["card_name"], "result": result})
+            except Exception as e:
+                pictures_failed.append({"row_id": r["row_id"], "card_name": r["card_name"], "error": str(e)})
+
+    p(f"[{new_item_id}] pictures: {len(pictures_pushed)} pushed, {len(pictures_failed)} failed.")
+
     return {"template_id": template_id, "created": True, "dry_run": False,
-             "listing_id": new_item_id, "ready_count": len(ready), "not_ready_count": len(not_ready)}
+             "listing_id": new_item_id, "ready_count": len(ready), "not_ready_count": len(not_ready),
+             "pictures_pushed": len(pictures_pushed), "pictures_failed": pictures_failed}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
