@@ -1063,18 +1063,24 @@ def push_card_photo_live(row_id: str, account_num: int = 1, dry_run: bool = Fals
         normalize_quantities(variations)
         strip_selling_status(variations)
 
-        # Same fix as push_prices()'s multi-variation path (2026-09-12): drop
-        # the existing <Pictures> block before set_variation_picture() below
-        # re-adds it. Without this, a listing with a large enough picture
-        # count resends every OTHER card's picture entry just to change one,
-        # hitting eBay's volume-sensitive "System error" on ReviseFixedPriceItem.
-        # set_variation_picture() recreates <Pictures> from scratch containing
-        # only the one entry it's setting, so this stays a true single-picture
-        # push regardless of how many other cards are on the listing.
-        pictures_node = _find(variations, "Pictures")
-        if pictures_node is not None:
-            variations.remove(pictures_node)
-
+        # Deliberately NOT stripping the existing <Pictures> block (fixed
+        # 2026-09-18 -- this used to drop it here, matching push_prices()'s
+        # multi-variation price/qty fix, but that fix doesn't transfer to
+        # this function: dropping <Pictures> then having
+        # set_variation_picture() rebuild it from scratch means the ONLY
+        # entry in the sent block is this one card's -- and eBay's Pictures
+        # revise semantics turned out to be "replace the whole set with
+        # whatever's sent", not "merge". Confirmed live: looping this
+        # function over many cards silently erased every previous card's
+        # picture, leaving only the last one pushed. Leaving <Pictures>
+        # intact here lets set_variation_picture() update just this one
+        # <VariationSpecificPictureSet> entry within the existing tree,
+        # preserving every other variation's picture. The volume-sensitive
+        # System error risk this was originally guarding against is a
+        # real, separate constraint for VERY large listings (confirmed
+        # >~150-180 total embedded pictures in one call) -- but failing
+        # loud on an oversized single push beats silently wiping the
+        # listing's pictures on every normal one.
         specifics_set = get_specifics_set(variations)
         specific_name = next(iter(specifics_set), None)
         var_el = find_variation_by_specifics(variations, specific_name, external_id) if specific_name else None
