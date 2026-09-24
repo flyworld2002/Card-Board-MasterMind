@@ -32,7 +32,7 @@ from importer.ebay_variations_xml import (
     fetch_item, deep_copy_variations, strip_selling_status, normalize_quantities,
     find_variation_by_specifics, get_variation_specifics, set_variation_price_qty, get_specifics_set,
     insert_specifics_value, mark_variation_deleted, add_variation_row,
-    set_variation_picture, build_revise_xml,
+    set_variation_picture, build_revise_xml, assert_no_picture_loss,
 )
 from importer.ebay_listing_sync import (
     platform_sync_allowed, _render_variation_name, _compute_insert_position,
@@ -213,6 +213,7 @@ def _stage_promotion(cur, template, platform: str, listing_id: str, promote, pro
     promoted_name = promote.get("custom_name") or _render_variation_name(cur, promote["variant_id"], template["id"])
     position, promoted_row = _compute_insert_position(cur, variations, specific_name, listing_id,
                                                         promote["variant_id"], display_sort,
+                                                        template_id=template["id"],
                                                         extra_known=extra_known)
     insert_specifics_value(variations, specific_name, promoted_name, position=position)
 
@@ -323,9 +324,17 @@ def _do_promotions(cur, template, platform: str, listing_id: str, account_num: i
          sold-out active variation first, one-for-one swap (the original
          250-cap holdback design).
     Mutates `variations` in place (always safe — in-memory only). Returns
-    (promotions, pending_writes) — see _stage_promotion's docstring for
-    why pending_writes must only be executed after a successful live
-    Revise call, never for --dry-run.
+    (promotions, pending_writes, pictures_touched) — see _stage_promotion's
+    docstring for why pending_writes must only be executed after a
+    successful live Revise call, never for --dry-run. `pictures_touched`
+    (added 2026-09-23) tells the caller whether any set_variation_picture()
+    call happened in this batch — see its use in push_prices() for why:
+    <Pictures> must NOT have been stripped before this function runs if a
+    promoted card is going to need one added (set_variation_picture()
+    would recreate <Pictures> from scratch, containing ONLY the newly
+    promoted card's entry, silently wiping every pre-existing per-
+    variation picture on revise — confirmed live, 2026-09-22, ~145 of 150
+    pictures lost on the "30th Celebration" listing this way).
     """
     def p(msg):
         if not quiet:
@@ -339,13 +348,13 @@ def _do_promotions(cur, template, platform: str, listing_id: str, account_num: i
     )
     queued = list(cur.fetchall())
     if not queued:
-        return [], []
+        return [], [], False
 
     resolved_by_row_id = {r["row_id"]: r for r in resolved}
     specifics_set = get_specifics_set(variations)
     specific_name = next(iter(specifics_set), None)
     if specific_name is None:
-        return [], []
+        return [], [], False
     display_sort = template.get("display_sort") or "card_number"
 
     promotions = []
@@ -451,12 +460,14 @@ def _do_promotions(cur, template, platform: str, listing_id: str, account_num: i
     # happened for this whole batch — set_variation_picture() requires
     # <Pictures> to land after every <Variation> element, and this
     # function may have staged several promotions above.
+    pictures_touched = False
     for promotion in promotions:
         photo_urls = resolve_photo_urls(cur, promotion)
         if photo_urls:
             set_variation_picture(variations, promotion["external_id"], photo_urls)
+            pictures_touched = True
 
-    return promotions, pending_writes
+    return promotions, pending_writes, pictures_touched
 
 
 def push_prices(listing_id: str, account_num: int = 1, platform: str = "ebay",
@@ -553,31 +564,26 @@ def push_prices(listing_id: str, account_num: int = 1, platform: str = "ebay",
             summary["warnings"].append("listing_kind='variation' but no live <Variations> block")
             return summary
 
+        original_variations = deep_copy_variations(item)  # untouched, for assert_no_picture_loss() below
         variations = deep_copy_variations(item)
         normalize_quantities(variations)
         strip_selling_status(variations)
 
-        # Pictures are pushed through their own dedicated path
-        # (push_card_photo_live()) and never change as part of a routine
-        # price/qty revise, so resending the full <Pictures> block here is
-        # pure dead weight -- and a real bug found 2026-09-12: a listing
-        # with a large enough Pictures block (182 VariationSpecificPictureSet
-        # entries, confirmed via live testing -- every picture URL checked
-        # reachable, no structural anomalies) makes eBay's ReviseFixedPriceItem
-        # fail with a generic "System error" (error code 10007) on every
-        # single attempt, regardless of how few <Variation> rows are being
-        # revised or how small the rest of the payload is (isolated by
-        # trimming both independently). A smaller listing (104 entries) pushed
-        # fine at the same time on the same account, so this is a real,
-        # volume-sensitive limit on eBay's Pictures-processing path, not a
-        # data problem on our side. set_variation_picture() (called below by
-        # _do_promotions() when a newly-promoted card needs a photo) creates
-        # <Pictures> itself if missing, so dropping the existing block here
-        # is safe either way.
-        pictures_node = _find(variations, "Pictures")
-        if pictures_node is not None:
-            variations.remove(pictures_node)
-
+        # Pictures: NOT stripped here (fixed 2026-09-23 -- see
+        # _do_promotions()'s docstring). Stripping <Pictures> unconditionally
+        # at this point, BEFORE _do_promotions() runs, was the real bug
+        # behind ~145 of 150 pictures silently vanishing from the "30th
+        # Celebration" listing on 2026-09-22: when a queued card being
+        # promoted in this same call had a photo, _do_promotions() called
+        # set_variation_picture() to add it -- which recreates <Pictures>
+        # from scratch if it's missing, containing ONLY that one card's
+        # entry, not the other 149 that used to be there. The strip is now
+        # applied further below, AFTER _do_promotions() has run, and ONLY
+        # when it reports no picture was actually touched -- preserving the
+        # original 2026-09-12 perf/reliability win (a large Pictures block
+        # makes ReviseFixedPriceItem fail outright with a "System error"
+        # 10007 on some listings) for the common case of a pure price/qty
+        # push, without the data-loss risk on a promotion-with-photo push.
         specifics_set = get_specifics_set(variations)
         specific_name = next(iter(specifics_set), None)
 
@@ -607,8 +613,21 @@ def push_prices(listing_id: str, account_num: int = 1, platform: str = "ebay",
         # previous implementation executed these immediately) meant
         # --dry-run — or a POST that later failed — would still leave the
         # DB believing a card had gone live when eBay never received it.
-        promotions, pending_writes = _do_promotions(cur, template, platform, listing_id, account_num,
-                                                      resolved, variations, quiet)
+        promotions, pending_writes, pictures_touched = _do_promotions(
+            cur, template, platform, listing_id, account_num, resolved, variations, quiet)
+
+        # Safe to drop <Pictures> now (see the comment above) only if
+        # nothing in this batch just added/needs one -- a pure price/qty
+        # push has no picture data to lose, so stripping it here keeps the
+        # 2026-09-12 large-listing System-error avoidance for that common
+        # case. If a promotion DID touch a picture, `variations` already
+        # carries the full, correctly-merged <Pictures> block from
+        # _do_promotions() -- leave it alone.
+        if not pictures_touched:
+            pictures_node = _find(variations, "Pictures")
+            if pictures_node is not None:
+                variations.remove(pictures_node)
+
         for promo in promotions:
             p(f"  {promo['external_id']}: ${promo['resolved_price']:.2f}, qty -> {promo['qty_to_push']} "
               f"(newly promoted) [{promo['price_source']}]")
@@ -625,6 +644,15 @@ def push_prices(listing_id: str, account_num: int = 1, platform: str = "ebay",
             summary["pushed"] = len(pushed)
             summary["promoted"] = len(promotions)
             return summary
+
+        # Only check when a picture was actually touched -- when
+        # pictures_touched is False, `variations` deliberately has ZERO
+        # <VariationSpecificPictureSet> entries (the dead-weight omission,
+        # safe because omitting <Pictures> entirely means "don't touch",
+        # not "delete"), which would otherwise trip this guard as a false
+        # positive on every ordinary price/qty-only push.
+        if pictures_touched:
+            assert_no_picture_loss(original_variations, variations)
 
         xml = build_revise_xml(listing_id, variations, "ReviseFixedPriceItem", account_num=account_num)
         _post("ReviseFixedPriceItem", xml, account_num=account_num)
@@ -843,17 +871,26 @@ def push_single_card_live(row_id: str, account_num: int = 1, platform: str = "eb
             return {"row_id": row_id, "pushed": False, "dry_run": dry_run,
                      "error": "live listing has no <Variations> block — not a multi-variation listing"}
 
+        original_variations = deep_copy_variations(item)  # untouched, for assert_no_picture_loss() below
         variations = deep_copy_variations(item)
         normalize_quantities(variations)
         strip_selling_status(variations)
 
-        # Same fix as push_prices()/push_card_photo_live() (2026-09-12) —
-        # see push_prices()'s comment for the full explanation. This path
-        # also calls set_variation_picture() below, which recreates
-        # <Pictures> fine on its own.
-        pictures_node = _find(variations, "Pictures")
-        if pictures_node is not None:
-            variations.remove(pictures_node)
+        # Pictures: only stripped when THIS card has no photo to push
+        # (fixed 2026-09-23). Stripping unconditionally here, then having
+        # set_variation_picture() below "recreate" <Pictures> whenever this
+        # card DOES have a photo, doesn't recreate the old block -- it
+        # creates a brand-new one containing ONLY this one card's entry,
+        # silently wiping every other live variation's picture on revise.
+        # Same root cause as push_prices()'s 2026-09-22 incident (see
+        # _do_promotions()'s docstring) -- roster_row's card_photo_id/
+        # eps_picture_url is already known here, so we can check for a
+        # photo before deciding whether stripping is actually safe.
+        pending_photo_urls = resolve_photo_urls(cur, roster_row)
+        if not pending_photo_urls:
+            pictures_node = _find(variations, "Pictures")
+            if pictures_node is not None:
+                variations.remove(pictures_node)
 
         live_variation_count = len(_findall(variations, "Variation"))
         if live_variation_count >= 250:
@@ -893,6 +930,12 @@ def push_single_card_live(row_id: str, account_num: int = 1, platform: str = "eb
             p(f"[DRY-RUN] would push {promotion['external_id']!r} live on {listing_id}: "
               f"${promotion['resolved_price']:.2f}, qty {promotion['qty_to_push']}")
             return {**promotion, "pushed": False, "dry_run": True}
+
+        # Only check when a photo was actually pushed -- see push_prices()'s
+        # identical guard for why an intentional zero-picture strip
+        # (photo_urls empty) must not trip this as a false positive.
+        if photo_urls:
+            assert_no_picture_loss(original_variations, variations)
 
         xml = build_revise_xml(listing_id, variations, "ReviseFixedPriceItem", account_num=account_num)
         _post("ReviseFixedPriceItem", xml, account_num=account_num)

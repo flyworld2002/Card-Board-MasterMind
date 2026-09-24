@@ -15,6 +15,15 @@ for the 250-cap holdback queue).
 Every function here operates on a deep copy of the <Variations> element —
 callers must fetch fresh via fetch_item() and deep-copy before mutating,
 never mutate the node returned by fetch_item() directly.
+
+**Before any build_revise_xml() call that resends the FULL <Variations>
+block** (not a single targeted mutation like set_variation_picture() for
+one variation, which only ever adds/replaces its own entry) — call
+assert_no_picture_loss(before, after) with a fresh pre-mutation snapshot
+as `before`. See that function's docstring for the 2026-09-22 incident
+this exists to catch: a full-tree resend silently dropped ~145 of 150
+per-variation pictures despite following the "byte-for-byte" pattern
+above.
 """
 
 import copy
@@ -326,6 +335,48 @@ def set_variation_picture(variations: ET.Element, specific_value: str, picture_u
     for url in picture_urls:
         pic_url_el = ET.SubElement(target_vsp, f"{{{NS}}}PictureURL")
         pic_url_el.text = url
+
+
+def count_variation_pictures(variations: ET.Element) -> int:
+    """Number of <VariationSpecificPictureSet> entries currently in
+    `variations` -- the cheap signal for assert_no_picture_loss()."""
+    pics = _find(variations, "Pictures")
+    return len(_findall(pics, "VariationSpecificPictureSet")) if pics is not None else 0
+
+
+def assert_no_picture_loss(before: ET.Element, after: ET.Element) -> None:
+    """
+    Hard guard: raises RuntimeError if `after` (the tree about to be sent
+    to build_revise_xml + _post) has FEWER <VariationSpecificPictureSet>
+    entries than `before` (a fresh fetch_item()/deep_copy_variations()
+    snapshot taken before any mutation). Call this immediately before
+    every build_revise_xml() call that resends the FULL <Variations>
+    block rather than a single targeted mutation (set_variation_picture()
+    for one variation is exempt -- it only ever adds/replaces one entry,
+    never touches the rest).
+
+    Real incident, 2026-09-22: a one-off script reordered
+    VariationSpecificsSet's value list on a 150-variation listing,
+    resent the "unchanged" rest of the tree per this module's own
+    byte-for-byte pattern, and eBay silently dropped ~145 of 150
+    per-variation pictures anyway -- exact mechanism never fully pinned
+    down (GetItem read back correctly both before and after a later,
+    successful revise, so it isn't a simple fetch-side truncation), but
+    the process gap was real: nothing checked the picture count was
+    still intact before that revise went out. This closes that gap
+    mechanically instead of relying on a human remembering to check.
+    """
+    before_count = count_variation_pictures(before)
+    after_count = count_variation_pictures(after)
+    if after_count < before_count:
+        raise RuntimeError(
+            f"Refusing to revise: <VariationSpecificPictureSet> count would drop "
+            f"from {before_count} to {after_count}. This is the exact failure mode "
+            f"that wiped 30th Celebration's pictures on 2026-09-22 -- investigate "
+            f"before overriding. If this drop is actually intended (e.g. a variation "
+            f"was deliberately removed), rebuild `before` from a fresh fetch after "
+            f"confirming, don't bypass this check."
+        )
 
 
 def build_revise_xml(item_id: str, variations: ET.Element,

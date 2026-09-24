@@ -526,11 +526,23 @@ _INSERT_POSITION_SORT_SENTINEL = 10 ** 9  # missing key sorts last, not first/er
 
 def _insert_position_sort_key(row: dict, display_sort: str) -> tuple:
     """Comparable key tuple for one card, matching resolve_listing_prices()'s
-    5 display_sort modes (migration 036) — 'card_number' and 'number' share
-    the identical comparison (card_number_numeric only) since neither
-    tracks set boundaries here. Missing components (no release_year, no
-    matching rarities row) fall back to a large sentinel so they sort
-    last rather than raising or sorting first."""
+    6 display_sort modes (migration 036 + the 'manual' mode added
+    2026-09-18) — 'card_number' and 'number' share the identical
+    comparison (card_number_numeric only) since neither tracks set
+    boundaries here. Missing components (no release_year, no matching
+    rarities row, no listing_card_assignments row for 'manual') fall back
+    to a large sentinel so they sort last rather than raising or sorting
+    first.
+
+    'manual' sorts by priority_rank alone (the roster's hand-set order,
+    already set-block-grouped by whoever assigned the ranks) rather than
+    falling through to the card_number-only default below -- confirmed
+    live 2026-09-22: promoting a queued card into a 'manual' listing
+    landed it by raw card_number_numeric across the WHOLE mixed-set
+    roster (ignoring the Promo/main-set/Classic-Collection/Energies
+    block structure priority_rank encodes), so e.g. Pikachu #35 and
+    Pikachu ex #54 landed in the wrong slot relative to their real
+    priority_rank neighbors despite the DB being correctly sorted."""
     num = row["card_number_numeric"] if row["card_number_numeric"] is not None else _INSERT_POSITION_SORT_SENTINEL
     if display_sort == "alpha":
         return (row["card_name"],)
@@ -539,24 +551,30 @@ def _insert_position_sort_key(row: dict, display_sort: str) -> tuple:
         return (year, row["set_name"], num)
     if display_sort == "rarity":
         return (row["rarity_sort_order"], num)
+    if display_sort == "manual":
+        rank = row["priority_rank"] if row.get("priority_rank") is not None else _INSERT_POSITION_SORT_SENTINEL
+        return (rank,)
     return (num,)  # 'card_number' / 'number' / any unrecognized value
 
 
 def _compute_insert_position(cur, variations, specific_name: str, item_id_: str,
                               promoted_variant_id: str, display_sort: str,
-                              extra_known: dict = None):
+                              template_id: str = None, extra_known: dict = None):
     """
     Where in VariationSpecificsSet's value list the promoted card's name
-    belongs, per display_sort — all 5 modes implemented (migration 036
-    brought resolve_listing_prices() up to the same 5; this brings
-    promotion-insert positioning up to match). Known limitation carried
-    forward unchanged from before this: 'card_number'/'number' only ever
-    compare card_number_numeric, never set membership, so promoting a
-    card into an already-live listing can't perfectly reproduce
-    'card_number's creation-time set-grouped order — matching per-set
-    block boundaries in a live VariationSpecificsSet is a materially
-    bigger feature. Not a regression: this function only ever implemented
-    that same approximation for 'card_number' before this change too.
+    belongs, per display_sort — all 6 modes implemented (migration 036
+    brought resolve_listing_prices() up to 5; 'manual' added 2026-09-22,
+    reading listing_card_assignments.priority_rank via `template_id`).
+    Known limitation carried forward unchanged from before this:
+    'card_number'/'number' only ever compare card_number_numeric, never
+    set membership, so promoting a card into an already-live listing
+    can't perfectly reproduce 'card_number's creation-time set-grouped
+    order — matching per-set block boundaries in a live
+    VariationSpecificsSet is a materially bigger feature. Not a
+    regression: this function only ever implemented that same
+    approximation for 'card_number' before this change too. 'manual'
+    doesn't have this limitation since priority_rank already encodes the
+    full cross-set block order directly.
 
     `extra_known` lets a caller promoting several cards in the same batch
     (same _do_promotions() call, one eBay Revise at the end) supply the
@@ -584,15 +602,18 @@ def _compute_insert_position(cur, variations, specific_name: str, item_id_: str,
     cur.execute(
         """
         SELECT elm.variation_name, cm.card_number_numeric, cm.name AS card_name,
-               cs.name AS set_name, cs.release_year, COALESCE(r.sort_order, 999999) AS rarity_sort_order
+               cs.name AS set_name, cs.release_year, COALESCE(r.sort_order, 999999) AS rarity_sort_order,
+               lca.priority_rank
         FROM ebay_listing_map elm
         JOIN card_variants cv ON elm.variant_id = cv.id
         JOIN card_master cm ON cv.card_id = cm.id
         JOIN card_sets cs ON cm.set_id = cs.id
         LEFT JOIN rarities r ON cm.rarity = r.code
+        LEFT JOIN listing_card_assignments lca
+               ON lca.variant_id = cv.id AND lca.template_id = %s
         WHERE elm.item_id = %s
         """,
-        (item_id_,),
+        (template_id, item_id_),
     )
     known = {r["variation_name"]: r for r in cur.fetchall()}
     if extra_known:
@@ -601,14 +622,17 @@ def _compute_insert_position(cur, variations, specific_name: str, item_id_: str,
     cur.execute(
         """
         SELECT cm.card_number_numeric, cm.name AS card_name,
-               cs.name AS set_name, cs.release_year, COALESCE(r.sort_order, 999999) AS rarity_sort_order
+               cs.name AS set_name, cs.release_year, COALESCE(r.sort_order, 999999) AS rarity_sort_order,
+               lca.priority_rank
         FROM card_variants cv
         JOIN card_master cm ON cv.card_id = cm.id
         JOIN card_sets cs ON cm.set_id = cs.id
         LEFT JOIN rarities r ON cm.rarity = r.code
+        LEFT JOIN listing_card_assignments lca
+               ON lca.variant_id = cv.id AND lca.template_id = %s
         WHERE cv.id = %s
         """,
-        (promoted_variant_id,),
+        (template_id, promoted_variant_id),
     )
     promoted_row = cur.fetchone()
     if promoted_row is None:
