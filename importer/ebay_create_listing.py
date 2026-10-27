@@ -292,12 +292,23 @@ def preview_new_listing(template_id: str, account_num: int = 1, platform: str = 
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _build_add_item_xml(template: dict, variations: ET.Element, total_qty: int,
-                         min_price: float, account_num: int, dry_run: bool = False) -> str:
+                         min_price: float, account_num: int, dry_run: bool = False,
+                         picture_url: str = None) -> str:
     """Builds the full AddFixedPriceItem request. Free-text fields
     (Title/Description) go through ElementTree's own text-node
     serialization so `&`/`<`/`>` in a real HTML description get escaped
     correctly — unlike every other XML builder in this codebase, this is
     the first one carrying genuinely arbitrary text, not just numbers/IDs.
+
+    picture_url: a single general-item photo. eBay's AddFixedPriceItem
+    rejects a listing with zero pictures outright ("Add at least 1
+    photo", confirmed live) even though the real per-variation pictures
+    are deliberately pushed AFTER creation (see the comment in
+    create_listing() about the large-Pictures-block bug) — this is only
+    ONE picture, nowhere near the scale that broke, so it's safe to embed
+    here to satisfy that minimum. create_listing() passes any ready row's
+    existing photo; push_all_photos_for_template() then fixes up the
+    real per-variation set right after.
 
     dry_run=True substitutes a placeholder for the real auth token —
     this is the first push in this feature whose dry-run output returns
@@ -319,6 +330,10 @@ def _build_add_item_xml(template: dict, variations: ET.Element, total_qty: int,
 
     category = ET.SubElement(item, f"{{{NS}}}PrimaryCategory")
     ET.SubElement(category, f"{{{NS}}}CategoryID").text = template["category_id"]
+
+    if picture_url:
+        pic_details = ET.SubElement(item, f"{{{NS}}}PictureDetails")
+        ET.SubElement(pic_details, f"{{{NS}}}PictureURL").text = picture_url
 
     add("ListingType", "FixedPriceItem")
     add("ListingDuration", template["listing_duration"])
@@ -441,12 +456,12 @@ def create_listing(template_id: str, account_num: int = 1, platform: str = "ebay
                                quantity=r["available_qty"], start_price=float(r["resolved_price"]))
             r["_promoted_name"] = promoted_name
 
-        # Pictures are deliberately NOT embedded in the AddFixedPriceItem
-        # call itself (2026-09-18 fix). A 145-variation / 137-picture
-        # listing created that way came back with zero pictures live —
-        # eBay silently dropped the whole <Pictures> block rather than
-        # erroring, the same "System error" fingerprint already found and
-        # fixed on ReviseFixedPriceItem earlier (see the Pictures-strip
+        # Per-variation pictures are deliberately NOT embedded in the
+        # AddFixedPriceItem call itself (2026-09-18 fix). A 145-variation /
+        # 137-picture listing created that way came back with zero pictures
+        # live — eBay silently dropped the whole <Pictures> block rather
+        # than erroring, the same "System error" fingerprint already found
+        # and fixed on ReviseFixedPriceItem earlier (see the Pictures-strip
         # fix in ebay_pushprices.py) just manifesting as a silent drop
         # instead of an explicit error on create. Confirmed via dry-run
         # that this function's own XML generation was already correct
@@ -455,11 +470,23 @@ def create_listing(template_id: str, account_num: int = 1, platform: str = "ebay
         # block, not in this code. Pictures are pushed individually via
         # push_card_photo_live() (proven reliable, ReviseFixedPriceItem,
         # one variation at a time) right after creation succeeds instead.
+        #
+        # BUT eBay rejects a listing with literally zero pictures outright
+        # ("Add at least 1 photo", confirmed live 2026-10-20) — a single
+        # general photo is nowhere near the scale that broke, so grab any
+        # ready row's existing photo (card_photo_id wins, same ordering
+        # resolve_photo_urls() already uses) to satisfy that minimum.
+        picture_url = None
+        for r in ready:
+            urls = resolve_photo_urls(cur, r)
+            if urls:
+                picture_url = urls[0]
+                break
 
         total_qty = sum(r["available_qty"] for r in ready)
         min_price = min(float(r["resolved_price"]) for r in ready)
         xml = _build_add_item_xml(template, variations, total_qty, min_price, account_num,
-                                   dry_run=dry_run)
+                                   dry_run=dry_run, picture_url=picture_url)
 
         if dry_run:
             p(f"[DRY-RUN] would create a new listing with {len(ready)} card(s), "
@@ -510,34 +537,73 @@ def create_listing(template_id: str, account_num: int = 1, platform: str = "ebay
                 (new_item_id, new_item_id, r["_promoted_name"], r["variant_id"]),
             )
 
-    p(f"[{new_item_id}] created new listing with {len(ready)} card(s) ({len(not_ready)} left queued).")
-
-    # Pictures pushed one variation at a time, now that the listing (and
-    # every row's platform_listing_id) genuinely exists live -- see the
-    # comment above the AddFixedPriceItem build for why this isn't done
-    # as part of that call. Best-effort: a failure on one card's picture
-    # doesn't roll back the listing itself, which is already live and
-    # correct on qty/price at this point.
-    from importer.ebay_pushprices import push_card_photo_live
-    pictures_pushed, pictures_failed = [], []
-    with db_cursor() as cur:
-        for r in ready:
-            if not resolve_photo_urls(cur, r):
-                continue
-            try:
-                result = push_card_photo_live(row_id=r["row_id"], account_num=account_num, quiet=True)
-                if result.get("pushed"):
-                    pictures_pushed.append(r["row_id"])
-                else:
-                    pictures_failed.append({"row_id": r["row_id"], "card_name": r["card_name"], "result": result})
-            except Exception as e:
-                pictures_failed.append({"row_id": r["row_id"], "card_name": r["card_name"], "error": str(e)})
-
-    p(f"[{new_item_id}] pictures: {len(pictures_pushed)} pushed, {len(pictures_failed)} failed.")
+    p(f"[{new_item_id}] created new listing with {len(ready)} card(s) ({len(not_ready)} left queued). "
+      f"Pictures not pushed yet -- call push_all_photos_for_template() next.")
 
     return {"template_id": template_id, "created": True, "dry_run": False,
-             "listing_id": new_item_id, "ready_count": len(ready), "not_ready_count": len(not_ready),
-             "pictures_pushed": len(pictures_pushed), "pictures_failed": pictures_failed}
+             "listing_id": new_item_id, "ready_count": len(ready), "not_ready_count": len(not_ready)}
+
+
+def push_all_photos_for_template(template_id: str, account_num: int = 1, quiet: bool = False) -> dict:
+    """
+    Pushes every photo-assigned, already-'active' roster row's picture
+    live for one template, one ReviseFixedPriceItem per variation (via
+    push_card_photo_live()) -- "photo-assigned" means card_photo_id OR
+    the legacy single eps_picture_url column (same either/or
+    resolve_photo_urls() already uses; found 2026-10-20 that the WHERE
+    clause here only checked card_photo_id, silently skipping every row
+    staged before the per-copy photo feature existed -- 147 of 172 on
+    the first live run this was used for) -- 2026-09-18, split out of create_listing()
+    itself after a 145-variation/137-picture listing came up with ZERO
+    pictures live. Root cause: embedding that many sequential picture
+    pushes inside create_listing()'s own synchronous return path made the
+    whole call take minutes, which blew past picking_api.py's caller's
+    (the web app's fetch()) timeout -- the loop likely never finished, or
+    never even started, before the connection was cut. AddFixedPriceItem
+    itself is fast and unaffected; only the picture-push tail was at risk.
+
+    Deliberately a separate, callable-on-its-own function now so the
+    picking_api.py endpoint can schedule it as a background task AFTER
+    responding to the client for the (fast) listing creation, instead of
+    making the browser wait through the whole thing. Also directly
+    reusable for backfilling/repairing an existing live listing's
+    pictures without needing a one-off script each time.
+    """
+    def p(msg):
+        if not quiet:
+            print(msg)
+
+    from importer.ebay_pushprices import push_card_photo_live
+
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT lca.id AS row_id, cm.name AS card_name, cm.card_number
+            FROM listing_card_assignments lca
+            JOIN card_variants cv ON cv.id = lca.variant_id
+            JOIN card_master cm ON cm.id = cv.card_id
+            WHERE lca.template_id = %s AND lca.status = 'active'
+              AND (lca.card_photo_id IS NOT NULL OR lca.eps_picture_url IS NOT NULL)
+            ORDER BY cm.card_number_numeric
+            """,
+            (template_id,),
+        )
+        rows = cur.fetchall()
+
+    pushed, failed = [], []
+    for r in rows:
+        try:
+            result = push_card_photo_live(row_id=str(r["row_id"]), account_num=account_num, quiet=True)
+            if result.get("pushed"):
+                pushed.append(r["card_number"])
+            else:
+                failed.append({"card_number": r["card_number"], "card_name": r["card_name"], "result": result})
+        except Exception as e:
+            failed.append({"card_number": r["card_number"], "card_name": r["card_name"], "error": str(e)})
+
+    p(f"[template {template_id}] pictures: {len(pushed)} pushed, {len(failed)} failed "
+      f"(of {len(rows)} photo-assigned rows).")
+    return {"template_id": template_id, "total": len(rows), "pushed": len(pushed), "failed": failed}
 
 
 # ══════════════════════════════════════════════════════════════════════════════

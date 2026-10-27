@@ -61,7 +61,7 @@ import threading
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -73,7 +73,8 @@ from importer.ebay_pushprices import (
 )
 from importer.ebay_create_listing import (
     list_business_policies, clone_listing_metadata, set_manual_listing_metadata,
-    revise_listing_metadata, preview_new_listing, create_listing, ALL_METADATA_FIELDS,
+    revise_listing_metadata, preview_new_listing, create_listing,
+    push_all_photos_for_template, ALL_METADATA_FIELDS,
 )
 from importer.ebay_descriptions import (
     preview_description, sync_description, list_description_sections,
@@ -812,7 +813,8 @@ def preview_new_listing_endpoint(template_id: str, account_num: int = 1,
 
 
 @app.post("/api/create-listing")
-def create_listing_endpoint(body: CreateListingRequest, x_picking_token: str = Header(default="")):
+def create_listing_endpoint(body: CreateListingRequest, background_tasks: BackgroundTasks,
+                             x_picking_token: str = Header(default="")):
     """
     Creates a genuinely NEW eBay listing (AddFixedPriceItem) from a
     template's ready queued roster in one batch — the first-ever write
@@ -821,6 +823,14 @@ def create_listing_endpoint(body: CreateListingRequest, x_picking_token: str = H
     already does. Own lock, same reasoning as every other write endpoint
     here. --dry-run (body.dry_run) builds and returns the full request
     without ever sending it to eBay.
+
+    Pictures are pushed AFTER this responds, as a background task
+    (2026-09-18) — create_listing() itself no longer pushes them inline.
+    A 137-picture push took long enough, sequentially, that it blew past
+    the browser's fetch() timeout when it ran inside this same request;
+    the listing came up live with zero pictures and no visible error.
+    Scheduling it as a background task lets the (fast) listing creation
+    respond immediately while pictures land afterward on their own time.
     """
     if x_picking_token != API_TOKEN:
         raise HTTPException(status_code=401, detail="bad token")
@@ -834,6 +844,14 @@ def create_listing_endpoint(body: CreateListingRequest, x_picking_token: str = H
 
     if result.get("error"):
         raise HTTPException(status_code=400, detail=result["error"])
+
+    if result.get("created") and not body.dry_run:
+        background_tasks.add_task(
+            push_all_photos_for_template, template_id=body.template_id,
+            account_num=body.account_num, quiet=True,
+        )
+        result["pictures_scheduled"] = True
+
     return result
 
 
