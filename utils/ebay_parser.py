@@ -86,6 +86,20 @@ PROMO_PATTERNS = [
     ),
 ]
 
+# ── Prefix-coded sub-product overrides ────────────────────────────────────────
+# "Pokemon TCG Classic" splits into 3 same-listing sub-packs (Blastoise/
+# Charizard/Venusaur decks), each with its OWN independent 1-N numbering —
+# disambiguated on eBay by a short prefix before the usual "NNN/NNN Name"
+# text, e.g. "CLV 001/034 Bulbasaur". Unlike PROMO_PATTERNS (which replaces
+# the whole number shape — promos use a bare number, no "/NNN" denominator),
+# this just strips the prefix and records set_override, then falls through
+# to Step 1's normal "NNN/NNN Name" parse below unchanged.
+SET_PREFIX_OVERRIDES = {
+    "CLB": "Pokemon Trading Card Game Classic-Deck B",
+    "CLC": "Pokemon Trading Card Game Classic-Deck C",
+    "CLV": "Pokemon Trading Card Game Classic-Deck V",
+}
+
 # ── Internal-label → lookup-code normalization ────────────────────────────────
 # The detection logic below uses human labels internally (legacy). This maps
 # them to the seven-axis lookup CODES the DB expects. Anything not mapped → None
@@ -209,6 +223,11 @@ def parse_variation_name(variation_name: str, listing_title: str = "") -> dict:
     }
 
     name = variation_name.strip()
+
+    prefix_match = re.match(r'^(CLB|CLC|CLV)\s+(.+)$', name, re.IGNORECASE)
+    if prefix_match:
+        result["set_override"] = SET_PREFIX_OVERRIDES[prefix_match.group(1).upper()]
+        name = prefix_match.group(2).strip()
 
     # ── Step 0: Detect promo patterns BEFORE standard parsing ────────────────
     for promo_re, promo_set in PROMO_PATTERNS:
