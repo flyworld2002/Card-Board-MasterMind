@@ -330,15 +330,33 @@ def get_or_create_variant(card_id: str,
 
 def upsert_market_price(variant_id: str, condition: str,
                         market_price: float, source: str = "tcgplayer"):
-    """Insert or update market price for a variant+condition."""
+    """Insert or update market price for a variant+condition.
+
+    Shifts the current price into previous_market_price (migration 054)
+    right before overwriting it, but ONLY when the new price actually
+    differs — an unchanged refresh must not churn "previous" into "same
+    as current" every time a job re-runs. Lets the Listing Pricing UI
+    show "was $X, now $Y" without a separate history table.
+    """
     with db_cursor() as cur:
         cur.execute("""
             INSERT INTO market_prices (variant_id, condition, market_price, source, updated_at)
             VALUES (%s, %s, %s, %s, NOW())
             ON CONFLICT (variant_id, condition)
-            DO UPDATE SET market_price = EXCLUDED.market_price,
-                          source       = EXCLUDED.source,
-                          updated_at   = NOW()
+            DO UPDATE SET
+                previous_market_price = CASE
+                    WHEN market_prices.market_price IS DISTINCT FROM EXCLUDED.market_price
+                    THEN market_prices.market_price
+                    ELSE market_prices.previous_market_price
+                END,
+                previous_updated_at = CASE
+                    WHEN market_prices.market_price IS DISTINCT FROM EXCLUDED.market_price
+                    THEN market_prices.updated_at
+                    ELSE market_prices.previous_updated_at
+                END,
+                market_price = EXCLUDED.market_price,
+                source       = EXCLUDED.source,
+                updated_at   = NOW()
         """, (variant_id, condition, market_price, source))
 
 
