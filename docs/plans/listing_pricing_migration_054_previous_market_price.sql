@@ -16,7 +16,13 @@ ALTER TABLE market_prices
   ADD COLUMN previous_market_price numeric,
   ADD COLUMN previous_updated_at timestamptz;
 
-CREATE OR REPLACE FUNCTION public.resolve_listing_prices(p_platform text, p_listing_id text DEFAULT NULL::text, p_template_id uuid DEFAULT NULL::uuid)
+-- Adding a column to the RETURNS TABLE shape isn't a same-signature
+-- replace as far as Postgres is concerned ("Row type defined by OUT
+-- parameters is different") -- confirmed live 2026-10-26 -- so the old
+-- definition has to be dropped first.
+DROP FUNCTION IF EXISTS public.resolve_listing_prices(text, text, uuid);
+
+CREATE FUNCTION public.resolve_listing_prices(p_platform text, p_listing_id text DEFAULT NULL::text, p_template_id uuid DEFAULT NULL::uuid)
  RETURNS TABLE(row_id uuid, platform_listing_id uuid, card_id uuid, variant_id uuid, card_name text, card_number text, image_url text, derived_label text, set_name text, card_number_numeric integer, status text, group_id uuid, group_name text, market_price numeric, market_price_source text, previous_market_price numeric, resolved_price numeric, price_source text, available_qty integer, low_stock_qty integer, quantity_limit integer, manual_price numeric, row_low_stock_qty integer, row_quantity_limit integer, custom_name text, eps_picture_url text, total_inventory_qty integer, card_photo_id uuid)
  LANGUAGE plpgsql
  STABLE
