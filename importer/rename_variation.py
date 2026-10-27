@@ -58,9 +58,15 @@ import copy
 import sys
 import xml.etree.ElementTree as ET
 
+from db.connection import db_cursor
 from importer.ebay import _post, _find, _findall, _text, NS
 from importer.ebay_auth import get_user_token
-from importer.ebay_variations_xml import fetch_item, EBAY_VARIATION_VALUE_MAX_LEN
+from importer.ebay_variations_xml import (
+    fetch_item, build_revise_xml, EBAY_VARIATION_VALUE_MAX_LEN,
+    deep_copy_variations, normalize_quantities, strip_selling_status,
+    find_variation_by_specifics, get_specifics_set, insert_specifics_value,
+    add_variation_row, set_variation_picture,
+)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -538,6 +544,405 @@ def cmd_apply(item_id: str, specific_name: str, old_value: str, new_value: str):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# `bulk-preview` / `bulk-apply` — resync MANY variation names on one listing
+# to whatever the render_variation_name() Postgres RPC currently computes,
+# in ONE ReviseItem call, instead of one apply per value. Built 2026-09-02
+# for a listing whose card_sets.base_set_number was corrected after the
+# listing was first pushed, leaving 130 live variation names stale — but
+# not scoped to that one cause: this resyncs against whatever the RPC
+# says right now, so it's the right tool for any future case of the same
+# "DB says one thing, eBay's live text says another" drift (already hit
+# twice this session — this listing, and a single-card version of the
+# same problem on a Stellar Crown listing fixed by hand).
+# ══════════════════════════════════════════════════════════════════════════════
+
+def compute_bulk_renames(item_id: str, specific_name: str, only: list[str] = None):
+    """
+    Returns (item, summary, renames, needs_reconcile):
+      item / summary   - fresh GetItem + its summarize() (same as preview/apply)
+      renames           - {current_live_value: correct_value} for every row
+                           whose stored platform_listings.external_id no
+                           longer matches what render_variation_name() computes
+      needs_reconcile   - platform_listings rows whose external_id doesn't
+                           match ANY live VariationSpecifics value at all
+                           (stale beyond a simple rename — same "needs manual
+                           reconcile in Seller Hub" case this codebase already
+                           flags elsewhere) -- never included in `renames`.
+    `only`, if given, is a list of card_number strings (matched against
+    card_master.card_number_numeric) restricting the batch to just those
+    rows -- everything else is left out of `renames` entirely, even if it
+    would otherwise need renaming. Used for the staged 1-card / 2-card /
+    rest rollout instead of always touching every mismatched row.
+    """
+    with db_cursor() as cur:
+        cur.execute(
+            "SELECT id FROM listing_templates WHERE listing_id = %s AND platform = 'ebay'",
+            (item_id,),
+        )
+        template_row = cur.fetchone()
+        if template_row is None:
+            raise RuntimeError(f"No listing_templates row found for eBay item {item_id!r}.")
+        template_id = template_row["id"]
+
+        cur.execute(
+            """
+            SELECT pl.id AS pl_id, pl.external_id, cm.card_number, cm.card_number_numeric,
+                   render_variation_name(pl.variant_id, %s) AS correct_name
+            FROM platform_listings pl
+            JOIN card_variants cv ON pl.variant_id = cv.id
+            JOIN card_master cm ON cv.card_id = cm.id
+            WHERE pl.listing_id = %s AND pl.status IN ('active', 'out_of_stock')
+            """,
+            (template_id, item_id),
+        )
+        rows = cur.fetchall()
+
+    if only:
+        only_set = {str(int(n)) for n in only}
+        rows = [r for r in rows if str(r["card_number_numeric"]) in only_set]
+
+    item = fetch_item(item_id)
+    summary = summarize(item)
+    live_values = set(summary["specifics_set"].get(specific_name, []))
+
+    renames = {}
+    needs_reconcile = []
+    for r in rows:
+        if not r["external_id"] or r["external_id"] == r["correct_name"]:
+            continue
+        if r["external_id"] not in live_values:
+            needs_reconcile.append(r)
+            continue
+        renames[r["external_id"]] = r["correct_name"]
+
+    return item, summary, renames, needs_reconcile
+
+
+def fetch_sku_map(item_id: str) -> dict:
+    """
+    {external_id: platform_listings.id} for EVERY active/out_of_stock row
+    on this listing -- deliberately ignores any `--only` filter, since
+    "SKU required in every variation" (found 2026-09-02 on this listing)
+    means every row in the resent <Variations> block needs one, not just
+    whichever row(s) a given bulk-apply call happens to be renaming.
+    """
+    with db_cursor() as cur:
+        cur.execute(
+            "SELECT id, external_id FROM platform_listings "
+            "WHERE listing_id = %s AND status IN ('active', 'out_of_stock') AND external_id IS NOT NULL",
+            (item_id,),
+        )
+        return {row["external_id"]: str(row["id"]) for row in cur.fetchall()}
+
+
+def print_bulk_preview(item_id: str, summary: dict, specific_name: str, renames: dict, needs_reconcile: list):
+    print(f"Item {item_id}: {summary['title']}")
+    if not renames and not needs_reconcile:
+        print("\nNothing to rename — every row already matches render_variation_name().")
+        return
+
+    print(f"\n{len(renames)} row(s) to rename:")
+    for old_value, new_value in renames.items():
+        print(f"  {old_value!r} -> {new_value!r}")
+
+    existing_values = set(summary["specifics_set"].get(specific_name, []))
+    dupes = set(renames.values()) & (existing_values - set(renames.keys()))
+    if dupes:
+        print(f"\n⚠️  {len(dupes)} new value(s) already exist as a DIFFERENT distinct value — "
+              f"this tool will refuse to apply: {sorted(dupes)}")
+
+    too_long = {v for v in renames.values() if len(v) > EBAY_VARIATION_VALUE_MAX_LEN}
+    if too_long:
+        print(f"\n⚠️  {len(too_long)} new value(s) exceed eBay's {EBAY_VARIATION_VALUE_MAX_LEN}-char "
+              f"limit and will likely be rejected: {sorted(too_long)}")
+
+    if needs_reconcile:
+        print(f"\n{len(needs_reconcile)} row(s) skipped — their stored external_id doesn't match "
+              "ANY live value right now (stale beyond a rename, needs manual reconcile):")
+        for r in needs_reconcile:
+            print(f"  card_number={r['card_number']!r} external_id={r['external_id']!r}")
+
+
+def cmd_bulk_preview(item_id: str, specific_name: str, only: list[str] = None):
+    item, summary, renames, needs_reconcile = compute_bulk_renames(item_id, specific_name, only)
+    if not summary["has_variations"]:
+        print(f"Item {item_id} ({summary['title']}) is not a variation listing. Nothing to do.")
+        return
+    print_bulk_preview(item_id, summary, specific_name, renames, needs_reconcile)
+    print("\n(DRY RUN — no changes were made. Re-run with `bulk-apply` to make this change.)")
+
+
+def build_revised_variations_bulk(item: ET.Element, specific_name: str, renames: dict,
+                                   sku_by_value: dict = None) -> tuple:
+    """
+    Same contract as build_revised_variations() (deep-copy <Variations>,
+    strip <SellingStatus>, everything except the renamed text nodes sent
+    back byte-for-byte unchanged) generalized to rewrite every
+    old_value -> new_value pair in `renames` in ONE pass instead of one
+    old/new pair at a time.
+
+    Also drops any VariationSpecificsSet[specific_name] value that has NO
+    corresponding live <Variation> row at all -- eBay's ReviseItem
+    rejects the whole call outright ("Variation Specifics provided does
+    not match...") if the declared set and the actual rows disagree, and
+    this codebase already has real examples of a specifics set
+    accumulating orphaned values over time (old/removed variations never
+    cleaned up). Nothing live references an orphan value by definition,
+    so dropping it changes nothing about any real row's name, qty,
+    price, or picture.
+
+    `sku_by_value`, if given, maps each row's CURRENT (pre-rename)
+    specifics text -> the SKU to assign it (only for rows that don't
+    already have one) -- found 2026-09-02 that this particular listing's
+    ReviseItem calls are rejected outright ("SKU is required in every
+    variation for items that are fulfilled by eBay") until every
+    variation carries a SKU; since ReviseItem always resends the WHOLE
+    <Variations> block, this has to be set on every row in the same call
+    as any rename, not just the row(s) actually being renamed. Uses each
+    row's own platform_listings.id (a UUID, guaranteed unique, needs no
+    new column or naming scheme) as its SKU -- see cmd_bulk_apply.
+
+    Returns (variations, renamed_count, dropped_orphans, skus_added).
+    """
+    variations_node = _find(item, "Variations")
+    if variations_node is None:
+        raise RuntimeError("Item has no <Variations> block — nothing to rename.")
+
+    variations = copy.deepcopy(variations_node)
+    renamed_count = 0
+    skus_added = 0
+
+    live_row_values = set()
+    for var in _findall(variations, "Variation"):
+        specifics_node = _find(var, "VariationSpecifics")
+        if specifics_node is None:
+            continue
+        for nvl in _findall(specifics_node, "NameValueList"):
+            if _text(nvl, "Name") != specific_name:
+                continue
+            val_el = _find(nvl, "Value")
+            if val_el is not None and val_el.text:
+                live_row_values.add(val_el.text.strip())
+
+    dropped_orphans = []
+    specifics_set_node = _find(variations, "VariationSpecificsSet")
+    if specifics_set_node is not None:
+        for nvl in _findall(specifics_set_node, "NameValueList"):
+            if _text(nvl, "Name") != specific_name:
+                continue
+            for val_el in list(_findall(nvl, "Value")):
+                text = val_el.text.strip() if val_el.text else None
+                if text is not None and text not in live_row_values:
+                    nvl.remove(val_el)
+                    dropped_orphans.append(text)
+                    continue
+                if text in renames:
+                    val_el.text = renames[text]
+                    renamed_count += 1
+
+    for var in _findall(variations, "Variation"):
+        original_value = None
+        specifics_node = _find(var, "VariationSpecifics")
+        if specifics_node is not None:
+            for nvl in _findall(specifics_node, "NameValueList"):
+                if _text(nvl, "Name") != specific_name:
+                    continue
+                val_el = _find(nvl, "Value")
+                if val_el is not None and val_el.text:
+                    original_value = val_el.text.strip()
+                    if original_value in renames:
+                        val_el.text = renames[original_value]
+                        renamed_count += 1
+
+        if sku_by_value and original_value in sku_by_value and _find(var, "SKU") is None:
+            sku_el = ET.Element(f"{{{NS}}}SKU")
+            sku_el.text = sku_by_value[original_value]
+            var.insert(0, sku_el)
+            skus_added += 1
+
+        selling_status = _find(var, "SellingStatus")
+        if selling_status is not None:
+            var.remove(selling_status)
+
+    pictures_node = _find(variations, "Pictures")
+    if pictures_node is not None and _text(pictures_node, "VariationSpecificName") == specific_name:
+        for pic_set in _findall(pictures_node, "VariationSpecificPictureSet"):
+            val_el = _find(pic_set, "VariationSpecificValue")
+            if val_el is not None and val_el.text and val_el.text.strip() in renames:
+                val_el.text = renames[val_el.text.strip()]
+                renamed_count += 1
+
+    if renamed_count == 0:
+        raise RuntimeError("None of the values in `renames` were found to rename on this item.")
+
+    return variations, renamed_count, dropped_orphans, skus_added
+
+
+def cmd_bulk_apply(item_id: str, specific_name: str, only: list[str] = None, assign_sku: bool = False,
+                    use_revise_item: bool = False):
+    print("Fetching current listing state...\n")
+    item, summary, renames, needs_reconcile = compute_bulk_renames(item_id, specific_name, only)
+
+    if not summary["has_variations"]:
+        print(f"Item {item_id} ({summary['title']}) is not a variation listing. Nothing to do.")
+        return
+
+    print_bulk_preview(item_id, summary, specific_name, renames, needs_reconcile)
+
+    if not renames:
+        print("\n❌ Aborting — nothing to rename.")
+        return
+
+    existing_values = set(summary["specifics_set"].get(specific_name, []))
+    dupes = {v for v in renames.values() if v in existing_values and v not in renames}
+    if dupes:
+        print(f"\n❌ Aborting — {len(dupes)} new value(s) already exist as a distinct value: {sorted(dupes)}")
+        return
+    too_long = {v for v in renames.values() if len(v) > EBAY_VARIATION_VALUE_MAX_LEN}
+    if too_long:
+        print(f"\n❌ Aborting — {len(too_long)} new value(s) exceed eBay's "
+              f"{EBAY_VARIATION_VALUE_MAX_LEN}-character limit.")
+        return
+
+    print(f"\nThis will call ReviseItem ONCE on item {item_id}, renaming {len(renames)} row(s).")
+    print("Quantities, prices, SKUs, and picture URLs will be resent unchanged.")
+    confirm = input(f"\nType the row count to confirm ({len(renames)}): ")
+    if confirm != str(len(renames)):
+        print("❌ Confirmation did not match. Aborting — no changes made.")
+        return
+
+    sku_by_value = None
+    if assign_sku:
+        sku_by_value = fetch_sku_map(item_id)
+        print(f"\n--assign-sku: will set a SKU (= each row's own platform_listings.id) on every "
+              f"variation that doesn't already have one, up to {len(sku_by_value)} row(s) — "
+              f"required by eBay for this listing to accept ANY ReviseItem call right now.")
+
+    print("\nRe-fetching item immediately before ReviseItem (to avoid stale data)...")
+    item = fetch_item(item_id)
+    variations, renamed_count, dropped_orphans, skus_added = build_revised_variations_bulk(
+        item, specific_name, renames, sku_by_value)
+    if dropped_orphans:
+        print(f"\nNote: dropping {len(dropped_orphans)} orphaned VariationSpecificsSet value(s) "
+              f"with no corresponding live <Variation> row (harmless — nothing live references "
+              f"them): {dropped_orphans}")
+    if skus_added:
+        print(f"Note: assigned a SKU to {skus_added} variation row(s) that didn't have one.")
+
+    call_name = "ReviseItem" if use_revise_item else "ReviseFixedPriceItem"
+    revise_xml = build_revise_xml(item_id, variations, call_name)
+
+    print(f"Calling {call_name}...")
+    _post(call_name, revise_xml)
+    print(f"✅ {call_name} succeeded.")
+
+    print(f"\nUpdating platform_listings.external_id for {len(renames)} row(s)...")
+    with db_cursor() as cur:
+        for old_value, new_value in renames.items():
+            cur.execute(
+                "UPDATE platform_listings SET external_id = %s "
+                "WHERE listing_id = %s AND external_id = %s",
+                (new_value, item_id, old_value),
+            )
+    print("✅ DB updated.")
+
+    print("\nRe-fetching item to verify...")
+    new_item = fetch_item(item_id)
+    new_summary = summarize(new_item)
+    new_values = set(new_summary["specifics_set"].get(specific_name, []))
+    old_values_gone = [v for v in renames.keys() if v in new_values]
+    new_values_present = [v for v in renames.values() if v not in new_values]
+    if not old_values_gone and not new_values_present:
+        print(f"✅ All {len(renames)} renamed value(s) now live, none of the old values remain.")
+    else:
+        if old_values_gone:
+            print(f"⚠️  {len(old_values_gone)} old value(s) still present: {old_values_gone}")
+        if new_values_present:
+            print(f"⚠️  {len(new_values_present)} new value(s) NOT found live: {new_values_present}")
+
+    print("\nDone. Recommended: also open the listing on ebay.com and spot-check a few "
+          "renamed variations (name, quantity, price, picture).")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# `add-replacement` — ADD a new, correctly-named row copying qty/price/
+# picture from an existing row, WITHOUT touching the old row. Built
+# 2026-09-02 after this listing (336288009980) was found to reject
+# ReviseItem AND ReviseFixedPriceItem outright for a pure in-place rename
+# ("SKU is required... / Variation Specifics provided does not match" --
+# a "fulfilled by eBay" validation, confirmed independent of SKU presence
+# and independent of which Revise call is used). Testing whether an
+# ADD-only revise (the same operation type push_single_card_live() already
+# does successfully elsewhere) is accepted where a pure rename is not.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def cmd_add_replacement(item_id: str, specific_name: str, old_value: str, new_value: str,
+                         account_num: int = 1, dry_run: bool = True):
+    item = fetch_item(item_id, account_num=account_num)
+    variations = deep_copy_variations(item)
+
+    specifics_set = get_specifics_set(variations)
+    if new_value in specifics_set.get(specific_name, []):
+        print(f"❌ Aborting — {new_value!r} already exists as a distinct value.")
+        return
+
+    # Read qty/price/pictures from the OLD row BEFORE normalize_quantities/
+    # strip_selling_status touch anything, using the same helpers the
+    # proven push/revise paths use (find_variation_by_specifics,
+    # get_quantity_sold-equivalent via normalize_quantities).
+    old_var = find_variation_by_specifics(variations, specific_name, old_value)
+    if old_var is None:
+        print(f"❌ Aborting — {old_value!r} not found live — can't copy qty/price from it.")
+        return
+
+    normalize_quantities(variations)  # old_var's <Quantity> is now the real available qty
+    qty_el = _find(old_var, "Quantity")
+    price_el = _find(old_var, "StartPrice")
+    available_qty = int(qty_el.text) if qty_el is not None and qty_el.text else 0
+    price = float(price_el.text) if price_el is not None and price_el.text else 0.0
+
+    picture_urls = []
+    pictures_node = _find(variations, "Pictures")
+    if pictures_node is not None:
+        for pic_set in _findall(pictures_node, "VariationSpecificPictureSet"):
+            if _text(pic_set, "VariationSpecificValue") == old_value:
+                picture_urls = [u.text.strip() for u in _findall(pic_set, "PictureURL") if u.text]
+
+    print(f"Item {item_id}")
+    print(f"Old row {old_value!r}: qty {available_qty}, price ${price:.2f}, {len(picture_urls)} picture(s)")
+    print(f"Will ADD new row {new_value!r} with the same qty/price/picture(s). "
+          f"Old row is left completely untouched — no rename, no delete.")
+
+    if dry_run:
+        print("\n(DRY RUN — no changes were made. Re-run with dry_run=False to apply.)")
+        return
+
+    strip_selling_status(variations)
+    insert_specifics_value(variations, specific_name, new_value)
+    add_variation_row(variations, {specific_name: new_value}, quantity=available_qty, start_price=price)
+    if picture_urls:
+        set_variation_picture(variations, new_value, picture_urls)
+
+    revise_xml = build_revise_xml(item_id, variations, "ReviseFixedPriceItem", account_num=account_num)
+    print("\nCalling ReviseFixedPriceItem...")
+    _post("ReviseFixedPriceItem", revise_xml, account_num=account_num)
+    print("✅ ReviseFixedPriceItem succeeded.")
+
+    print("\nRe-fetching to verify...")
+    new_item = fetch_item(item_id, account_num=account_num)
+    new_summary = summarize(new_item)
+    live_values = new_summary["specifics_set"].get(specific_name, [])
+    if new_value in live_values:
+        print(f"✅ {new_value!r} is now live.")
+    else:
+        print(f"⚠️  {new_value!r} NOT found live after the call — check manually.")
+    if old_value in live_values:
+        print(f"✅ Old row {old_value!r} is still present, untouched, as expected.")
+    else:
+        print(f"⚠️  Old row {old_value!r} unexpectedly missing.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # CLI
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -567,6 +972,33 @@ def main():
     p_apply.add_argument("old_value")
     p_apply.add_argument("new_value")
 
+    p_bulk_preview = sub.add_parser("bulk-preview",
+        help="Dry run — resync ALL of a listing's variation names to render_variation_name(), no API write")
+    p_bulk_preview.add_argument("item_id")
+    p_bulk_preview.add_argument("specific_name", help='e.g. "Card Name"')
+    p_bulk_preview.add_argument("--only", help="Comma-separated card_number(s) to restrict the batch to, e.g. 95 or 1,108")
+
+    p_bulk_apply = sub.add_parser("bulk-apply",
+        help="Apply ALL renames from bulk-preview in ONE ReviseItem call (with confirmation)")
+    p_bulk_apply.add_argument("item_id")
+    p_bulk_apply.add_argument("specific_name", help='e.g. "Card Name"')
+    p_bulk_apply.add_argument("--only", help="Comma-separated card_number(s) to restrict the batch to, e.g. 95 or 1,108")
+    p_bulk_apply.add_argument("--assign-sku", action="store_true",
+        help="Also set a SKU (= platform_listings.id) on every variation missing one — "
+             "needed when eBay rejects ReviseItem with 'SKU is required in every variation'")
+    p_bulk_apply.add_argument("--revise-item", action="store_true",
+        help="Use the legacy ReviseItem call (auction-style listings) instead of the default "
+             "ReviseFixedPriceItem — same call type every other revise path in this codebase uses")
+
+    p_add_repl = sub.add_parser("add-replacement",
+        help="ADD a new correctly-named row copying qty/price/picture from an existing row, "
+             "WITHOUT touching the old row (dry run by default)")
+    p_add_repl.add_argument("item_id")
+    p_add_repl.add_argument("specific_name", help='e.g. "PokeCard"')
+    p_add_repl.add_argument("old_value")
+    p_add_repl.add_argument("new_value")
+    p_add_repl.add_argument("--apply", action="store_true", help="Actually call ReviseFixedPriceItem (default: dry run)")
+
     args = parser.parse_args()
 
     try:
@@ -578,6 +1010,16 @@ def main():
             cmd_preview(args.item_id, args.specific_name, args.old_value, args.new_value)
         elif args.command == "apply":
             cmd_apply(args.item_id, args.specific_name, args.old_value, args.new_value)
+        elif args.command == "bulk-preview":
+            only = args.only.split(",") if args.only else None
+            cmd_bulk_preview(args.item_id, args.specific_name, only)
+        elif args.command == "bulk-apply":
+            only = args.only.split(",") if args.only else None
+            cmd_bulk_apply(args.item_id, args.specific_name, only,
+                            assign_sku=args.assign_sku, use_revise_item=args.revise_item)
+        elif args.command == "add-replacement":
+            cmd_add_replacement(args.item_id, args.specific_name, args.old_value, args.new_value,
+                                 dry_run=not args.apply)
     except Exception as e:
         print(f"❌ Error: {e}")
         sys.exit(1)
