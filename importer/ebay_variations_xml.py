@@ -170,10 +170,39 @@ def normalize_quantities(variations: ET.Element) -> None:
         set_variation_price_qty(var, quantity=max(current - sold, 0))
 
 
-def mark_variation_deleted(variation: ET.Element) -> None:
+def mark_variation_deleted(variations: ET.Element, variation: ET.Element,
+                            specific_name: str, prune_menu: bool = True) -> None:
     """
     Flag a <Variation> row for deletion on the next Revise call
-    (<Variation><Delete>true</Delete></Variation>). Confirmed live-viable
+    (<Variation><Delete>true</Delete></Variation>), AND (when
+    `prune_menu` is True, the default) remove its value from
+    VariationSpecificsSet plus its matching
+    <VariationSpecificPictureSet> entry under <Pictures> (if either
+    exists) — without this second part, the menu grows by one on every
+    single deletion with nothing ever shrinking it, which eventually
+    blows eBay's 250 cap even while the live <Variation> count stays
+    correctly at 250 the whole time. Confirmed live, 2026-10-01, on
+    "SV4 - Paradox Rift Reverse Holo - Ultra Rare" (335101632502): enough
+    250-cap sold-out swaps over time grew the menu to 296 entries with
+    only 250 actually live, and eBay rejected the next push outright
+    ("Variations number exceeds limit 250") — then rejected the first
+    straightforward fix too ("used for pictures does not exist in
+    variation specific set") until the matching stale picture entries
+    were removed in the same pass. See prune_stale_variation_specifics.py
+    for the one-time catch-up this fix prevents from recurring.
+
+    `prune_menu=False` is for a caller whose `variations` has already had
+    its whole <Pictures> block stripped out of the outgoing payload for
+    an unrelated reason (remove_single_card_live()'s 2026-09-12 fix for
+    large-listing "System error" 10007 on ReviseFixedPriceItem) — pruning
+    the menu value there would leave eBay's OWN STORED Pictures data
+    (never round-tripped, so never touched) pointing at a menu value this
+    call just told eBay to delete, and whether eBay validates that
+    consistency server-side even with <Pictures> omitted from the request
+    is untested. Pass False there until that's verified live, rather than
+    risk breaking a currently-working path to fix one that wasn't.
+
+    Flagging the <Variation> itself for deletion is confirmed live-viable
     even for a variation with past sales — see Step 0 #2 in
     docs/plans/ebay-listing-sync.md. Used for 250-cap promotion: delete a
     sold-out row to free a slot for the next queued card.
@@ -182,6 +211,28 @@ def mark_variation_deleted(variation: ET.Element) -> None:
     if delete_el is None:
         delete_el = ET.SubElement(variation, f"{{{NS}}}Delete")
     delete_el.text = "true"
+
+    if not prune_menu:
+        return
+
+    value = get_variation_specifics(variation).get(specific_name)
+    if value is None:
+        return
+
+    specifics_set_node = _find(variations, "VariationSpecificsSet")
+    if specifics_set_node is not None:
+        for nvl in _findall(specifics_set_node, "NameValueList"):
+            if _text(nvl, "Name") == specific_name:
+                for v_el in list(_findall(nvl, "Value")):
+                    if v_el.text and v_el.text.strip() == value:
+                        nvl.remove(v_el)
+                break
+
+    pictures_node = _find(variations, "Pictures")
+    if pictures_node is not None:
+        for vsp in list(_findall(pictures_node, "VariationSpecificPictureSet")):
+            if _text(vsp, "VariationSpecificValue") == value:
+                pictures_node.remove(vsp)
 
 
 def add_variation_row(variations: ET.Element, specifics: dict, quantity: int,

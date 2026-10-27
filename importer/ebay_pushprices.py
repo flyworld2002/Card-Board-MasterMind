@@ -27,7 +27,7 @@ import uuid
 
 from db.connection import db_cursor
 from importer.ebay_auth import get_account_name, get_user_token
-from importer.ebay import _post, _find, _findall
+from importer.ebay import _post, _find, _findall, _text
 from importer.ebay_variations_xml import (
     fetch_item, deep_copy_variations, strip_selling_status, normalize_quantities,
     find_variation_by_specifics, get_variation_specifics, set_variation_price_qty, get_specifics_set,
@@ -314,7 +314,7 @@ def _stage_promotion(cur, template, platform: str, listing_id: str, promote, pro
 
 
 def _do_promotions(cur, template, platform: str, listing_id: str, account_num: int,
-                    resolved: list, variations, quiet: bool):
+                    resolved: list, variations, quiet: bool, dry_run: bool = False):
     """
     Adds new <Variation> rows for queued cards, two cases:
       1. Room under eBay's 250-variation cap (active count < 250):
@@ -324,17 +324,29 @@ def _do_promotions(cur, template, platform: str, listing_id: str, account_num: i
          sold-out active variation first, one-for-one swap (the original
          250-cap holdback design).
     Mutates `variations` in place (always safe — in-memory only). Returns
-    (promotions, pending_writes, pictures_touched) — see _stage_promotion's
-    docstring for why pending_writes must only be executed after a
-    successful live Revise call, never for --dry-run. `pictures_touched`
-    (added 2026-09-23) tells the caller whether any set_variation_picture()
-    call happened in this batch — see its use in push_prices() for why:
-    <Pictures> must NOT have been stripped before this function runs if a
-    promoted card is going to need one added (set_variation_picture()
-    would recreate <Pictures> from scratch, containing ONLY the newly
-    promoted card's entry, silently wiping every pre-existing per-
-    variation picture on revise — confirmed live, 2026-09-22, ~145 of 150
-    pictures lost on the "30th Celebration" listing this way).
+    (promotions, pending_writes, pictures_touched, post_phase1_variations)
+    — see _stage_promotion's docstring for why pending_writes must only be
+    executed after a successful live Revise call, never for --dry-run.
+    `pictures_touched` (added 2026-09-23) tells the caller whether any
+    set_variation_picture() call happened in this batch — see its use in
+    push_prices() for why: <Pictures> must NOT have been stripped before
+    this function runs if a promoted card is going to need one added
+    (set_variation_picture() would recreate <Pictures> from scratch,
+    containing ONLY the newly promoted card's entry, silently wiping every
+    pre-existing per-variation picture on revise — confirmed live,
+    2026-09-22, ~145 of 150 pictures lost on the "30th Celebration"
+    listing this way).
+
+    `post_phase1_variations` (added 2026-10-01) is None unless Case 2 ran
+    a real (non-dry-run) phase-1 Revise (see its comment below) — when it
+    did, it's a deep-copy snapshot of `variations` taken right after that
+    call succeeded, for push_prices() to use as assert_no_picture_loss's
+    baseline instead of the pre-everything original snapshot. Without
+    this, that blunt total-count guard would misfire on a phase-1 batch
+    that freed more picture entries (legitimately, for cards just deleted)
+    than phase 2 added — a real decrease, but an intended, already-
+    eBay-confirmed one, not the accidental-wipe bug the guard exists to
+    catch.
     """
     def p(msg):
         if not quiet:
@@ -348,17 +360,19 @@ def _do_promotions(cur, template, platform: str, listing_id: str, account_num: i
     )
     queued = list(cur.fetchall())
     if not queued:
-        return [], [], False
+        return [], [], False, None, set()
 
     resolved_by_row_id = {r["row_id"]: r for r in resolved}
     specifics_set = get_specifics_set(variations)
     specific_name = next(iter(specifics_set), None)
     if specific_name is None:
-        return [], [], False
+        return [], [], False, None, set()
     display_sort = template.get("display_sort") or "card_number"
 
     promotions = []
     pending_writes = []
+    post_phase1_variations = None
+    deleted_external_ids = set()
     # Accumulates each promotion's sort-relevant row as it's staged, keyed
     # by its external_id, so the NEXT card promoted in this same batch can
     # anchor its own insert position off it — see _compute_insert_position's
@@ -406,6 +420,23 @@ def _do_promotions(cur, template, platform: str, listing_id: str, account_num: i
               f"at position {promotion['position'] if promotion['position'] is not None else 'end'}")
 
     # Case 2: at cap — free a slot by deleting a sold-out active variation.
+    #
+    # IMPORTANT (found live, 2026-10-01, on "SV4 - Paradox Rift Reverse
+    # Holo - Ultra Rare", 335101632502): eBay rejects a single Revise call
+    # that both removes a value from VariationSpecificsSet AND still
+    # contains that value's <Variation> row in the request body — even
+    # one flagged <Delete>true</Delete> in the SAME call. ("Variation
+    # Specifics provided does not match with the variation specifics of
+    # the variations on the item.") So this can no longer be one in-memory
+    # mutation pass deferred to the caller's single final POST, the way
+    # Case 1 works — it has to be two SEPARATE, internally-consistent
+    # Revise calls: first delete the sold-out rows + prune their menu and
+    # picture entries and POST that alone ("free the slots"), THEN once
+    # that's confirmed live, add the promoted cards exactly like Case 1
+    # (direct add, room now genuinely available — deferred to the
+    # caller's own final POST, same as every other mutation this function
+    # makes). Matching/skip logic below is unchanged from before the
+    # split — only WHEN the deletion mutation+POST happens moved.
     if queued:
         active_rows_sql = [r for r in resolved if r["status"] == "active" and r["platform_listing_id"]]
         cur.execute(
@@ -414,6 +445,7 @@ def _do_promotions(cur, template, platform: str, listing_id: str, account_num: i
         )
         listing_meta = {r["id"]: r for r in cur.fetchall()}
 
+        swaps = []
         for r in active_rows_sql:
             if not queued:
                 break
@@ -437,23 +469,71 @@ def _do_promotions(cur, template, platform: str, listing_id: str, account_num: i
                 p(f"    [SKIP] {promoted_resolved['derived_label']}: 0 available quantity, "
                   f"leaving queued")
                 continue
+            swaps.append((r, meta, var_el, promote, promoted_resolved))
 
-            mark_variation_deleted(var_el)
-            promotion, writes, promoted_row = _stage_promotion(
-                cur, template, platform, listing_id, promote, promoted_resolved,
-                variations, specific_name, display_sort, meta["account"],
-                extra_known=known_this_batch,
-            )
-            promotions.append(promotion)
-            pending_writes.append((
-                "UPDATE listing_card_assignments SET status = 'sold_out_retained', updated_at = now() WHERE id = %s",
-                (r["row_id"],),
-            ))
-            pending_writes.extend(writes)
-            if promoted_row is not None:
-                known_this_batch[promotion["external_id"]] = promoted_row
-            p(f"    [PROMOTE] {meta['external_id']} (sold out) -> {promotion['external_id']!r} "
-              f"at position {promotion['position'] if promotion['position'] is not None else 'end'}")
+        if swaps:
+            # Precise safety check before freeing anything — not the blunt
+            # assert_no_picture_loss (which would reject this on sight,
+            # since count is EXPECTED to drop here): verify whatever
+            # picture entries disappear are a subset of exactly the values
+            # being swapped out, nothing else. mark_variation_deleted only
+            # ever removes the entry matching its OWN variation's value
+            # (eBay enforces unique specifics values), so this is a tight
+            # guarantee, not a heuristic.
+            swap_values = {meta["external_id"] for (_, meta, _, _, _) in swaps}
+            deleted_external_ids |= swap_values
+            pics_before = _find(variations, "Pictures")
+            before_pic_values = {
+                _text(vsp, "VariationSpecificValue")
+                for vsp in (_findall(pics_before, "VariationSpecificPictureSet") if pics_before is not None else [])
+            }
+
+            for r, meta, var_el, promote, promoted_resolved in swaps:
+                mark_variation_deleted(variations, var_el, specific_name)
+
+            pics_after = _find(variations, "Pictures")
+            after_pic_values = {
+                _text(vsp, "VariationSpecificValue")
+                for vsp in (_findall(pics_after, "VariationSpecificPictureSet") if pics_after is not None else [])
+            }
+            removed_pic_values = before_pic_values - after_pic_values
+            if not removed_pic_values <= swap_values:
+                raise RuntimeError(
+                    f"Refusing to free slots on {listing_id}: picture entries "
+                    f"would be removed for non-swap value(s): "
+                    f"{removed_pic_values - swap_values}"
+                )
+
+            if dry_run:
+                for r, meta, var_el, promote, promoted_resolved in swaps:
+                    p(f"    [DRY-RUN] would free slot {meta['external_id']!r} (sold out) for "
+                      f"{promoted_resolved['derived_label']!r}")
+            else:
+                phase1_xml = build_revise_xml(listing_id, variations, "ReviseFixedPriceItem",
+                                               account_num=account_num)
+                _post("ReviseFixedPriceItem", phase1_xml, account_num=account_num)
+                p(f"    [PHASE 1] freed {len(swaps)} slot(s) via eBay Revise — "
+                  f"deletion + menu/picture prune confirmed live")
+                for r, meta, var_el, promote, promoted_resolved in swaps:
+                    variations.remove(var_el)
+                post_phase1_variations = copy.deepcopy(variations)
+
+            for r, meta, var_el, promote, promoted_resolved in swaps:
+                promotion, writes, promoted_row = _stage_promotion(
+                    cur, template, platform, listing_id, promote, promoted_resolved,
+                    variations, specific_name, display_sort, meta["account"],
+                    extra_known=known_this_batch,
+                )
+                promotions.append(promotion)
+                pending_writes.append((
+                    "UPDATE listing_card_assignments SET status = 'sold_out_retained', updated_at = now() WHERE id = %s",
+                    (r["row_id"],),
+                ))
+                pending_writes.extend(writes)
+                if promoted_row is not None:
+                    known_this_batch[promotion["external_id"]] = promoted_row
+                p(f"    [PROMOTE] {meta['external_id']} (sold out) -> {promotion['external_id']!r} "
+                  f"at position {promotion['position'] if promotion['position'] is not None else 'end'}")
 
     # Pictures are applied in a single pass here, after every
     # add_variation_row()/mark_variation_deleted() call above has already
@@ -467,7 +547,7 @@ def _do_promotions(cur, template, platform: str, listing_id: str, account_num: i
             set_variation_picture(variations, promotion["external_id"], photo_urls)
             pictures_touched = True
 
-    return promotions, pending_writes, pictures_touched
+    return promotions, pending_writes, pictures_touched, post_phase1_variations, deleted_external_ids
 
 
 def push_prices(listing_id: str, account_num: int = 1, platform: str = "ebay",
@@ -613,8 +693,8 @@ def push_prices(listing_id: str, account_num: int = 1, platform: str = "ebay",
         # previous implementation executed these immediately) meant
         # --dry-run — or a POST that later failed — would still leave the
         # DB believing a card had gone live when eBay never received it.
-        promotions, pending_writes, pictures_touched = _do_promotions(
-            cur, template, platform, listing_id, account_num, resolved, variations, quiet)
+        promotions, pending_writes, pictures_touched, post_phase1_variations, deleted_external_ids = _do_promotions(
+            cur, template, platform, listing_id, account_num, resolved, variations, quiet, dry_run)
 
         # Safe to drop <Pictures> now (see the comment above) only if
         # nothing in this batch just added/needs one -- a pure price/qty
@@ -651,8 +731,19 @@ def push_prices(listing_id: str, account_num: int = 1, platform: str = "ebay",
         # safe because omitting <Pictures> entirely means "don't touch",
         # not "delete"), which would otherwise trip this guard as a false
         # positive on every ordinary price/qty-only push.
+        #
+        # Baseline: post_phase1_variations (not original_variations) when
+        # _do_promotions() actually freed slots via its own phase-1 Revise
+        # above -- that phase-1 call already legitimately, intentionally,
+        # eBay-confirmed removed picture entries for the cards it deleted,
+        # which can easily make a NAIVE before/after-everything count look
+        # like a loss even though nothing wrong happened. The real
+        # invariant worth guarding here is "did anything from THIS POINT
+        # forward (phase 2's additions) ever remove a picture" -- which is
+        # exactly what comparing against the post-phase-1 snapshot checks.
         if pictures_touched:
-            assert_no_picture_loss(original_variations, variations)
+            picture_check_baseline = post_phase1_variations if post_phase1_variations is not None else original_variations
+            assert_no_picture_loss(picture_check_baseline, variations)
 
         xml = build_revise_xml(listing_id, variations, "ReviseFixedPriceItem", account_num=account_num)
         _post("ReviseFixedPriceItem", xml, account_num=account_num)
@@ -708,6 +799,14 @@ def push_prices(listing_id: str, account_num: int = 1, platform: str = "ebay",
         dropped = []
         for row in pushed:
             ext = row["external_id"]
+            if ext in deleted_external_ids:
+                # This row was intentionally deleted this same push (Case 2
+                # slot-freeing, above) -- its correct end-state is "gone",
+                # not "live at the last price/qty it was pushed with", so
+                # it isn't missing from `live_now`, it's SUPPOSED to be
+                # absent. Checking it here would flag every single 250-cap
+                # swap as a false "eBay dropped it, needs manual reconcile".
+                continue
             expected_price = round(row["resolved_price"], 2)
             expected_qty = row["qty_to_push"]
             actual = live_now.get(ext)
@@ -1018,7 +1117,11 @@ def remove_single_card_live(row_id: str, account_num: int = 1, platform: str = "
             return {"row_id": row_id, "removed": False, "dry_run": dry_run,
                      "error": f"variation {external_id!r} not found live — mismatch, needs manual reconcile in Seller Hub"}
 
-        mark_variation_deleted(var_el)
+        # prune_menu=False: Pictures was just stripped from `variations`
+        # above (the 2026-09-12 large-listing fix) — see mark_variation_deleted's
+        # docstring for why pruning the menu value here, unpaired with a
+        # Pictures update, isn't safe to do blind.
+        mark_variation_deleted(variations, var_el, specific_name, prune_menu=False)
 
         if dry_run:
             p(f"[DRY-RUN] would remove {external_id!r} from {listing_id} — roster row goes back to 'queued'")
