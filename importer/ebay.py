@@ -232,11 +232,19 @@ def import_single_item(item_id: str, dry_run: bool = False, no_api: bool = False
             continue
 
         # ── API mode: look up card and get market price ───────────────────────
-        lookup = lookup_card_for_ebay(
-            card_name   = card_name,
-            card_number = card_number,
-            set_name    = set_name,
-        )
+        try:
+            lookup = lookup_card_for_ebay(
+                card_name   = card_name,
+                card_number = card_number,
+                set_name    = set_name,
+            )
+        except Exception as e:
+            # A transient Pokemon TCG API error (500/502 burst) must not
+            # abort the whole preview loop -- same reasoning as the fix in
+            # write_to_staging() below.
+            print(f"  x [{i}/{len(rows)}] Lookup failed for {card_name} #{card_number}: {e}\n")
+            unmatched += 1
+            continue
 
         # Infer foil_type from rarity if parser didn't set it
         from utils.pokemon_api import HOLO_RARITIES
@@ -533,18 +541,27 @@ def write_to_staging(rows: list[dict], batch_id: str, dry_run: bool = False, acc
 
         if not dry_run and card_name and set_name:
             print(f"    🔍 Matching: {card_name} #{card_number} ({set_name})")
-            lookup = lookup_card_for_ebay(
-                card_name    = card_name,
-                card_number  = card_number,
-                set_name     = set_name,
-                foil_type    = row.get("foil_type"),
-                foil_pattern = row.get("foil_pattern"),
-                texture      = row.get("texture"),
-                material     = row.get("material"),
-                size         = row.get("size"),
-                stamp_type   = row.get("stamp_type"),
-                source_type  = row.get("source_type"),
-            )
+            try:
+                lookup = lookup_card_for_ebay(
+                    card_name    = card_name,
+                    card_number  = card_number,
+                    set_name     = set_name,
+                    foil_type    = row.get("foil_type"),
+                    foil_pattern = row.get("foil_pattern"),
+                    texture      = row.get("texture"),
+                    material     = row.get("material"),
+                    size         = row.get("size"),
+                    stamp_type   = row.get("stamp_type"),
+                    source_type  = row.get("source_type"),
+                )
+            except Exception as e:
+                # A transient Pokemon TCG API error (e.g. a 500/502 burst)
+                # must not abort the whole staging batch -- fall through to
+                # the "no match" branch below so --review can retry it,
+                # instead of losing every row after it.
+                print(f"    x Lookup failed, leaving unmatched for review: {e}")
+                lookup = {"matched": False}
+
             # Infer foil_type from rarity if parser defaulted to non_holo
             from utils.pokemon_api import HOLO_RARITIES
             if lookup.get("rarity") in HOLO_RARITIES and row.get("foil_type") in (None, "non_holo"):
