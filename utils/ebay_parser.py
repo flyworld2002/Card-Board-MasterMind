@@ -449,6 +449,29 @@ def infer_set_name_from_title(title: str) -> str | None:
     if not title:
         return None
 
+    # Title phrasings that don't literally contain any KNOWN_SETS entry's
+    # text -- found 2026-10-31 on "Pokemon Scarlet and Violet Base Holo to
+    # Ultra Rare Single Cards 1-198 YOU PICK" (364198382892): spelled-out
+    # "and" instead of "&", so neither "Scarlet & Violet" nor
+    # "Scarlet&Violet" matched, silently returning None. That empty
+    # set_name then let lookup_card_for_ebay() run completely unscoped --
+    # confirmed it matched a same-numbered, same-named card in an
+    # unrelated set (Brilliant Stars) instead of the real Scarlet &
+    # Violet one, and was dramatically slower too (an unscoped search
+    # across every set tries far more candidates/API calls than a
+    # properly-scoped one). Separate from KNOWN_SETS (rather than just
+    # adding "scarlet and violet" as its own list entry) because the
+    # match text and the canonical card_sets.name this must resolve to
+    # are different strings here, unlike every KNOWN_SETS entry where
+    # they're the same.
+    TITLE_ALIASES = {
+        "scarlet and violet": "Scarlet & Violet",
+    }
+    title_lower_for_alias = title.lower()
+    for alias, canonical_set_name in TITLE_ALIASES.items():
+        if alias in title_lower_for_alias:
+            return canonical_set_name
+
     KNOWN_SETS = [
         # Scarlet & Violet
         "Obsidian Flames", "Paldea Evolved", "Paradox Rift",
