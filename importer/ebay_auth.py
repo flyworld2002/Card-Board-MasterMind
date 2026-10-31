@@ -57,6 +57,22 @@ def get_account_profile(account_num: int = 1) -> dict:
     return profile
 
 
+def list_accounts(max_accounts: int = 20) -> list[dict]:
+    """
+    Every numbered account that has an EBAY_ACCOUNT_{N}_NAME in .env, as
+    [{"account_num": N, "name": "..."}]. Names only -- never tokens/keys, so
+    it's safe to expose to the web app. Lets the frontend map a template's
+    `account` name (listing_templates.account) to the account_num every
+    eBay-writing endpoint takes, instead of hardcoding one account.
+    """
+    out = []
+    for n in range(1, max_accounts + 1):
+        name = os.getenv(f"EBAY_ACCOUNT_{n}_NAME")
+        if name:
+            out.append({"account_num": n, "name": name})
+    return out
+
+
 def get_trading_headers(call_name: str, account_num: int = 1) -> dict:
     """
     Returns the HTTP headers required for every eBay Trading API call.

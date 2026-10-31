@@ -1108,6 +1108,17 @@ def get_job_endpoint(job_id: str, x_picking_token: str = Header(default="")):
     return job
 
 
+@app.get("/api/accounts")
+def accounts_endpoint(x_picking_token: str = Header(default="")):
+    """Configured eBay accounts as [{account_num, name}] (names only, no
+    credentials). The Listing pricing page maps a template's `account` name
+    to the account_num that every eBay-writing endpoint here requires."""
+    if x_picking_token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="bad token")
+    from importer.ebay_auth import list_accounts
+    return {"accounts": list_accounts()}
+
+
 @app.get("/api/picking/health")
 def health():
     """No auth — lets the frontend distinguish 'endpoint down' (show stale
