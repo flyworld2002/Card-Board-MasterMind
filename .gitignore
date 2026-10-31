@@ -26,4 +26,5 @@ __pycache__/
 *.pyc
 logs/
 SV Promo Img/
-Pitch Black Images/pristine_available.json
+Pitch Black Images/
+pristine_available.json
