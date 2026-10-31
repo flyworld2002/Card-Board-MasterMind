@@ -170,6 +170,36 @@ def normalize_quantities(variations: ET.Element) -> None:
         set_variation_price_qty(var, quantity=max(current - sold, 0))
 
 
+def prepare_variations_for_revise(item: ET.Element) -> ET.Element:
+    """
+    The ONE correct way to get a mutable <Variations> copy ready to send to
+    ReviseItem/ReviseFixedPriceItem. Always deep-copies, then normalizes
+    quantities, then strips <SellingStatus> -- in that exact order
+    (normalize_quantities needs <QuantitySold>, which strip_selling_status
+    removes).
+
+    Exists because deep_copy_variations() + strip_selling_status() alone
+    LOOKS like a complete, safe pair but silently isn't: skip
+    normalize_quantities() and every untouched <Variation>'s stale raw
+    <Quantity> (which already has a prior QuantitySold baked in) gets
+    eBay's sold-folding applied to it AGAIN on every revise, inflating
+    available stock by that row's sold count each time. ebay_pushprices.py
+    (the sync engine) always chains the three calls correctly by hand --
+    but several one-off scripts and rename_variation.py's core rename path
+    didn't, and a 2026-10-31 incident inflated all 249 live variations on
+    a listing by their sold count via exactly this gap (prune script
+    revised the <Variations> block with stale quantities, no
+    normalization). Use this helper for every new revise path instead of
+    hand-chaining deep_copy_variations/normalize_quantities/
+    strip_selling_status, so the correct order isn't something each new
+    caller has to remember.
+    """
+    variations = deep_copy_variations(item)
+    normalize_quantities(variations)
+    strip_selling_status(variations)
+    return variations
+
+
 def mark_variation_deleted(variations: ET.Element, variation: ET.Element,
                             specific_name: str, prune_menu: bool = True) -> None:
     """

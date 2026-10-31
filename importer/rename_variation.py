@@ -64,6 +64,7 @@ from importer.ebay_auth import get_user_token
 from importer.ebay_variations_xml import (
     fetch_item, build_revise_xml, EBAY_VARIATION_VALUE_MAX_LEN,
     deep_copy_variations, normalize_quantities, strip_selling_status,
+    prepare_variations_for_revise,
     find_variation_by_specifics, get_specifics_set, insert_specifics_value,
     add_variation_row, set_variation_picture,
 )
@@ -167,14 +168,14 @@ def summarize(item: ET.Element) -> dict:
 # `list` command — show what specifics names/values exist
 # ══════════════════════════════════════════════════════════════════════════════
 
-def cmd_debug(item_id: str):
+def cmd_debug(item_id: str, account_num: int = 1):
     """
     Dump raw counts and a sample of raw XML for the <Variations> block, to
     diagnose mismatches between VariationSpecificsSet and the actual
     <Variation> rows GetItem returns (e.g. ReviseItem complaining about a
     "Variation Specifics provided does not match" error).
     """
-    item = fetch_item(item_id)
+    item = fetch_item(item_id, account_num=account_num)
     variations_node = _find(item, "Variations")
     if variations_node is None:
         print("No <Variations> block at all.")
@@ -236,8 +237,8 @@ def cmd_debug(item_id: str):
         print(f"  - {tag}")
 
 
-def cmd_list(item_id: str):
-    item = fetch_item(item_id)
+def cmd_list(item_id: str, account_num: int = 1):
+    item = fetch_item(item_id, account_num=account_num)
     summary = summarize(item)
 
     print(f"Item {item_id}: {summary['title']}")
@@ -355,16 +356,17 @@ def build_revised_variations(item: ET.Element, specific_name: str,
     """
     Deep-copies <Variations> from a fresh GetItem response and rewrites ONLY
     the matching <Value> / <VariationSpecificValue> text nodes for
-    `specific_name` == `old_value` -> `new_value`. Strips <SellingStatus>
-    from each <Variation> (GetItem-output-only, invalid on ReviseItem input).
+    `specific_name` == `old_value` -> `new_value`. Quantities are normalized
+    and <SellingStatus> stripped via prepare_variations_for_revise() (see its
+    docstring -- skipping normalization here previously inflated every
+    untouched variation's available stock by its sold count on every rename).
     Everything else — SKU, Quantity, StartPrice, Pictures, other specifics
     values/rows — is left exactly as eBay returned it.
     """
-    variations_node = _find(item, "Variations")
-    if variations_node is None:
+    if _find(item, "Variations") is None:
         raise RuntimeError("Item has no <Variations> block — nothing to rename.")
 
-    variations = copy.deepcopy(variations_node)
+    variations = prepare_variations_for_revise(item)
     renamed_any = False
 
     # ── VariationSpecificsSet ────────────────────────────────────────────────
@@ -378,7 +380,8 @@ def build_revised_variations(item: ET.Element, specific_name: str,
                     val_el.text = new_value
                     renamed_any = True
 
-    # ── Each Variation's VariationSpecifics, and strip SellingStatus ────────
+    # ── Each Variation's VariationSpecifics (SellingStatus already stripped
+    # by prepare_variations_for_revise() above) ─────────────────────────────
     for var in _findall(variations, "Variation"):
         specifics_node = _find(var, "VariationSpecifics")
         if specifics_node is not None:
@@ -389,10 +392,6 @@ def build_revised_variations(item: ET.Element, specific_name: str,
                 if val_el is not None and val_el.text and val_el.text.strip() == old_value:
                     val_el.text = new_value
                     renamed_any = True
-
-        selling_status = _find(var, "SellingStatus")
-        if selling_status is not None:
-            var.remove(selling_status)
 
     # ── Pictures / VariationSpecificPictureSet ───────────────────────────────
     pictures_node = _find(variations, "Pictures")
@@ -412,32 +411,12 @@ def build_revised_variations(item: ET.Element, specific_name: str,
     return variations
 
 
-def build_revise_item_xml(item_id: str, variations: ET.Element) -> str:
-    token = get_user_token()
-
-    # Serialize the modified <Variations> subtree without ns0: prefixes —
-    # ReviseItemRequest declares the same default namespace at the root.
-    ET.register_namespace("", NS)
-    variations_xml = ET.tostring(variations, encoding="unicode")
-
-    return f"""<?xml version="1.0" encoding="utf-8"?>
-<ReviseItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
-  <RequesterCredentials>
-    <eBayAuthToken>{token}</eBayAuthToken>
-  </RequesterCredentials>
-  <Item>
-    <ItemID>{item_id}</ItemID>
-    {variations_xml}
-  </Item>
-</ReviseItemRequest>"""
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 # `preview` command — dry run, no ReviseItem call
 # ══════════════════════════════════════════════════════════════════════════════
 
-def cmd_preview(item_id: str, specific_name: str, old_value: str, new_value: str):
-    item = fetch_item(item_id)
+def cmd_preview(item_id: str, specific_name: str, old_value: str, new_value: str, account_num: int = 1):
+    item = fetch_item(item_id, account_num=account_num)
     summary = summarize(item)
 
     if not summary["has_variations"]:
@@ -453,9 +432,10 @@ def cmd_preview(item_id: str, specific_name: str, old_value: str, new_value: str
 # `apply` command — confirm, ReviseItem, then re-verify
 # ══════════════════════════════════════════════════════════════════════════════
 
-def cmd_apply(item_id: str, specific_name: str, old_value: str, new_value: str):
+def cmd_apply(item_id: str, specific_name: str, old_value: str, new_value: str, account_num: int = 1,
+              use_fixed_price: bool = False):
     print("Fetching current listing state...\n")
-    item = fetch_item(item_id)
+    item = fetch_item(item_id, account_num=account_num)
     summary = summarize(item)
 
     if not summary["has_variations"]:
@@ -479,8 +459,10 @@ def cmd_apply(item_id: str, specific_name: str, old_value: str, new_value: str):
               f"{EBAY_VARIATION_VALUE_MAX_LEN}-character limit.")
         return
 
+    call_name = "ReviseFixedPriceItem" if use_fixed_price else "ReviseItem"
+
     # ── Explicit confirmation: type the exact new value ─────────────────────
-    print(f"\nThis will call ReviseItem on item {item_id}, renaming "
+    print(f"\nThis will call {call_name} on item {item_id}, renaming "
           f"{len(affected['variation_indices'])} row(s) and "
           f"{len(affected['picture_set_indices'])} picture set(s) "
           f"from {old_value!r} to {new_value!r}.")
@@ -492,18 +474,18 @@ def cmd_apply(item_id: str, specific_name: str, old_value: str, new_value: str):
 
     # ── Build payload from a FRESH copy of the just-fetched data ────────────
     # (re-fetch here too, in case time has passed / another process changed it)
-    print("\nRe-fetching item immediately before ReviseItem (to avoid stale data)...")
-    item = fetch_item(item_id)
+    print(f"\nRe-fetching item immediately before {call_name} (to avoid stale data)...")
+    item = fetch_item(item_id, account_num=account_num)
     variations = build_revised_variations(item, specific_name, old_value, new_value)
-    revise_xml = build_revise_item_xml(item_id, variations)
+    revise_xml = build_revise_xml(item_id, variations, call_name, account_num=account_num)
 
-    print("Calling ReviseItem...")
-    _post("ReviseItem", revise_xml)
-    print("✅ ReviseItem succeeded.")
+    print(f"Calling {call_name}...")
+    _post(call_name, revise_xml, account_num=account_num)
+    print(f"✅ {call_name} succeeded.")
 
     # ── Verify ────────────────────────────────────────────────────────────
     print("\nRe-fetching item to verify...")
-    new_item = fetch_item(item_id)
+    new_item = fetch_item(item_id, account_num=account_num)
     new_summary = summarize(new_item)
 
     old_values = new_summary["specifics_set"].get(specific_name, [])
@@ -704,11 +686,14 @@ def build_revised_variations_bulk(item: ET.Element, specific_name: str, renames:
 
     Returns (variations, renamed_count, dropped_orphans, skus_added).
     """
-    variations_node = _find(item, "Variations")
-    if variations_node is None:
+    if _find(item, "Variations") is None:
         raise RuntimeError("Item has no <Variations> block — nothing to rename.")
 
-    variations = copy.deepcopy(variations_node)
+    # prepare_variations_for_revise() normalizes quantities + strips
+    # SellingStatus up front -- see its docstring for why skipping
+    # normalization here would inflate every untouched row's available
+    # stock by its sold count on every bulk rename.
+    variations = prepare_variations_for_revise(item)
     renamed_count = 0
     skus_added = 0
 
@@ -759,10 +744,6 @@ def build_revised_variations_bulk(item: ET.Element, specific_name: str, renames:
             sku_el.text = sku_by_value[original_value]
             var.insert(0, sku_el)
             skus_added += 1
-
-        selling_status = _find(var, "SellingStatus")
-        if selling_status is not None:
-            var.remove(selling_status)
 
     pictures_node = _find(variations, "Pictures")
     if pictures_node is not None and _text(pictures_node, "VariationSpecificName") == specific_name:
@@ -952,6 +933,8 @@ def main():
                      "(e.g. fix accent/typo/truncation) without touching "
                      "quantity, price, SKU, or pictures."
     )
+    parser.add_argument("--account", type=int, default=1,
+        help="Numbered eBay account (EBAY_ACCOUNT_{N}_*) to use, default 1")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_list = sub.add_parser("list", help="Show VariationSpecifics names/values for an item")
@@ -971,6 +954,11 @@ def main():
     p_apply.add_argument("specific_name", help='e.g. "Card Name"')
     p_apply.add_argument("old_value")
     p_apply.add_argument("new_value")
+    p_apply.add_argument("--fixed-price", action="store_true",
+        help="Use ReviseFixedPriceItem instead of the legacy ReviseItem call — "
+             "required for modern fixed-price variation listings (ReviseItem is "
+             "kept as the default only for backward compatibility with whatever "
+             "auction-style listing this was originally built against)")
 
     p_bulk_preview = sub.add_parser("bulk-preview",
         help="Dry run — resync ALL of a listing's variation names to render_variation_name(), no API write")
@@ -1003,13 +991,14 @@ def main():
 
     try:
         if args.command == "list":
-            cmd_list(args.item_id)
+            cmd_list(args.item_id, account_num=args.account)
         elif args.command == "debug":
-            cmd_debug(args.item_id)
+            cmd_debug(args.item_id, account_num=args.account)
         elif args.command == "preview":
-            cmd_preview(args.item_id, args.specific_name, args.old_value, args.new_value)
+            cmd_preview(args.item_id, args.specific_name, args.old_value, args.new_value, account_num=args.account)
         elif args.command == "apply":
-            cmd_apply(args.item_id, args.specific_name, args.old_value, args.new_value)
+            cmd_apply(args.item_id, args.specific_name, args.old_value, args.new_value,
+                      account_num=args.account, use_fixed_price=args.fixed_price)
         elif args.command == "bulk-preview":
             only = args.only.split(",") if args.only else None
             cmd_bulk_preview(args.item_id, args.specific_name, only)
