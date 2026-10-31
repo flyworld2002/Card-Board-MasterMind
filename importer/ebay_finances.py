@@ -104,7 +104,31 @@ def get_access_token(account_num: int = 1, force_refresh: bool = False) -> str:
 
 FULFILLMENT_API_BASE = "https://api.ebay.com/sell/fulfillment/v1"
 FULFILLMENT_SCOPE     = "https://api.ebay.com/oauth/api_scope/sell.fulfillment"
-ALL_SCOPES = f"{FINANCES_SCOPE} {FULFILLMENT_SCOPE}"
+
+# Added 2026-10-30 ahead of the Media/Inventory API work (EPS/Trading
+# picture upload retired by eBay) -- sell.inventory covers BOTH the
+# Media API (image upload) and the Inventory API itself, confirmed
+# against eBay's own docs, so this one scope unblocks both planned
+# phases. account/marketing/analytics/stores/notification.subscription
+# bundled in at the same time purely so re-consenting is a one-shot,
+# not because anything uses them yet -- notification.subscription
+# specifically covers the eBay-webhooks option already on the roadmap
+# for auto-refreshing inventory as orders sell (see CLAUDE.md). Deliberately
+# NOT requesting sell.payment.dispute, sell.reputation, commerce.vero,
+# or commerce.identity.readonly / sell.edelivery -- none apply to this
+# business, no reason to hold scopes nothing will ever call.
+INVENTORY_SCOPE     = "https://api.ebay.com/oauth/api_scope/sell.inventory"
+ACCOUNT_SCOPE       = "https://api.ebay.com/oauth/api_scope/sell.account"
+MARKETING_SCOPE     = "https://api.ebay.com/oauth/api_scope/sell.marketing"
+ANALYTICS_SCOPE     = "https://api.ebay.com/oauth/api_scope/sell.analytics.readonly"
+STORES_SCOPE        = "https://api.ebay.com/oauth/api_scope/sell.stores"
+NOTIFICATION_SCOPE  = "https://api.ebay.com/oauth/api_scope/commerce.notification.subscription"
+
+ALL_SCOPES = (
+    f"{FINANCES_SCOPE} {FULFILLMENT_SCOPE} {INVENTORY_SCOPE} "
+    f"{ACCOUNT_SCOPE} {MARKETING_SCOPE} {ANALYTICS_SCOPE} {STORES_SCOPE} "
+    f"{NOTIFICATION_SCOPE}"
+)
 
 
 def test_fetch_order(order_id: str, account_num: int = 1) -> dict:
