@@ -32,7 +32,7 @@ Run once: python3 prune_stale_variation_specifics.py
 
 from importer.ebay import _find, _findall, _text, _post
 from importer.ebay_variations_xml import (
-    fetch_item, deep_copy_variations, strip_selling_status,
+    fetch_item, deep_copy_variations, strip_selling_status, normalize_quantities,
     get_specifics_set, get_variation_specifics, build_revise_xml,
 )
 
@@ -45,6 +45,13 @@ def main():
     item = fetch_item(ITEM_ID, account_num=ACCOUNT_NUM)
     original_variations = deep_copy_variations(item)  # untouched snapshot for assert_no_picture_loss()
     variations = deep_copy_variations(item)
+    # MUST run before strip_selling_status (needs <QuantitySold>, which that
+    # removes) -- without this, every untouched row's stale raw <Quantity>
+    # gets eBay's sold-folding applied again on this revise, inflating
+    # available stock by that row's sold count (see
+    # prepare_variations_for_revise()'s docstring; found 2026-10-31 on a
+    # sibling listing from this exact gap in this script).
+    normalize_quantities(variations)
     strip_selling_status(variations)
 
     specifics_set = get_specifics_set(variations)
