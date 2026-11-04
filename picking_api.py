@@ -747,7 +747,7 @@ def clone_listing_metadata_endpoint(body: CloneListingMetadataRequest,
     try:
         return clone_listing_metadata(template_id=body.template_id,
                                        source_listing_id=body.source_listing_id,
-                                       account_num=body.account_num)
+                                       account_num=_account_num_for_template(body.template_id, body.account_num))
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"clone failed: {e}")
 
@@ -784,7 +784,8 @@ def revise_listing_metadata_endpoint(body: ReviseListingMetadataRequest,
 
     with _revise_metadata_lock:
         try:
-            result = revise_listing_metadata(template_id=body.template_id, account_num=body.account_num,
+            result = revise_listing_metadata(template_id=body.template_id,
+                                              account_num=_account_num_for_template(body.template_id, body.account_num),
                                               dry_run=body.dry_run, **fields)
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"revise failed: {e}")
@@ -966,7 +967,8 @@ def description_sync_endpoint(template_id: str, body: DescriptionSyncRequest,
 
     with _revise_metadata_lock:
         try:
-            result = sync_description(template_id=template_id, account_num=body.account_num,
+            result = sync_description(template_id=template_id,
+                                       account_num=_account_num_for_template(template_id, body.account_num),
                                        dry_run=body.dry_run)
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"description sync failed: {e}")
@@ -1106,6 +1108,28 @@ def get_job_endpoint(job_id: str, x_picking_token: str = Header(default="")):
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
     return job
+
+
+def _account_num_for_template(template_id: str, requested: int) -> int:
+    """The eBay account that owns a template's listing, from
+    listing_templates.account (a name) mapped through the .env accounts.
+    The template is the source of truth: a client that sends the wrong
+    account_num (stale browser code, a default of 1) would otherwise get
+    "not the seller" from eBay. Falls back to `requested` when the template
+    or its account name can't be resolved."""
+    try:
+        from db.connection import db_cursor
+        from importer.ebay_auth import list_accounts
+        with db_cursor() as cur:
+            cur.execute("SELECT account FROM listing_templates WHERE id = %s", (template_id,))
+            row = cur.fetchone()
+        name = (row["account"] if isinstance(row, dict) else row[0]) if row else None
+        for a in list_accounts():
+            if a["name"] == name:
+                return a["account_num"]
+    except Exception:
+        pass
+    return requested
 
 
 @app.get("/api/accounts")
