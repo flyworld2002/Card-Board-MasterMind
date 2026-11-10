@@ -544,7 +544,36 @@ def create_listing(template_id: str, account_num: int = 1, platform: str = "ebay
              "listing_id": new_item_id, "ready_count": len(ready), "not_ready_count": len(not_ready)}
 
 
-def push_all_photos_for_template(template_id: str, account_num: int = 1, quiet: bool = False) -> dict:
+def remove_main_photo(listing_id: str, account_num: int = 1) -> dict:
+    """
+    Removes the item-level (main/gallery) picture from a live listing so
+    only the per-variation pictures remain -- Fei's standing preference
+    (2026-11-08) for every variation listing. AddFixedPriceItem requires at
+    least one picture, so create_listing() has to embed one main picture
+    (see ~line 335); this strips it again afterward. Uses
+    <DeletedField>Item.PictureDetails.PictureURL</DeletedField> on a
+    ReviseFixedPriceItem, which only drops the main picture and leaves
+    <Variations>/<Pictures> untouched (confirmed live on Delta Reign and
+    ME5.5 Common listings). Returns {"listing_id", "removed": bool, "error"?}.
+    """
+    token = get_user_token(account_num=account_num)
+    xml = f"""<?xml version="1.0" encoding="utf-8"?>
+<ReviseFixedPriceItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials>
+    <eBayAuthToken>{token}</eBayAuthToken>
+  </RequesterCredentials>
+  <Item><ItemID>{listing_id}</ItemID></Item>
+  <DeletedField>Item.PictureDetails.PictureURL</DeletedField>
+</ReviseFixedPriceItemRequest>"""
+    try:
+        _post("ReviseFixedPriceItem", xml, account_num=account_num)
+    except Exception as e:
+        return {"listing_id": listing_id, "removed": False, "error": str(e)}
+    return {"listing_id": listing_id, "removed": True}
+
+
+def push_all_photos_for_template(template_id: str, account_num: int = 1, quiet: bool = False,
+                                  remove_main: bool = False) -> dict:
     """
     Pushes every photo-assigned, already-'active' roster row's picture
     live for one template, one ReviseFixedPriceItem per variation (via
@@ -603,7 +632,27 @@ def push_all_photos_for_template(template_id: str, account_num: int = 1, quiet: 
 
     p(f"[template {template_id}] pictures: {len(pushed)} pushed, {len(failed)} failed "
       f"(of {len(rows)} photo-assigned rows).")
-    return {"template_id": template_id, "total": len(rows), "pushed": len(pushed), "failed": failed}
+    result = {"template_id": template_id, "total": len(rows), "pushed": len(pushed), "failed": failed}
+
+    # Opt-in (the create-listing background task sets it): strip the
+    # placeholder main picture only once EVERY variation picture landed,
+    # so a partial failure never leaves a listing with no pictures at all.
+    if remove_main:
+        if failed or not pushed:
+            result["main_photo_removed"] = False
+            p(f"[template {template_id}] main photo kept -- "
+              f"{len(failed)} picture push(es) failed, {len(pushed)} pushed.")
+        else:
+            with db_cursor() as cur:
+                cur.execute("SELECT listing_id FROM listing_templates WHERE id = %s", (template_id,))
+                trow = cur.fetchone()
+            if trow and trow["listing_id"]:
+                removal = remove_main_photo(trow["listing_id"], account_num=account_num)
+                result["main_photo_removed"] = removal["removed"]
+                if removal.get("error"):
+                    result["main_photo_error"] = removal["error"]
+                p(f"[template {template_id}] main photo removal: {removal}")
+    return result
 
 
 # ══════════════════════════════════════════════════════════════════════════════

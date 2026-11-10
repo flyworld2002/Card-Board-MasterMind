@@ -849,7 +849,7 @@ def create_listing_endpoint(body: CreateListingRequest, background_tasks: Backgr
     if result.get("created") and not body.dry_run:
         background_tasks.add_task(
             push_all_photos_for_template, template_id=body.template_id,
-            account_num=body.account_num, quiet=True,
+            account_num=body.account_num, quiet=True, remove_main=True,
         )
         result["pictures_scheduled"] = True
 
