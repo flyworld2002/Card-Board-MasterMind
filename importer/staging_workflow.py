@@ -369,14 +369,17 @@ def _push_batch(batch_id: str):
             for row in order_rows:
                 list_price = row.get("override_price") or row.get("calculated_price")
 
-                # Seven-axis variant fields (lookup codes; NULL = standard)
-                foil_type    = row.get("foil_type")
-                foil_pattern = row.get("foil_pattern")
-                texture      = row.get("texture")
-                material     = row.get("material")
-                size         = row.get("size")
-                source_type  = row.get("source_type")
-                stamp_type   = row.get("stamp_type")
+                # Seven-axis variant fields (lookup codes; NULL = standard).
+                # Free text from the review screen is normalized to a code
+                # (and added to its lookup table) so the card_variants FK holds.
+                from db.connection import ensure_axis_code
+                foil_type    = ensure_axis_code(cur, "foil_types",    row.get("foil_type"))
+                foil_pattern = ensure_axis_code(cur, "foil_patterns", row.get("foil_pattern"))
+                texture      = ensure_axis_code(cur, "textures",      row.get("texture"))
+                material     = ensure_axis_code(cur, "materials",     row.get("material"))
+                size         = ensure_axis_code(cur, "sizes",         row.get("size"))
+                source_type  = ensure_axis_code(cur, "source_types",  row.get("source_type"))
+                stamp_type   = ensure_axis_code(cur, "stamp_types",   row.get("stamp_type"))
 
                 # Cost vs asking price depends on source
                 if is_ebay:

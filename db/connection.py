@@ -5,8 +5,10 @@ Reads credentials from .env file.
 """
 
 import os
+import re
 import psycopg2
 import psycopg2.extras
+import psycopg2.sql
 from contextlib import contextmanager
 from dotenv import load_dotenv
 
@@ -262,6 +264,42 @@ def apply_import_correction(item: dict, corrections: list[dict]) -> dict:
 # card_variants
 # ----------------------------------------------------------------
 
+_AXIS_TABLES = ("foil_types", "foil_patterns", "textures", "materials",
+                "sizes", "stamp_types", "source_types")
+
+
+def ensure_axis_code(cur, table: str, raw):
+    """Resolve a free-text variant axis value to a lookup code.
+
+    Existing codes pass through (lowercased); anything else is snake_cased
+    and inserted into the lookup table so the card_variants FK holds.
+    Mirrors the ensure_axis_code() SQL function the web push uses. NULL/blank
+    stays NULL.
+    """
+    if raw is None or not str(raw).strip():
+        return None
+    if table not in _AXIS_TABLES:
+        raise ValueError(f"unknown axis table {table!r}")
+
+    tbl = psycopg2.sql.Identifier(table)
+    code = str(raw).strip().lower()
+    cur.execute(psycopg2.sql.SQL("SELECT 1 FROM {} WHERE code = %s").format(tbl), (code,))
+    if cur.fetchone():
+        return code
+
+    code = re.sub(r"[^a-z0-9]+", "_", code).strip("_")
+    if not code:
+        return None
+    cur.execute(psycopg2.sql.SQL("SELECT 1 FROM {} WHERE code = %s").format(tbl), (code,))
+    if not cur.fetchone():
+        cur.execute(psycopg2.sql.SQL(
+            "INSERT INTO {t} (code, display_name, sort_order) "
+            "VALUES (%s, %s, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM {t})) "
+            "ON CONFLICT (code) DO NOTHING").format(t=tbl),
+            (code, code.replace("_", " ").title()))
+    return code
+
+
 def get_or_create_variant(card_id: str,
                           foil_type: str = None,
                           foil_pattern: str = None,
@@ -288,16 +326,18 @@ def get_or_create_variant(card_id: str,
     # matching case. Postgres FK checks are case-sensitive, so e.g.
     # 'Non_holo' vs 'non_holo' fails with a foreign key violation instead
     # of matching. Normalize here, the single chokepoint every variant
-    # write goes through, rather than at each call site.
-    foil_type    = foil_type.lower()    if foil_type    else foil_type
-    foil_pattern = foil_pattern.lower() if foil_pattern else foil_pattern
-    texture      = texture.lower()      if texture      else texture
-    material     = material.lower()     if material     else material
-    size         = size.lower()         if size         else size
-    stamp_type   = stamp_type.lower()   if stamp_type   else stamp_type
-    source_type  = source_type.lower()  if source_type  else source_type
-
+    # write goes through, rather than at each call site. Free text that
+    # isn't a code yet (e.g. "Holiday Calendar") is snake_cased and added to
+    # the lookup table by ensure_axis_code().
     with db_cursor() as cur:
+        foil_type    = ensure_axis_code(cur, "foil_types",    foil_type)
+        foil_pattern = ensure_axis_code(cur, "foil_patterns", foil_pattern)
+        texture      = ensure_axis_code(cur, "textures",      texture)
+        material     = ensure_axis_code(cur, "materials",     material)
+        size         = ensure_axis_code(cur, "sizes",         size)
+        stamp_type   = ensure_axis_code(cur, "stamp_types",   stamp_type)
+        source_type  = ensure_axis_code(cur, "source_types",  source_type)
+
         cur.execute("""
             SELECT id FROM card_variants
             WHERE card_id = %s
