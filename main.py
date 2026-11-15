@@ -26,6 +26,12 @@ Reports:
 Market prices:
   python3 main.py --refresh-market-prices --set "Pitch Black"
   python3 main.py --refresh-market-prices --card-id UUID
+
+Weekly price refresh (settings on the web app's Price Refresh page):
+  python3 main.py --price-refresh-tick                       # what Task Scheduler runs
+  python3 main.py --price-refresh-run --set "Stellar Crown" --dry-run   # simulate, no writes
+  python3 main.py --price-refresh-run [--set NAME]           # real run now
+  python3 main.py --price-refresh-message [--send]           # report for the latest run
 """
 
 import argparse
@@ -415,6 +421,18 @@ def cmd_refresh_market_prices(args):
     result = refresh_market_prices(set_name=args.set, card_id=args.card_id, dry_run=args.dry_run)
     print(result)
 
+def cmd_price_refresh_tick(args):
+    from importer.price_refresh_job import tick
+    tick()
+
+def cmd_price_refresh_run(args):
+    from importer.price_refresh_job import run_manual
+    run_manual(set_name=args.set, simulate=args.dry_run, use_browser=not args.no_browser)
+
+def cmd_price_refresh_message(args):
+    from importer.price_refresh_job import message_cmd
+    message_cmd(send=args.send)
+
 def cmd_ebay_sync_descriptions(args):
     import os
     from db.connection import db_cursor
@@ -680,6 +698,23 @@ def main():
              "skip any card whose variants were all already refreshed today. "
              "Use --dry-run to list which cards would be refreshed without "
              "calling the API. See docs/plans/listing-pricing-system.md.")
+    group.add_argument("--price-refresh-tick", action="store_true",
+        help="Scheduled weekly price refresh (importer/price_refresh_job.py). "
+             "Run every few minutes by Task Scheduler: starts today's "
+             "scheduled sets once the start time has passed, then pushes to "
+             "eBay per the settings on the web app's Price Refresh page. "
+             "Does nothing when disabled or when a run is already going.")
+    group.add_argument("--price-refresh-message", action="store_true",
+        help="Print the short report for the latest finished price refresh "
+             "run; with --send, also email it (needs PRICE_REFRESH_SMTP_* "
+             "in .env, see importer/price_refresh_job.py).")
+    group.add_argument("--price-refresh-run", action="store_true",
+        help="Run the weekly price refresh now for one set (--set NAME) or "
+             "for today's scheduled sets. Applies the hold-for-approval "
+             "guard and pushes to eBay in the configured push mode. With "
+             "--dry-run nothing is written or pushed; it only prints what "
+             "the run would do. --no-browser skips the Chrome step that "
+             "reads reverse holos.")
     group.add_argument("--ebay-sync-descriptions", action="store_true",
         help="Render each in-scope template's description_html against "
              "current DB state (family strip / era hub-and-spoke / era "
@@ -790,7 +825,12 @@ def main():
     parser.add_argument("--qty", type=int,
         help="New quantity to set (for --ebay-revise-qty).")
     parser.add_argument("--set", metavar="NAME",
-        help="Set name to scope to (for --refresh-market-prices).")
+        help="Set name to scope to (for --refresh-market-prices / --price-refresh-run).")
+    parser.add_argument("--send", action="store_true",
+        help="Email the report (for --price-refresh-message).")
+    parser.add_argument("--no-browser", action="store_true",
+        help="Skip the Chrome step that reads reverse holo prices "
+             "(for --price-refresh-run).")
     parser.add_argument("--template-id", metavar="UUID",
         help="listing_templates.id to act on (for --ebay-clone-listing-metadata / "
              "--ebay-set-listing-metadata / --ebay-preview-new-listing / "
@@ -882,6 +922,12 @@ def main():
         cmd_ebay_create_listing(args)
     elif args.refresh_market_prices:
         cmd_refresh_market_prices(args)
+    elif args.price_refresh_tick:
+        cmd_price_refresh_tick(args)
+    elif args.price_refresh_run:
+        cmd_price_refresh_run(args)
+    elif args.price_refresh_message:
+        cmd_price_refresh_message(args)
     elif args.ebay_sync_descriptions:
         cmd_ebay_sync_descriptions(args)
     elif args.ebay_backfill_nav_images:
