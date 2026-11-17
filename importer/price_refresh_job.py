@@ -92,6 +92,8 @@ API_SOURCE = "tcgplayer"        # same label importer.market_price_refresh write
 TCG_SOURCE = "manual_scrape"    # same label the tcgplayer-price-fallback skill writes
 TCG_WORKERS = 5
 STALE_RUN_HOURS = 6
+PUSH_ATTEMPTS = 3               # eBay push tries per listing before giving up
+PUSH_RETRY_WAIT_S = 30          # pause between tries
 SET_HOLD_MIN_PRICED = 12        # the whole-set hold is not applied to tiny batches
 UNPUSHED_LOOKBACK_DAYS = 14
 
@@ -845,20 +847,34 @@ def _push_listings(run_id: str, listings: list[dict], dry_run: bool, state: dict
         if account_num is None:
             rec.update(status="skipped", error=f"no eBay account configured for '{row['account']}'")
         else:
-            try:
-                # promote_queued=False: the refresh only reprices cards that are
-                # already live. Queued cards need pictures and variation names
-                # set up by hand first, so they are never added automatically.
-                res = push_prices(listing_id, account_num=account_num, dry_run=dry_run,
-                                  quiet=True, promote_queued=False)
-                rec.update(resolved=res.get("resolved"), changed=res.get("changed"),
-                           pushed=res.get("pushed"), warnings=res.get("warnings") or [])
-                if res.get("still_broken"):
-                    rec["warnings"] = rec["warnings"] + [f"still broken: {res['still_broken']}"]
-            except BaseException as e:      # push_prices can raise SystemExit
-                if isinstance(e, KeyboardInterrupt):
-                    raise
-                rec.update(status="failed", error=str(e)[:500] or type(e).__name__)
+            # eBay answers "System error, try again later" now and then, so a
+            # failed push is tried PUSH_ATTEMPTS times in all before giving up.
+            # Safe to repeat: push_prices resends the whole current roster
+            # each time, so a second attempt only restates the same prices.
+            for attempt in range(1, PUSH_ATTEMPTS + 1):
+                try:
+                    # promote_queued=False: the refresh only reprices cards that
+                    # are already live. Queued cards need pictures and variation
+                    # names set up by hand first, so they are never added here.
+                    res = push_prices(listing_id, account_num=account_num, dry_run=dry_run,
+                                      quiet=True, promote_queued=False)
+                    rec.update(status="ok", error=None, resolved=res.get("resolved"),
+                               changed=res.get("changed"), pushed=res.get("pushed"),
+                               warnings=res.get("warnings") or [])
+                    if res.get("still_broken"):
+                        rec["warnings"] = rec["warnings"] + [f"still broken: {res['still_broken']}"]
+                    if attempt > 1:
+                        rec["warnings"] = rec["warnings"] + [f"went through on attempt {attempt}"]
+                    break
+                except BaseException as e:      # push_prices can raise SystemExit
+                    if isinstance(e, KeyboardInterrupt):
+                        raise
+                    msg = str(e)[:400] or type(e).__name__
+                    rec.update(status="failed", error=f"{msg} (attempt {attempt} of {PUSH_ATTEMPTS})")
+                    if attempt < PUSH_ATTEMPTS:
+                        log(f"    eBay push {listing_id} attempt {attempt} failed ({msg[:120]}); "
+                            f"retrying in {PUSH_RETRY_WAIT_S}s")
+                        time.sleep(PUSH_RETRY_WAIT_S)
         if rec["status"] != "ok":
             state["failed"].add(listing_id)
         log(f"    eBay {'dry-run' if dry_run else 'push'} {listing_id} ({row['account']}): {rec['status']}"
