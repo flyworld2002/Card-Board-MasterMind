@@ -48,7 +48,10 @@ Per set, in order:
    held price that has been approved since) is pushed with
    importer.ebay_pushprices.push_prices once all of today's sets touching
    that listing are finished. push_mode = 'dry_run' computes and records
-   what would be pushed without sending anything to eBay.
+   what would be pushed without sending anything to eBay. Only cards that
+   are already live are repriced: queued cards are never added to a listing
+   by the refresh (push_prices(promote_queued=False)), because they need
+   pictures and variation names set up by hand first.
 
 5. Message. When a scheduled run finishes, a short report is emailed
    (build_message / send_message) and price_refresh_runs.message_sent_at is
@@ -843,7 +846,11 @@ def _push_listings(run_id: str, listings: list[dict], dry_run: bool, state: dict
             rec.update(status="skipped", error=f"no eBay account configured for '{row['account']}'")
         else:
             try:
-                res = push_prices(listing_id, account_num=account_num, dry_run=dry_run, quiet=True)
+                # promote_queued=False: the refresh only reprices cards that are
+                # already live. Queued cards need pictures and variation names
+                # set up by hand first, so they are never added automatically.
+                res = push_prices(listing_id, account_num=account_num, dry_run=dry_run,
+                                  quiet=True, promote_queued=False)
                 rec.update(resolved=res.get("resolved"), changed=res.get("changed"),
                            pushed=res.get("pushed"), warnings=res.get("warnings") or [])
                 if res.get("still_broken"):

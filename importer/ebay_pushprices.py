@@ -551,12 +551,18 @@ def _do_promotions(cur, template, platform: str, listing_id: str, account_num: i
 
 
 def push_prices(listing_id: str, account_num: int = 1, platform: str = "ebay",
-                 dry_run: bool = False, quiet: bool = False) -> dict:
+                 dry_run: bool = False, quiet: bool = False,
+                 promote_queued: bool = True) -> dict:
     """
     Returns a summary dict (used by the /push-prices API endpoint, same
     convention as importer.ebay_picking.pull_picking):
       {"listing_id", "resolved", "changed", "pushed", "warnings": [...],
        "dry_run": bool}
+
+    promote_queued=False pushes price/qty for cards already live and never
+    adds a queued card to the listing (no free-slot promotion, no 250-cap
+    swap). The scheduled price refresh uses this: queued cards still need
+    their pictures and variation names set up by hand before they go live.
     """
     def p(msg):
         if not quiet:
@@ -584,7 +590,8 @@ def push_prices(listing_id: str, account_num: int = 1, platform: str = "ebay",
                 summary["warnings"].append(msg)
                 p(f"  [NOT SYNCED] {msg}")
 
-        needs_promotion_check = len(resolved) > 250 or any(r["status"] == "queued" for r in resolved)
+        needs_promotion_check = promote_queued and (
+            len(resolved) > 250 or any(r["status"] == "queued" for r in resolved))
         if not changes and not needs_promotion_check:
             p(f"[{listing_id}] nothing gated-in with pending changes "
               f"({len(resolved)} row(s) resolved, {len(skipped_ungated)} skipped as not synced) — nothing to push.")
@@ -693,8 +700,11 @@ def push_prices(listing_id: str, account_num: int = 1, platform: str = "ebay",
         # previous implementation executed these immediately) meant
         # --dry-run — or a POST that later failed — would still leave the
         # DB believing a card had gone live when eBay never received it.
-        promotions, pending_writes, pictures_touched, post_phase1_variations, deleted_external_ids = _do_promotions(
-            cur, template, platform, listing_id, account_num, resolved, variations, quiet, dry_run)
+        if promote_queued:
+            promotions, pending_writes, pictures_touched, post_phase1_variations, deleted_external_ids = _do_promotions(
+                cur, template, platform, listing_id, account_num, resolved, variations, quiet, dry_run)
+        else:
+            promotions, pending_writes, pictures_touched, post_phase1_variations, deleted_external_ids = [], [], False, None, set()
 
         # Safe to drop <Pictures> now (see the comment above) only if
         # nothing in this batch just added/needs one -- a pure price/qty
