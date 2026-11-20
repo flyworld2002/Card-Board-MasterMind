@@ -427,7 +427,8 @@ def cmd_price_refresh_tick(args):
 
 def cmd_price_refresh_run(args):
     from importer.price_refresh_job import run_manual
-    run_manual(set_name=args.set, simulate=args.dry_run, use_browser=not args.no_browser)
+    run_manual(set_name=args.set, simulate=args.dry_run, use_browser=not args.no_browser,
+               push_ebay=not args.no_push, force=args.force)
 
 def cmd_price_refresh_message(args):
     from importer.price_refresh_job import message_cmd
@@ -828,6 +829,10 @@ def main():
         help="Set name to scope to (for --refresh-market-prices / --price-refresh-run).")
     parser.add_argument("--send", action="store_true",
         help="Email the report (for --price-refresh-message).")
+    parser.add_argument("--no-push", action="store_true",
+        help="Refresh market prices but send nothing to eBay "
+             "(for --price-refresh-run). The changes stay pending and go out "
+             "with the next run that pushes those listings.")
     parser.add_argument("--no-browser", action="store_true",
         help="Skip the Chrome step that reads reverse holo prices "
              "(for --price-refresh-run).")
@@ -848,7 +853,8 @@ def main():
         help="Scope to every live template (for --ebay-sync-descriptions).")
     parser.add_argument("--force", action="store_true",
         help="Re-fetch/overwrite even already-filled values "
-             "(for --ebay-backfill-nav-images).")
+             "(for --ebay-backfill-nav-images). With --price-refresh-run: "
+             "also reprice cards already priced today.")
 
     args = parser.parse_args()
 

@@ -48,7 +48,9 @@ Per set, in order:
    held price that has been approved since) is pushed with
    importer.ebay_pushprices.push_prices once all of today's sets touching
    that listing are finished. push_mode = 'dry_run' computes and records
-   what would be pushed without sending anything to eBay. Only cards that
+   what would be pushed without sending anything to eBay. A listing is only
+   pushed when at least one of its rows would get a different price than the
+   one last pushed; otherwise it is left alone and counted in the run's notes. Only cards that
    are already live are repriced: queued cards are never added to a listing
    by the refresh (push_prices(promote_queued=False)), because they need
    pictures and variation names set up by hand first.
@@ -565,12 +567,13 @@ def _is_plain(v: dict) -> bool:
     return bool(v["foil_type"]) and not any(v.get(a) for a in SPECIAL_AXES)
 
 
-def price_set(s: dict, settings: dict, use_browser: bool = True) -> dict:
-    """Work out new prices for one set without writing anything.
+def price_set(s: dict, settings: dict, use_browser: bool = True, force: bool = False) -> dict:
+    """Work out new prices for one set without writing anything. force=True also
+    reprices variants already priced today (normally skipped as fresh).
     Returns {candidates: [{variant, new_price, source, listing_count}],
              needs_manual: [...], notes: [...], counts: {...}}."""
     variants = _load_variants(s["set_id"])
-    in_scope = [v for v in variants if not v["fresh"]]
+    in_scope = [v for v in variants if force or not v["fresh"]]
     plain = [v for v in in_scope if _is_plain(v)]
     special = [v for v in in_scope if not _is_plain(v)]
 
@@ -829,9 +832,33 @@ def _listings_to_push(run_id: str, pending_set_ids: list[str], already: set) -> 
     return rows
 
 
+def _price_diff_count(listing_id: str) -> int | None:
+    """How many live rows of a listing would get a different price than the one
+    we last pushed. None when that cannot be worked out (the caller then pushes
+    anyway rather than risk skipping a listing that needs it)."""
+    try:
+        from importer.ebay_pushprices import _compute_roster_changes
+        with db_cursor() as cur:
+            _, changes, _ = _compute_roster_changes(cur, "ebay", listing_id)
+            ids = [str(c["platform_listing_id"]) for c in changes]
+            if not ids:
+                return 0
+            cur.execute("SELECT id::text AS id, pushed_price FROM platform_listings "
+                        "WHERE id = ANY(%s::uuid[])", (ids,))
+            old = {r["id"]: r["pushed_price"] for r in cur.fetchall()}
+        return sum(1 for c in changes
+                   if old.get(str(c["platform_listing_id"])) is None
+                   or abs(float(old[str(c["platform_listing_id"])]) - c["resolved_price"]) > 0.004)
+    except Exception as e:
+        log(f"    could not compare prices for {listing_id} ({str(e)[:100]}); pushing it anyway")
+        return None
+
+
 def _push_listings(run_id: str, listings: list[dict], dry_run: bool, state: dict):
     """Push each listing and record the outcome. state = {'done': set of
-    listing ids attempted, 'failed': set of listing ids that did not go through}."""
+    listing ids attempted, 'failed': set of listing ids that did not go through,
+    'unchanged': set of listing ids left alone because no price differs from
+    what is already on eBay}."""
     if not listings:
         return
     from importer.ebay_auth import list_accounts
@@ -844,6 +871,12 @@ def _push_listings(run_id: str, listings: list[dict], dry_run: bool, state: dict
         rec = {"status": "ok", "resolved": None, "changed": None, "pushed": None,
                "warnings": [], "error": None}
         account_num = account_nums.get(row["account"])
+        if account_num is not None and _price_diff_count(listing_id) == 0:
+            # Nothing on this listing would change price, so there is nothing to
+            # send. (A market price can move without moving the eBay price.)
+            state.setdefault("unchanged", set()).add(listing_id)
+            log(f"    eBay {listing_id} ({row['account']}): no price changes, not pushed")
+            continue
         if account_num is None:
             rec.update(status="skipped", error=f"no eBay account configured for '{row['account']}'")
         else:
@@ -1014,17 +1047,20 @@ def _print_simulation(s: dict, result: dict, set_held: bool):
 
 
 def run_refresh(sets: list[dict], trigger: str, simulate: bool = False,
-                use_browser: bool = True) -> dict | None:
+                use_browser: bool = True, push_ebay: bool = True, force: bool = False) -> dict | None:
     """Refresh the given sets, apply the guard, and push to eBay according to
     the settings. simulate=True writes nothing anywhere and pushes nothing;
-    it only prints what the run would do."""
+    it only prints what the run would do. push_ebay=False writes the new
+    market prices but sends nothing to eBay (not even a dry run) and leaves
+    the changes unpushed, so the next run that pushes those listings sends
+    them."""
     settings = load_settings()
 
     if simulate:
         for s in sets:
             log(f"[simulate] {s['name']}")
             try:
-                result = price_set(s, settings, use_browser=use_browser)
+                result = price_set(s, settings, use_browser=use_browser, force=force)
             except Exception as e:
                 print(f"\n== {s['name']} == FAILED: {e}")
                 continue
@@ -1040,7 +1076,11 @@ def run_refresh(sets: list[dict], trigger: str, simulate: bool = False,
 
     dry_run = settings["push_mode"] != "live"
     push_now = settings["push_timing"] != "fixed_time" or trigger != "scheduled"
-    run_id, run_set_ids = _create_run(trigger, settings["push_mode"], sets)
+    if not push_ebay:
+        notes_extra = ["eBay push skipped on request: prices were refreshed only"]
+    else:
+        notes_extra = []
+    run_id, run_set_ids = _create_run(trigger, settings["push_mode"] if push_ebay else "dry_run", sets)
     log(f"run {run_id} ({trigger}): {len(sets)} set(s), eBay push mode {settings['push_mode']}")
     notes: list[str] = []
     push_state = {"done": set(), "failed": set()}
@@ -1050,7 +1090,7 @@ def run_refresh(sets: list[dict], trigger: str, simulate: bool = False,
             log(f"  {s['name']}")
             _update_run_set(run_set_id, status="api", started_at=dt.datetime.now(dt.timezone.utc))
             try:
-                result = price_set(s, settings, use_browser=use_browser)
+                result = price_set(s, settings, use_browser=use_browser, force=force)
                 set_held = apply_guard(result["candidates"], settings)
                 _update_run_set(run_set_id, status="guard")
                 _write_set_result(run_id, run_set_id, s["set_id"], result["candidates"])
@@ -1072,12 +1112,19 @@ def run_refresh(sets: list[dict], trigger: str, simulate: bool = False,
                 notes.append(f"{s['name']}: failed ({str(e)[:200]})")
                 _update_run_set(run_set_id, status="failed", error=str(e)[:1000],
                                 finished_at=dt.datetime.now(dt.timezone.utc))
-            if push_now:
+            if push_now and push_ebay:
                 pending = [x["set_id"] for x in sets[i + 1:]]
                 _push_listings(run_id, _listings_to_push(run_id, pending, push_state["done"]),
                                dry_run, push_state)
 
-        if push_now:
+        if push_state.get("unchanged"):
+            notes.append(f"{len(push_state['unchanged'])} listing(s) had no price changes and were not pushed")
+        if not push_ebay:
+            # Nothing was sent and nothing is stamped as pushed, so these
+            # changes stay pending for the next run that pushes their listings.
+            notes += notes_extra
+            summary = _finish_run(run_id, "done", notes)
+        elif push_now:
             _mark_pushed(run_id, push_state["failed"])
             summary = _finish_run(run_id, "done", notes)
         else:
@@ -1105,7 +1152,10 @@ def push_only(run_id: str | None = None, trigger: str = "approval") -> dict | No
     try:
         _push_listings(run_id, _listings_to_push(run_id, [], push_state["done"]), dry_run, push_state)
         _mark_pushed(run_id, push_state["failed"])
-        return _finish_run(run_id, "done", [])
+        unchanged = push_state.get("unchanged")
+        return _finish_run(run_id, "done",
+                           [f"{len(unchanged)} listing(s) had no price changes and were not pushed"]
+                           if unchanged else [])
     except BaseException as e:
         _finish_run(run_id, "failed", [], error=str(e)[:1000] or type(e).__name__)
         raise
@@ -1252,7 +1302,8 @@ def message_cmd(send: bool = False):
 
 # ── Entry points ─────────────────────────────────────────────────────────────
 
-def run_manual(set_name: str | None = None, simulate: bool = False, use_browser: bool = True):
+def run_manual(set_name: str | None = None, simulate: bool = False, use_browser: bool = True,
+               push_ebay: bool = True, force: bool = False):
     """`main.py --price-refresh-run [--set NAME] [--dry-run]`: one named set,
     or today's scheduled sets when no set is named."""
     if set_name:
@@ -1264,7 +1315,8 @@ def run_manual(set_name: str | None = None, simulate: bool = False, use_browser:
         sets = sets_for_day(dt.date.today().isoweekday())
         if not sets:
             raise SystemExit("no sets are scheduled for today")
-    return run_refresh(sets, trigger="manual", simulate=simulate, use_browser=use_browser)
+    return run_refresh(sets, trigger="manual", simulate=simulate, use_browser=use_browser,
+                       push_ebay=push_ebay, force=force)
 
 
 def tick():
