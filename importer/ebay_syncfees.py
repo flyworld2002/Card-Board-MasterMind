@@ -135,7 +135,12 @@ def _aggregate(transactions: list, order: dict) -> tuple:
                 order_fields["label_cost"] += amount
 
         elif tx_type == "NON_SALE_CHARGE" and tx.get("feeType") == "AD_FEE":
-            order_fields["promo_fee"] += amount
+            # eBay credits part of an ad fee back (e.g. when the order is
+            # refunded); a CREDIT entry reduces the fee, a DEBIT adds to it.
+            if tx.get("bookingEntry") == "CREDIT":
+                order_fields["promo_fee"] -= amount
+            else:
+                order_fields["promo_fee"] += amount
 
         elif tx_type == "SALE":
             tax = tx.get("ebayCollectedTaxAmount", {}).get("value")
@@ -157,13 +162,29 @@ def _aggregate(transactions: list, order: dict) -> tuple:
             tx_date = tx.get("transactionDate")
             line_items = tx.get("orderLineItems", [])
             if line_items:
+                parts = []   # (lid, basis, fees) per line of this refund
                 for li in line_items:
                     lid = li.get("lineItemId")
                     if not lid:
                         continue
                     basis = float(li.get("feeBasisAmount", {}).get("value", 0))
                     fees = sum(float(f.get("amount", {}).get("value", 0)) for f in li.get("marketplaceFees", []))
-                    net = basis - fees
+                    parts.append((lid, basis, fees))
+                total_basis = float((tx.get("totalFeeBasisAmount") or {}).get("value") or 0)
+                basis_sum = sum(b for _, b, _ in parts)
+                partial = bool(total_basis) and abs(basis_sum - total_basis) > 0.01
+                fee_sum = sum(f for _, _, f in parts)
+                for lid, basis, fees in parts:
+                    if partial:
+                        # Partial refund (e.g. part of the shipping): the lines
+                        # carry their FULL basis, not the refunded part, so
+                        # basis - fees would claim the whole order was refunded.
+                        # Spread the transaction's real net amount (what left
+                        # the payout) by each line's share of the fee credit.
+                        weight = (fees / fee_sum) if fee_sum else (basis / basis_sum if basis_sum else 0)
+                        net = amount * weight
+                    else:
+                        net = basis - fees
                     entry = _line(lid)
                     entry["refund_amount"] += net
                     if not entry["refunded_at"] or tx_date > entry["refunded_at"]:
