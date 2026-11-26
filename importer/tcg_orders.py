@@ -68,6 +68,69 @@ SECTION_TITLES = {"order summary", "ship to", "bill to", "shipped and sold by"}
 PAGES_RE = re.compile(r"^orders_(\d{8})_.*page\d+\.html$", re.I)
 OK_RE = re.compile(r"^grab_ok_(\d{8})(?:_(\w+))?\.txt$", re.I)
 FAILED_RE = re.compile(r"^run_failed_(\d{8}).*\.txt$", re.I)
+TRACK_RE = re.compile(r"^tracking_(\d{8})\.csv$", re.I)   # Grok: one line per tracked order, read from its tracking page
+
+
+def _is_ours(name: str) -> bool:
+    return bool(PAGES_RE.match(name) or OK_RE.match(name) or FAILED_RE.match(name) or TRACK_RE.match(name))
+
+
+def _loose_date(text, near: dt.date):
+    """'Monday, November 30' / 'Nov 30, 2026' / '2026-11-30' -> date. A date without a year gets the
+    year that puts it closest to `near` (the day the file was made)."""
+    t = re.sub(r"\s+", " ", str(text or "").strip())
+    if not t:
+        return None
+    m = re.match(r"(\d{4})-(\d{2})-(\d{2})", t)
+    if m:
+        return dt.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    t = re.sub(r"^[A-Za-z]+day,? ", "", t)
+    for fmt in ("%B %d, %Y", "%b %d, %Y", "%B %d %Y", "%b %d %Y"):
+        try:
+            return dt.datetime.strptime(t, fmt).date()
+        except ValueError:
+            pass
+    for fmt in ("%B %d", "%b %d"):
+        try:
+            d = dt.datetime.strptime(t, fmt)
+        except ValueError:
+            continue
+        best = None
+        for yr in (near.year - 1, near.year, near.year + 1):
+            cand = dt.date(yr, d.month, d.day)
+            if best is None or abs((cand - near).days) < abs((best - near).days):
+                best = cand
+        return best
+    return None
+
+
+def ingest_tracking_csv(path: str, grabbed: dt.date, dry_run: bool) -> tuple[int, int]:
+    """tracking_<YYYYMMDD>.csv columns: tracking_number, status, estimated_delivery, delivered_on, last_event.
+    Fills the carrier_* columns of the matching tcg_orders row. Returns (rows read, orders updated)."""
+    import csv
+    n = updated = 0
+    with open(path, encoding="utf-8-sig", newline="") as fh, db_cursor() as cur:
+        for row in csv.DictReader(fh):
+            tn = (row.get("tracking_number") or "").strip()
+            if not tn:
+                continue
+            n += 1
+            status = (row.get("status") or "").strip() or None
+            est = _loose_date(row.get("estimated_delivery"), grabbed)
+            delivered = _loose_date(row.get("delivered_on"), grabbed)
+            if delivered is None and status and re.search(r"deliver", status, re.I) and not re.search(r"est|out for|attempt|expected|on its way", status, re.I):
+                delivered = est
+            if dry_run:
+                updated += 1
+                continue
+            cur.execute("""UPDATE tcg_orders SET carrier_status = %s, carrier_est_delivery = %s, carrier_delivered_on = %s,
+                               carrier_summary = %s, carrier_error = NULL, carrier_checked_at = now(),
+                               carrier = COALESCE(NULLIF(%s, ''), carrier)
+                           WHERE tracking_number = %s""",
+                        (status, None if delivered else est, delivered, (row.get("last_event") or "").strip() or None,
+                         (row.get("carrier") or "").strip().upper(), tn))
+            updated += cur.rowcount
+    return n, updated
 
 
 def log(msg: str):
@@ -175,8 +238,9 @@ def parse_orders(html: str, pattern_codes: dict) -> list[dict]:
                 o["raw_status"] = label.rstrip(":").strip()
                 o["status"] = STATUS_MAP[low]
                 holder = title.parent
-                a = holder.find("a", href=True)
-                if a and "track" in a["href"]:
+                # the tracking link is the first link AFTER this status title (not the seller link earlier in the block)
+                a = title.find_next("a", href=True)
+                if a and "/track/" in a["href"]:
                     o["tracking_number"] = a.get_text(strip=True)
                     o["tracking_url"] = a["href"]
                     o["carrier"] = _carrier(o["tracking_number"])
@@ -481,7 +545,7 @@ def process_inbox(inbox: str = DEFAULT_INBOX, dry_run: bool = False, keep_days: 
     todo = []
     for f in files:
         name = os.path.basename(f)
-        if not (PAGES_RE.match(name) or OK_RE.match(name) or FAILED_RE.match(name)):
+        if not _is_ours(name):
             continue
         if time.time() - os.path.getmtime(f) < SETTLE_SECONDS:
             log(f"  {name}: still being written, skipped for now")
@@ -496,8 +560,8 @@ def process_inbox(inbox: str = DEFAULT_INBOX, dry_run: bool = False, keep_days: 
     matcher = None
     pattern_codes = None
     for f, name, sha in todo:
-        pm, okm, fm = PAGES_RE.match(name), OK_RE.match(name), FAILED_RE.match(name)
-        grabbed = dt.datetime.strptime((pm or okm or fm).group(1), "%Y%m%d").date()
+        pm, okm, fm, tm = PAGES_RE.match(name), OK_RE.match(name), FAILED_RE.match(name), TRACK_RE.match(name)
+        grabbed = dt.datetime.strptime((pm or okm or fm or tm).group(1), "%Y%m%d").date()
         kind, seen, saved, note, window = None, None, None, None, None
         if pm:
             kind = "pages"
@@ -510,6 +574,11 @@ def process_inbox(inbox: str = DEFAULT_INBOX, dry_run: bool = False, keep_days: 
             summary["stats"].update(st)
             note = f"{len(orders)} orders"
             log(f"  {name}: {len(orders)} orders ({st.get('new', 0)} new)")
+        elif tm:
+            kind = "tracking"
+            seen, saved = ingest_tracking_csv(f, grabbed, dry_run)
+            note = f"{seen} tracking rows, {saved} orders updated"
+            log(f"  {name}: {note}")
         else:
             text = open(f, encoding="utf-8", errors="replace").read()
             if okm:
@@ -543,7 +612,7 @@ def process_inbox(inbox: str = DEFAULT_INBOX, dry_run: bool = False, keep_days: 
         removed = 0
         for f in files:
             name = os.path.basename(f)
-            if (PAGES_RE.match(name) or OK_RE.match(name) or FAILED_RE.match(name)) and os.path.getmtime(f) < cutoff \
+            if _is_ours(name) and os.path.getmtime(f) < cutoff \
                     and done.get(name) == _sha(f):
                 try:
                     os.remove(f)
