@@ -421,6 +421,14 @@ def cmd_refresh_market_prices(args):
     result = refresh_market_prices(set_name=args.set, card_id=args.card_id, dry_run=args.dry_run)
     print(result)
 
+def cmd_tcg_orders_process(args):
+    from importer.tcg_orders import process_inbox
+    process_inbox(dry_run=args.dry_run)
+
+def cmd_tcg_orders_status(args):
+    from importer.tcg_orders import status_report
+    status_report()
+
 def cmd_price_refresh_tick(args):
     from importer.price_refresh_job import tick
     tick()
@@ -699,6 +707,12 @@ def main():
              "skip any card whose variants were all already refreshed today. "
              "Use --dry-run to list which cards would be refreshed without "
              "calling the API. See docs/plans/listing-pricing-system.md.")
+    group.add_argument("--tcg-orders-process", action="store_true",
+        help="Read new TCGplayer order-list pages from the Dropbox inbox into "
+             "the order tracker (importer/tcg_orders.py). Run by Task Scheduler; "
+             "--dry-run parses without writing.")
+    group.add_argument("--tcg-orders-status", action="store_true",
+        help="Print tracker counts and the open (on-order) TCGplayer orders.")
     group.add_argument("--price-refresh-tick", action="store_true",
         help="Scheduled weekly price refresh (importer/price_refresh_job.py). "
              "Run every few minutes by Task Scheduler: starts today's "
@@ -928,6 +942,10 @@ def main():
         cmd_ebay_create_listing(args)
     elif args.refresh_market_prices:
         cmd_refresh_market_prices(args)
+    elif args.tcg_orders_process:
+        cmd_tcg_orders_process(args)
+    elif args.tcg_orders_status:
+        cmd_tcg_orders_status(args)
     elif args.price_refresh_tick:
         cmd_price_refresh_tick(args)
     elif args.price_refresh_run:
