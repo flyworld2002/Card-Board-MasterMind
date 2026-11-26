@@ -424,6 +424,22 @@ def cmd_refresh_market_prices(args):
 def cmd_tcg_orders_process(args):
     from importer.tcg_orders import process_inbox
     process_inbox(dry_run=args.dry_run)
+    if not args.dry_run:
+        # keep the TCGplayer catalogue fresh: refresh it in this daily run once it is a week old
+        from db.connection import db_cursor
+        with db_cursor() as cur:
+            cur.execute("SELECT max(synced_at) < now() - interval '7 days' AS stale FROM tcg_catalog_groups")
+            stale = cur.fetchone()["stale"]
+        if stale:
+            from importer.tcg_catalog import run as catalog_run
+            try:
+                catalog_run()
+            except Exception as e:
+                print(f"catalogue refresh failed (will retry tomorrow): {e}")
+
+def cmd_tcg_catalog_sync(args):
+    from importer.tcg_catalog import run
+    run(force=args.force, dry_run=args.dry_run)
 
 def cmd_tcg_orders_status(args):
     from importer.tcg_orders import status_report
@@ -711,6 +727,10 @@ def main():
         help="Read new TCGplayer order-list pages from the Dropbox inbox into "
              "the order tracker (importer/tcg_orders.py). Run by Task Scheduler; "
              "--dry-run parses without writing.")
+    group.add_argument("--tcg-catalog-sync", action="store_true",
+        help="Copy the TCGplayer Pokemon catalogue (tcgcsv.com) into the tcg_catalog_* "
+             "tables and link each card product to our exact variant (importer/tcg_catalog.py). "
+             "--force re-fetches every set.")
     group.add_argument("--tcg-orders-status", action="store_true",
         help="Print tracker counts and the open (on-order) TCGplayer orders.")
     group.add_argument("--price-refresh-tick", action="store_true",
@@ -944,6 +964,8 @@ def main():
         cmd_refresh_market_prices(args)
     elif args.tcg_orders_process:
         cmd_tcg_orders_process(args)
+    elif args.tcg_catalog_sync:
+        cmd_tcg_catalog_sync(args)
     elif args.tcg_orders_status:
         cmd_tcg_orders_status(args)
     elif args.price_refresh_tick:

@@ -88,7 +88,7 @@ def _date(s):
         return None
 
 
-def _split_name(raw: str):
+def _split_name(raw: str, pattern_codes: dict | None = None):
     """'Eevee - 116/128 (30th Celebration) (Cosmos Holo)' -> ('Eevee', '116', 'Cosmos Holo').
     Trailing parentheses are peeled off: a known finish/pattern becomes the variant, any
     other (a series label such as '(30th Celebration)') is dropped."""
@@ -101,7 +101,8 @@ def _split_name(raw: str):
         groups.append(m.group(1).strip())
         s = s[:m.start()].strip()
     known = set(FOIL_PATTERNS) | set(COSMOS_TEXTURE_VARIANTS) | {"reverse holo", "reverse holofoil", "holo", "holofoil"}
-    variant = next((g for g in groups if g.lower() in known), None)
+    variant = next((g for g in groups if g.lower() in known
+                    or (pattern_codes and _resolve_foil_pattern_code(g, pattern_codes))), None)
     number = None
     m = re.search(r"\s*-\s*([A-Za-z]{0,4}\d+[A-Za-z]?(?:/\d+[A-Za-z]*)?)\s*$", s)
     if m:
@@ -223,7 +224,7 @@ def parse_orders(html: str, pattern_codes: dict) -> list[dict]:
             qty_td = tr.find("td", class_="orderHistoryQuantity")
             qty = int(re.sub(r"\D", "", qty_td.get_text()) or 1) if qty_td else 1
 
-            name, number, variant = _split_name(raw_name)
+            name, number, variant = _split_name(raw_name, pattern_codes)
             low = cond.lower()
             printing = "Reverse Holofoil" if "reverse holofoil" in low else ("Holofoil" if "holofoil" in low else "Normal")
             foil_type, foil_pattern = _extract_foil_fields(variant, _extract_foil_type(cond))
@@ -259,13 +260,17 @@ class Matcher:
             self.aliases = {r["tcgplayer_label"]: dict(r) for r in cur.fetchall()}
             cur.execute("SELECT id::text AS id, set_code FROM card_sets WHERE set_code IS NOT NULL")
             self.set_by_code = {r["set_code"]: r["id"] for r in cur.fetchall()}
-            cur.execute("SELECT id::text AS id, set_id::text AS set_id, card_number, name FROM card_master")
+            cur.execute("SELECT id::text AS id, name, series FROM card_sets")
+            self.set_by_name = {r["name"].lower(): r["id"] for r in cur.fetchall()}
+            cur.execute("SELECT id::text AS id, set_id::text AS set_id, card_number, name, rarity FROM card_master")
             self.cards = {}
-            self.by_number, self.by_name = {}, {}
+            self.by_number, self.by_name, self.by_global = {}, {}, {}
             for r in cur.fetchall():
                 self.cards[r["id"]] = r
-                self.by_number.setdefault((r["set_id"], (r["card_number"] or "").lower()), []).append(r)
+                num = (r["card_number"] or "").lower()
+                self.by_number.setdefault((r["set_id"], num), []).append(r)
                 self.by_name.setdefault((r["set_id"], (r["name"] or "").lower()), []).append(r)
+                self.by_global.setdefault(((r["name"] or "").lower(), num), []).append(r)
             cur.execute("""SELECT id::text AS id, card_id::text AS card_id, foil_type, foil_pattern, texture, material, size,
                                   stamp_type, source_type FROM card_variants""")
             self.variants = {}
@@ -286,7 +291,8 @@ class Matcher:
             cleaned2 = re.sub(r"^[A-Z][^:]+:\s*", "", cleaned).strip()
             alias = self.aliases.get(cleaned2) if cleaned2 != cleaned else None
         if not alias:
-            return None
+            # no alias row: a set whose own name is the label (e.g. "Delta Reign")
+            return self.set_by_name.get(cleaned.lower())
         if alias.get("set_id"):
             return alias["set_id"]
         return self.set_by_code.get(alias.get("api_set_id"))
@@ -306,20 +312,28 @@ class Matcher:
             vid = self.product_map[(pid, printing)]
             return self.variant_card.get(vid), vid, "matched", "product_map"
         set_id = self._set_id(line.get("set_label"))
-        if not set_id:
-            return None, None, "unmatched", None
         card, source = None, None
         number = line.get("card_number")
-        if number:
-            for n in dict.fromkeys([number, number.lstrip("0") or number]):
+        nums = list(dict.fromkeys([number, number.lstrip("0") or number])) if number else []
+        if set_id:
+            for n in nums:
                 hits = self.by_number.get((set_id, n.lower()), [])
                 if len(hits) == 1 and _norm(hits[0]["name"]) == _norm(line["card_name"]):
                     card, source = hits[0], "set_number"
                     break
-        if card is None:
-            hits = self.by_name.get((set_id, line["card_name"].lower()), [])
-            if len(hits) == 1:
-                card, source = hits[0], "set_name"
+            if card is None:
+                hits = self.by_name.get((set_id, line["card_name"].lower()), [])
+                if len(hits) > 1 and line.get("rarity"):
+                    hits = [h for h in hits if (h["rarity"] or "").lower() == line["rarity"].lower()]
+                if len(hits) == 1:
+                    card, source = hits[0], "set_name"
+        if card is None and nums:
+            # set label did not help (e.g. "Miscellaneous Cards & Products", promos): same name + number anywhere
+            for n in nums:
+                hits = self.by_global.get((line["card_name"].lower(), n.lower()), [])
+                if len(hits) == 1:
+                    card, source = hits[0], "name_number"
+                    break
         if card is None:
             return None, None, "unmatched", None
         vid = self._variant(card["id"], line)
@@ -425,6 +439,28 @@ def upsert_orders(orders: list[dict], source_file: str, matcher: Matcher, dry_ru
     return stats
 
 
+def rematch_unmatched(matcher: "Matcher | None" = None) -> int:
+    """Try again on every stored line that is not matched to an exact variant yet, using the
+    current set aliases / learned products. Lines you linked by hand (match_source 'manual')
+    are never touched. Returns how many lines improved."""
+    matcher = matcher or Matcher()
+    improved = 0
+    with db_cursor() as cur:
+        cur.execute("SET LOCAL statement_timeout = '120s'")
+        cur.execute("""SELECT id::text AS id, product_id, printing, set_label, card_name, card_number, rarity, foil_type,
+                              foil_pattern, texture, match_status FROM tcg_order_lines
+                       WHERE match_status <> 'matched' AND COALESCE(match_source, '') <> 'manual'""")
+        rows = cur.fetchall()
+        rank = {"unmatched": 0, "card_only": 1, "matched": 2}
+        for r in rows:
+            card_id, variant_id, status, source = matcher.resolve(dict(r))
+            if rank[status] > rank[r["match_status"]]:
+                cur.execute("""UPDATE tcg_order_lines SET card_id = %s, variant_id = %s, match_status = %s, match_source = %s
+                               WHERE id = %s""", (card_id, variant_id, status, source, r["id"]))
+                improved += 1
+    return improved
+
+
 def _sha(path: str) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -494,6 +530,10 @@ def process_inbox(inbox: str = DEFAULT_INBOX, dry_run: bool = False, keep_days: 
                                ON CONFLICT (file_name) DO UPDATE SET sha256 = EXCLUDED.sha256, kind = EXCLUDED.kind,
                                    orders_seen = EXCLUDED.orders_seen, orders_saved = EXCLUDED.orders_saved, note = EXCLUDED.note,
                                    parsed_at = now()""", (name, sha, kind, grabbed, window, seen, saved, note))
+    if not dry_run:
+        n = rematch_unmatched(matcher)
+        if n:
+            log(f"  re-matched {n} previously unmatched card line(s)")
     # clean-up: our own files, read already, older than keep_days
     if not dry_run:
         with db_cursor() as cur:
