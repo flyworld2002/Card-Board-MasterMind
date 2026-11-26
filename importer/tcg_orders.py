@@ -50,6 +50,7 @@ from importer.tcgplayer_html import (
     REVERSE_HOLO_PATTERN_SETS, _extract_foil_fields, _extract_foil_type,
     _load_foil_pattern_codes, _resolve_foil_pattern_code,
 )
+from importer.tcg_messages import export_follow_up, ingest_msglist, ingest_thread, message_file_kind
 from utils.set_name_map import _strip_tcgplayer_prefix
 
 DEFAULT_INBOX = os.getenv("TCG_ORDERS_INBOX", r"C:\Users\Fei\Dropbox\tcg_orders\inbox")
@@ -72,7 +73,8 @@ TRACK_RE = re.compile(r"^tracking_(\d{8})\.csv$", re.I)   # Grok: one line per t
 
 
 def _is_ours(name: str) -> bool:
-    return bool(PAGES_RE.match(name) or OK_RE.match(name) or FAILED_RE.match(name) or TRACK_RE.match(name))
+    return bool(PAGES_RE.match(name) or OK_RE.match(name) or FAILED_RE.match(name) or TRACK_RE.match(name)
+                or message_file_kind(name))
 
 
 def _loose_date(text, near: dt.date):
@@ -562,10 +564,32 @@ def process_inbox(inbox: str = DEFAULT_INBOX, dry_run: bool = False, keep_days: 
     matcher = None
     pattern_codes = None
     for f, name, sha in todo:
-        pm, okm, fm, tm = PAGES_RE.match(name), OK_RE.match(name), FAILED_RE.match(name), TRACK_RE.match(name)
-        grabbed = dt.datetime.strptime((pm or okm or fm or tm).group(1), "%Y%m%d").date()
+        mk = message_file_kind(name)      # message-center pages from Grok (tcg_messages.py)
+        if mk:
+            pm = okm = fm = tm = None
+            grabbed = mk[1]
+        else:
+            pm, okm, fm, tm = PAGES_RE.match(name), OK_RE.match(name), FAILED_RE.match(name), TRACK_RE.match(name)
+            grabbed = dt.datetime.strptime((pm or okm or fm or tm).group(1), "%Y%m%d").date()
         kind, seen, saved, note, window = None, None, None, None, None
-        if pm:
+        if mk:
+            kind = mk[0]
+            if kind == "msglist":
+                st = ingest_msglist(f, dry_run)
+                seen, saved = st["threads_on_page"], st["tracked"]
+                note = f"{st['threads_on_page']} threads on the page, {st['tracked']} on tracked orders, {st['unread']} unread"
+            elif kind == "thread":
+                st = ingest_thread(f, dry_run)
+                seen, saved = st.get("messages"), st.get("new")
+                note = st.get("error") or (f"thread {st['thread_id']} order {st['order']}: {st['messages']} messages, {st['new']} new"
+                                           + ("" if st["tracked"] else " (order not tracked, skipped)"))
+            else:
+                text = open(f, encoding="utf-8", errors="replace").read()
+                note = text[:300].replace("\n", " ")
+                if kind == "msg_failed":
+                    log(f"  GROK REPORTED A FAILED MESSAGE RUN ({name}): {note}")
+            log(f"  {name}: {note}")
+        elif pm:
             kind = "pages"
             if matcher is None:
                 matcher, pattern_codes = Matcher(), _load_foil_pattern_codes()
@@ -602,6 +626,11 @@ def process_inbox(inbox: str = DEFAULT_INBOX, dry_run: bool = False, keep_days: 
                                    orders_seen = EXCLUDED.orders_seen, orders_saved = EXCLUDED.orders_saved, note = EXCLUDED.note,
                                    parsed_at = now()""", (name, sha, kind, grabbed, window, seen, saved, note))
     if not dry_run:
+        try:
+            n_follow = export_follow_up()
+            log(f"  follow_up.txt: {n_follow} order(s) to follow up")
+        except Exception as e:      # the outbox folder may be missing/locked; never block the order import
+            log(f"  could not write follow_up.txt: {e}")
         n = rematch_unmatched(matcher)
         if n:
             log(f"  re-matched {n} previously unmatched card line(s)")
