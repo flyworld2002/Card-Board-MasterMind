@@ -165,7 +165,7 @@ For each outbox/msg_<id>.json that does NOT already have inbox/msg_result_<id>.j
 STEP 2 — READ
  - Save the full Messages page as inbox/msglist_<YYYYMMDD_HHMM>.html.
  - Open and save every bold (unread) thread, plus every thread whose order number is in
-   outbox/follow_up.txt, as inbox/thread_<order number>_<YYYYMMDD_HHMM>.html.
+   outbox/follow_up.txt, as inbox/thread_<order number>_<n>_<YYYYMMDD_HHMM>.html (n = 1, 2, 3 for an order with several threads).
  - Then write inbox/msg_grab_ok_<YYYYMMDD_HHMM>.txt listing the thread files saved
    (on trouble: inbox/msg_run_failed_<YYYYMMDD_HHMM>.txt with what happened).
 

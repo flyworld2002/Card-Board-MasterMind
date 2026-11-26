@@ -4,7 +4,7 @@ TCGplayer seller messages, inbound side (plan: docs/plans/tcg-seller-messages.md
 
 Grok saves two kinds of TCGplayer pages into the Dropbox inbox when Fei asks it to "do messages":
   msglist_<YYYYMMDD[_HHMM]>.html                 the message-center list (every thread, one page)
-  thread_<ORDER>_<YYYYMMDD[_HHMM]>.html          one thread's detail page
+  thread_<ORDER>_<n>_<YYYYMMDD[_HHMM]>.html      one thread's detail page (n = 1, 2, 3 when an order has several threads)
   msg_grab_ok_<YYYYMMDD[_HHMM]>.txt / msg_run_failed_<...>.txt   Grok's done / failed notes
 They are read by importer/tcg_orders.py's process_inbox() (same read-once / 7-day clean-up rules as
 the order pages), using the functions here. Only threads on orders already in tcg_orders are kept;
@@ -30,7 +30,7 @@ from db.connection import db_cursor
 DEFAULT_OUTBOX = os.getenv("TCG_ORDERS_OUTBOX", r"C:\Users\Fei\Dropbox\tcg_orders\outbox")
 
 MSGLIST_RE = re.compile(r"^msglist_(\d{8})(?:_\d{4})?\.html$", re.I)
-THREAD_RE = re.compile(r"^thread_([A-Za-z0-9-]+)_(\d{8})(?:_\d{4})?\.html$", re.I)
+THREAD_RE = re.compile(r"^thread_(.+)_(\d{8})(?:_\d{4})?\.html$", re.I)   # thread_<anything>_<YYYYMMDD[_HHMM]>.html; the page itself says which thread/order
 MSGOK_RE = re.compile(r"^msg_grab_ok_(\d{8})(?:_\d{4})?\.txt$", re.I)
 MSGFAIL_RE = re.compile(r"^msg_run_failed_(\d{8}).*\.txt$", re.I)
 
