@@ -456,7 +456,9 @@ def upsert_orders(orders: list[dict], source_file: str, matcher: Matcher, dry_ru
                         CASE WHEN %(in_system)s THEN now() END, CASE WHEN %(in_system)s THEN 'auto_system' END, %(source_file)s)
                 ON CONFLICT (order_number) DO UPDATE SET
                     seller = EXCLUDED.seller, raw_status = EXCLUDED.raw_status, status = EXCLUDED.status,
-                    tracking_number = EXCLUDED.tracking_number, tracking_url = EXCLUDED.tracking_url, carrier = EXCLUDED.carrier,
+                    tracking_number = COALESCE(EXCLUDED.tracking_number, tcg_orders.tracking_number),
+                    tracking_url = COALESCE(EXCLUDED.tracking_url, tcg_orders.tracking_url),
+                    carrier = COALESCE(EXCLUDED.carrier, tcg_orders.carrier),
                     ship_method = EXCLUDED.ship_method, est_delivery = EXCLUDED.est_delivery, quantity = EXCLUDED.quantity,
                     subtotal = EXCLUDED.subtotal, shipping = EXCLUDED.shipping, tax = EXCLUDED.tax, total = EXCLUDED.total,
                     refund_total = EXCLUDED.refund_total, source_file = EXCLUDED.source_file, last_seen_at = now(),
