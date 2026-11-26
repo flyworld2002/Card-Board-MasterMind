@@ -441,10 +441,6 @@ def cmd_tcg_catalog_sync(args):
     from importer.tcg_catalog import run
     run(force=args.force, dry_run=args.dry_run)
 
-def cmd_tcg_tracking_refresh(args):
-    from importer.tcg_tracking import refresh_tracking
-    refresh_tracking(dry_run=args.dry_run)
-
 def cmd_tcg_orders_status(args):
     from importer.tcg_orders import status_report
     status_report()
@@ -735,10 +731,6 @@ def main():
         help="Copy the TCGplayer Pokemon catalogue (tcgcsv.com) into the tcg_catalog_* "
              "tables and link each card product to our exact variant (importer/tcg_catalog.py). "
              "--force re-fetches every set.")
-    group.add_argument("--tcg-tracking-refresh", action="store_true",
-        help="Look up carrier (USPS/UPS) estimated or actual delivery dates for open TCGplayer "
-             "orders with a tracking number (importer/tcg_tracking.py). Needs USPS_CLIENT_ID/"
-             "USPS_CLIENT_SECRET and/or UPS_CLIENT_ID/UPS_CLIENT_SECRET in .env.")
     group.add_argument("--tcg-orders-status", action="store_true",
         help="Print tracker counts and the open (on-order) TCGplayer orders.")
     group.add_argument("--price-refresh-tick", action="store_true",
@@ -974,8 +966,6 @@ def main():
         cmd_tcg_orders_process(args)
     elif args.tcg_catalog_sync:
         cmd_tcg_catalog_sync(args)
-    elif args.tcg_tracking_refresh:
-        cmd_tcg_tracking_refresh(args)
     elif args.tcg_orders_status:
         cmd_tcg_orders_status(args)
     elif args.price_refresh_tick:
