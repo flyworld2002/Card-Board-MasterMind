@@ -272,3 +272,22 @@ Do not open the follow-up threads, do not send anything.
 ```
 The Incoming page has a "Copy do unread for Grok" button. The sync (automatic, or Sync now) brings the new messages in.
 
+
+## Escalation emails to TCGplayer (built 2026-11-27)
+When our last message to a seller is 3+ days old with no reply and the order still has a problem (held card, open
+missing card, refund to review, or not arrived), the Incoming "Escalate" tab drafts an email to TCGplayer in Fei's
+wording (`escalate.js`, view `v_tcg_escalate_candidates`, `sql/tcg_escalate.sql`, `sql/tcg_escalate_send.sql`).
+Approve -> `outbox/email_<id>.json` -> Grok sends it from flyworld2002@hotmail.com as part of "do messages" ->
+`inbox/email_result_<id>.json`. Only @tcgplayer.com recipients are allowed (checked in `tcg_approve_escalation`),
+5 per day, one per order per 7 days. Subject default: "<order number> - Issues" (editable). Withdraw / I checked, it was sent work as for messages.
+
+Grok note addition, inside "do messages" after STEP 1 (send messages):
+```
+STEP 1b: SEND ESCALATION EMAILS. For each outbox/email_<id>.json that does NOT already have inbox/email_result_<id>.json:
+ - Read: order_number, seller, from, to, subject, body.
+ - From my Hotmail (flyworld2002@hotmail.com) send ONE email: To = "to" (never add anyone else), Subject = "subject" exactly,
+   Body = "body" exactly (keep the line breaks). Send it, then check it is in the Sent folder.
+ - Write inbox/email_result_<id>.json: {"id", "status": "sent"|"failed"|"unknown", "sent_at": "YYYY-MM-DD HH:MM", "error": ""}.
+ - If it fails, write status "failed" with the exact error and do not retry. Never send the same file twice.
+ - Only send what is in a file I gave you. Never write your own emails.
+```
