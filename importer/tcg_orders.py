@@ -51,7 +51,7 @@ from importer.tcgplayer_html import (
     _load_foil_pattern_codes, _resolve_foil_pattern_code,
 )
 from importer.tcg_messages import export_follow_up, ingest_msglist, ingest_thread, message_file_kind
-from importer.tcg_outbox import ingest_msg_result
+from importer.tcg_outbox import ingest_msg_result, ingest_rate_result
 from utils.set_name_map import _strip_tcgplayer_prefix
 
 DEFAULT_INBOX = os.getenv("TCG_ORDERS_INBOX", r"C:\Users\Fei\Dropbox\tcg_orders\inbox")
@@ -255,6 +255,9 @@ def parse_orders(html: str, pattern_codes: dict) -> list[dict]:
         if "status" not in o:
             continue          # not an order block we understand
 
+        # TCGplayer shows "Rate Transaction" only while the order has not been rated (sql/tcg_ratings.sql)
+        o["rate_available"] = w.find("input", attrs={"value": "Rate Transaction"}) is not None
+
         # refunds: <b>A partial refund</b> was issued on <date> for the amount of $X. <a ...refundId=N>(Details)</a>
         for a in w.find_all("a", href=re.compile(r"refundId=(\d+)")):
             rid = int(re.search(r"refundId=(\d+)", a["href"]).group(1))
@@ -452,11 +455,12 @@ def upsert_orders(orders: list[dict], source_file: str, matcher: Matcher, dry_ru
             cur.execute("""
                 INSERT INTO tcg_orders (order_number, ordered_on, channel, seller, raw_status, status, tracking_number, tracking_url,
                                         carrier, ship_method, est_delivery, quantity, subtotal, shipping, tax, total, refund_total,
-                                        received_at, received_by, source_file)
+                                        received_at, received_by, source_file, rate_available, rate_seen_at)
                 VALUES (%(order_number)s, %(ordered_on)s, %(channel)s, %(seller)s, %(raw_status)s, %(status)s, %(tracking_number)s,
                         %(tracking_url)s, %(carrier)s, %(ship_method)s, %(est_delivery)s, %(quantity)s, %(subtotal)s, %(shipping)s,
                         %(tax)s, %(total)s, %(refund_total)s,
-                        CASE WHEN %(in_system)s THEN now() END, CASE WHEN %(in_system)s THEN 'auto_system' END, %(source_file)s)
+                        CASE WHEN %(in_system)s THEN now() END, CASE WHEN %(in_system)s THEN 'auto_system' END, %(source_file)s,
+                        %(rate_available)s, now())
                 ON CONFLICT (order_number) DO UPDATE SET
                     seller = EXCLUDED.seller, raw_status = EXCLUDED.raw_status, status = EXCLUDED.status,
                     tracking_number = COALESCE(EXCLUDED.tracking_number, tcg_orders.tracking_number),
@@ -465,13 +469,14 @@ def upsert_orders(orders: list[dict], source_file: str, matcher: Matcher, dry_ru
                     ship_method = EXCLUDED.ship_method, est_delivery = EXCLUDED.est_delivery, quantity = EXCLUDED.quantity,
                     subtotal = EXCLUDED.subtotal, shipping = EXCLUDED.shipping, tax = EXCLUDED.tax, total = EXCLUDED.total,
                     refund_total = EXCLUDED.refund_total, source_file = EXCLUDED.source_file, last_seen_at = now(),
+                    rate_available = EXCLUDED.rate_available, rate_seen_at = now(),
                     last_changed_at = CASE WHEN %(changed)s OR tcg_orders.refund_total IS DISTINCT FROM EXCLUDED.refund_total
                                            THEN now() ELSE tcg_orders.last_changed_at END,
                     received_at = COALESCE(tcg_orders.received_at, CASE WHEN %(in_system)s THEN now() END),
                     received_by = COALESCE(tcg_orders.received_by, CASE WHEN %(in_system)s THEN 'auto_system' END)
             """, {**{k: o.get(k) for k in ("order_number", "ordered_on", "channel", "seller", "raw_status", "status", "tracking_number",
                                            "tracking_url", "carrier", "ship_method", "est_delivery", "quantity", "subtotal",
-                                           "shipping", "tax", "total")},
+                                           "shipping", "tax", "total", "rate_available")},
                   "refund_total": refund_total, "in_system": in_system, "changed": changed, "source_file": source_file})
             for r in o["refunds"]:
                 if (num, r["refund_id"]) not in have_refunds:
@@ -585,6 +590,10 @@ def process_inbox(inbox: str = DEFAULT_INBOX, dry_run: bool = False, keep_days: 
                 summary["new_messages"] += st.get("new") or 0
                 note = st.get("error") or (f"thread {st['thread_id']} order {st['order']}: {st['messages']} messages, {st['new']} new"
                                            + ("" if st["tracked"] else " (order not tracked, skipped)"))
+            elif kind == "rate_result":
+                st = ingest_rate_result(f, dry_run)
+                note = st.get("error") or (f"rating {st['id']}: {st['status']}" + ("" if st["found"] else " (no matching rating, ignored)"))
+                summary["results"] = summary.get("results", 0) + 1
             elif kind == "msg_result":
                 st = ingest_msg_result(f, dry_run)
                 note = st.get("error") or (f"message {st['id']}: {st['status']}" + ("" if st["found"] else " (no matching message, ignored)"))

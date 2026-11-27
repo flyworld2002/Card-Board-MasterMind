@@ -40,6 +40,7 @@ THREAD_RE = re.compile(r"^thread_(.+)_(\d{8})(?:_\d{4})?\.html$", re.I)   # thre
 MSGOK_RE = re.compile(r"^msg_grab_ok_(\d{8})(?:_\d{4})?\.txt$", re.I)
 MSGFAIL_RE = re.compile(r"^msg_run_failed_(\d{8}).*\.txt$", re.I)
 MSGRES_RE = re.compile(r"^msg_result_([A-Za-z0-9-]+)\.json$", re.I)     # Grok: result of sending one message
+RATERES_RE = re.compile(r"^rate_result_([A-Za-z0-9-]+)\.json$", re.I)   # Grok: result of submitting one seller rating
 
 REASON_TEXT = {
     "on_order": "on order",
@@ -67,6 +68,8 @@ def message_file_kind(name: str):
         return "thread", dt.datetime.strptime(m.group(2), "%Y%m%d").date()
     if MSGRES_RE.match(name):
         return "msg_result", None          # no date in the name: the caller uses today
+    if RATERES_RE.match(name):
+        return "rate_result", None
     return None
 
 

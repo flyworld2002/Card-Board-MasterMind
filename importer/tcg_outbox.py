@@ -11,6 +11,12 @@ Run by `main.py --tcg-messages-export` (the Approve button, via the desktop API)
 the exact text in the file. A message is written to the outbox once; a message that has no result
 is flagged, never re-sent automatically.
 
+Ratings (sql/tcg_ratings.sql) use the same two-file handshake:
+  outbox/rate_<id>.json  {"id", "kind": "rating", "order_number", "seller", "stars", "comment",
+                          "as_described": "yes"|"no"|null, "arrived_on_time": "yes"|"no"|null,
+                          "communication": "yes"|"no"|"no_contact"|null}
+  inbox/rate_result_<id>.json  {"id", "status": "sent"|"failed"|"unknown", "sent_at", "error"}
+
 File Grok reads  (outbox/msg_<id>.json):
   {"id", "order_number", "seller", "mode": "new"|"reply", "thread_id", "subject", "response_needed", "body"}
 File Grok writes (inbox/msg_result_<id>.json):
@@ -54,6 +60,7 @@ def export_approved(dry_run: bool = False, outbox: str = DEFAULT_OUTBOX) -> dict
         with db_cursor() as cur:
             cur.execute("UPDATE tcg_msg_outbox SET status = 'exported', exported_at = now() WHERE id = %s AND status = 'approved'", (r["id"],))
         exported.append(r["id"])
+    exported += export_ratings(dry_run, outbox)
     unknown = mark_unknown(dry_run)
     if exported or unknown:
         _log(f"outbox: {len(exported)} message(s) written for Grok, {unknown} marked unknown")
@@ -64,10 +71,13 @@ def mark_unknown(dry_run: bool = False) -> int:
     """No result within 24 h of being handed to Grok: flag it (do not re-send)."""
     if dry_run:
         return 0
+    n = 0
     with db_cursor() as cur:
-        cur.execute("""UPDATE tcg_msg_outbox SET status = 'unknown', error = 'No result from Grok within 24 hours'
-                       WHERE status = 'exported' AND exported_at < now() - make_interval(hours => %s)""", (UNKNOWN_AFTER_HOURS,))
-        return cur.rowcount
+        for table in ("tcg_msg_outbox", "tcg_rating_outbox"):
+            cur.execute(f"""UPDATE {table} SET status = 'unknown', error = 'No result from Grok within 24 hours'
+                            WHERE status = 'exported' AND exported_at < now() - make_interval(hours => %s)""", (UNKNOWN_AFTER_HOURS,))
+            n += cur.rowcount
+    return n
 
 
 def _parse_time(v) -> dt.datetime:
@@ -118,6 +128,71 @@ def ingest_msg_result(path: str, dry_run: bool = False, outbox: str = DEFAULT_OU
         f = os.path.join(outbox, f"msg_{mid}.json")
         try:
             os.remove(f)
+        except OSError:
+            pass
+    return stats
+
+
+def export_ratings(dry_run: bool = False, outbox: str = DEFAULT_OUTBOX) -> list:
+    """Approved seller ratings -> outbox/rate_<id>.json. Returns the ids written."""
+    with db_cursor() as cur:
+        cur.execute("SET LOCAL statement_timeout = '60s'")
+        cur.execute("""SELECT id::text AS id, order_number, seller, stars, comment, as_described, arrived_on_time, communication
+                       FROM tcg_rating_outbox WHERE status = 'approved' ORDER BY approved_at, created_at""")
+        rows = [dict(r) for r in cur.fetchall()]
+    done = []
+    if rows and not dry_run:
+        os.makedirs(outbox, exist_ok=True)
+    for r in rows:
+        if dry_run:
+            done.append(r["id"])
+            continue
+        payload = {"id": r["id"], "kind": "rating", "order_number": r["order_number"], "seller": r["seller"], "stars": r["stars"],
+                   "comment": r["comment"], "as_described": r["as_described"], "arrived_on_time": r["arrived_on_time"],
+                   "communication": r["communication"]}
+        tmp = os.path.join(outbox, f"rate_{r['id']}.json.tmp")
+        with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2)
+        os.replace(tmp, os.path.join(outbox, f"rate_{r['id']}.json"))
+        with db_cursor() as cur:
+            cur.execute("UPDATE tcg_rating_outbox SET status = 'exported', exported_at = now() WHERE id = %s AND status = 'approved'", (r["id"],))
+        done.append(r["id"])
+    return done
+
+
+def ingest_rate_result(path: str, dry_run: bool = False, outbox: str = DEFAULT_OUTBOX) -> dict:
+    """One Grok rating result file. Idempotent: a rating already 'sent' is left alone."""
+    try:
+        with open(path, encoding="utf-8-sig") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError) as e:
+        return {"error": f"unreadable result file: {e}"}
+    rid = str(data.get("id") or "").strip()
+    if not re.fullmatch(r"[0-9a-fA-F-]{36}", rid):
+        m = re.search(r"rate_result_([0-9a-fA-F-]{36})", os.path.basename(path))
+        rid = m.group(1) if m else ""
+    if not rid:
+        return {"error": "result file has no rating id"}
+    status = str(data.get("status") or "").strip().lower()
+    if status not in ("sent", "failed", "unknown"):
+        status = "unknown"
+    error = (str(data.get("error") or "").strip() or None)
+    if status == "failed" and not error:
+        error = "Grok reported the rating failed without a reason"
+    stats = {"id": rid, "status": status, "found": False}
+    if dry_run:
+        return stats
+    with db_cursor() as cur:
+        cur.execute("""UPDATE tcg_rating_outbox SET status = %s, sent_at = CASE WHEN %s = 'sent' THEN %s END, error = %s
+                       WHERE id = %s AND status IN ('approved', 'exported', 'unknown', 'failed')""",
+                    (status, status, _parse_time(data.get("sent_at")), (error or "")[:500] or None, rid))
+        stats["found"] = cur.rowcount > 0
+        if stats["found"] and status == "sent":
+            # the rating is in: TCGplayer will stop offering the button, so stop listing the order meanwhile
+            cur.execute("UPDATE tcg_orders SET rate_available = false WHERE order_number = (SELECT order_number FROM tcg_rating_outbox WHERE id = %s)", (rid,))
+    if stats["found"]:
+        try:
+            os.remove(os.path.join(outbox, f"rate_{rid}.json"))
         except OSError:
             pass
     return stats

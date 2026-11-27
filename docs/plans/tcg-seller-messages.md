@@ -236,3 +236,28 @@ RULES
 - **Kept pile (built):** `sql/tcg_keep_pile.sql`, status `kept` with a required reason, "Keep (no
   refund)" in Staging Review and "Keep it, no refund" on Held. Out of inventory for now; Release asks
   for a condition. Held = work list only; grading pile and kept pile are parking lots.
+
+## Seller ratings (built 2026-11-27)
+
+TCGplayer shows "Rate Transaction" only on orders not rated yet -> `tcg_orders.rate_available` (set by the
+order-page parser). `sql/tcg_ratings.sql`: `tcg_rating_outbox`, `tcg_approve_rating` (stars, comment 3-400
+chars without line breaks/HTML, one rating per order, 20/day), `v_tcg_rate_candidates` (facts). Web:
+`rate-sellers.js` ("Rate sellers" tab on Incoming: suggestion per Fei's rules, edit, Approve; "Approve all
+clean 5-star"; Skip / Bring back). Desktop: `importer/tcg_outbox.py` `export_ratings` (outbox/rate_<id>.json)
+and `ingest_rate_result` (inbox/rate_result_<id>.json). The form: comment (400), stars 1-5, As Described
+yes/no, Arrived When Expected yes/no, Communication yes/no/no contact. Fei's rules: any order is ratable
+whatever its status except already-rated ones; 5 stars when issues are resolved; 4/3 with a condition
+comment otherwise; 1-2 for a seller that never ships or cancels; the 3 questions are pre-filled and editable.
+
+Grok note addition (STEP 3 - RATE):
+```
+For each outbox/rate_<id>.json that does NOT already have inbox/rate_result_<id>.json:
+ - Read: order_number, seller, stars (1-5), comment, as_described, arrived_on_time, communication
+   ("yes"/"no"/null; communication may also be "no_contact").
+ - Order History -> find that order -> click "Rate Transaction". Type the comment EXACTLY as written,
+   click the star number, set each radio only if the file has a value (leave it untouched when null),
+   then click Submit.
+ - Write inbox/rate_result_<id>.json: {"id","status":"sent"|"failed"|"unknown","sent_at","error"}.
+ - Never rate an order that has no rate_ file. Never submit twice. If the window is already gone
+   (order already rated), write status "failed" with that reason.
+```
