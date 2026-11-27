@@ -261,3 +261,14 @@ For each outbox/rate_<id>.json that does NOT already have inbox/rate_result_<id>
  - Never rate an order that has no rate_ file. Never submit twice. If the window is already gone
    (order already rated), write status "failed" with that reason.
 ```
+
+### Grok command "do unread" (added 2026-11-27)
+Reads only the unread (bold) seller threads, nothing else. Same files as STEP 2, fewer of them:
+```
+"do unread" = save the Messages page as inbox/msglist_<YYYYMMDD_HHMM>.html FIRST (before opening any thread),
+then open and save as full-page HTML ONLY the threads shown in BOLD, as inbox/thread_<order number>_<n>_<YYYYMMDD_HHMM>.html,
+then write inbox/msg_grab_ok_<YYYYMMDD_HHMM>.txt listing the files (msg_run_failed_... if it breaks).
+Do not open the follow-up threads, do not send anything.
+```
+The Incoming page has a "Copy do unread for Grok" button. The sync (automatic, or Sync now) brings the new messages in.
+

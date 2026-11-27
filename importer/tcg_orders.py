@@ -553,18 +553,21 @@ def process_inbox(inbox: str = DEFAULT_INBOX, dry_run: bool = False, keep_days: 
         cur.execute("SELECT file_name, sha256 FROM tcg_order_files")
         done = {r["file_name"]: r["sha256"] for r in cur.fetchall()}
     todo = []
+    settling = 0
     for f in files:
         name = os.path.basename(f)
         if not _is_ours(name):
             continue
         if time.time() - os.path.getmtime(f) < SETTLE_SECONDS:
             log(f"  {name}: still being written, skipped for now")
+            if name not in done:
+                settling += 1
             continue
         sha = _sha(f)
         if done.get(name) == sha:
             continue
         todo.append((f, name, sha))
-    summary = {"files": len(todo), "orders": 0, "stats": Counter(), "kinds": Counter(), "new_messages": 0, "followups": None}
+    summary = {"files": len(todo), "settling": settling, "orders": 0, "stats": Counter(), "kinds": Counter(), "new_messages": 0, "followups": None}
     if todo:
         log(f"{len(todo)} new/changed file(s) in the inbox" + (" (dry run, nothing written)" if dry_run else ""))
     matcher = None

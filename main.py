@@ -438,7 +438,7 @@ def cmd_tcg_orders_process(args):
         "files": summary.get("files", 0), "kinds": dict(summary.get("kinds", {})),
         "new_messages": summary.get("new_messages", 0), "followups": summary.get("followups"),
         "results": summary.get("results", 0), "exported": exported.get("exported", 0),
-        "unknown": exported.get("unknown", 0), "error": summary.get("error")}), flush=True)
+        "unknown": exported.get("unknown", 0), "settling": summary.get("settling", 0), "error": summary.get("error")}), flush=True)
     if not args.dry_run:
         # keep the TCGplayer catalogue fresh: refresh it in this daily run once it is a week old
         from db.connection import db_cursor
