@@ -221,3 +221,18 @@ RULES
 - Don't create new scheduled tasks (was refused); don't call undocumented third-party endpoints
   from scripts (was refused); read web pages through the browser instead.
 - Don't send anything to sellers or change anything on TCGplayer yourself.
+
+## Requests since the original plan (2026-11-27)
+
+- **Grok rates the seller (NOT started, needs design with Fei).** Fei wants Grok to leave TCGplayer's
+  seller rating ("Rate Transaction" on the order page). Needs: a saved sample of the rate form
+  (stars / fields / comment), when to rate (after the order is received and sorted out), who decides
+  the rating (Fei approves each one: it is published under his name), same outbox/result pattern as
+  messages. The current Grok note says "never click feedback or review buttons"; that rule changes
+  when this is built.
+- **Short worklist (idea sent to Fei, awaiting his answer):** a "Missing cards" tab on the Held page
+  listing cards marked Short with status (not contacted / messaged / seller replied / refunded),
+  Message seller (template 'missing') and a Resolved choice per card; counted in the Held badge.
+- **Kept pile (built):** `sql/tcg_keep_pile.sql`, status `kept` with a required reason, "Keep (no
+  refund)" in Staging Review and "Keep it, no refund" on Held. Out of inventory for now; Release asks
+  for a condition. Held = work list only; grading pile and kept pile are parking lots.
