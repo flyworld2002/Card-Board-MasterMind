@@ -157,6 +157,15 @@ ordered-vs-received display in the gallery.
 
 ## Phase 4 — Problem photos
 
+**STATUS 2026-11-26: built, DB-tested (rolled back), not yet pushed or browser-tested.** SQL
+`sql/tcg_order_photos.sql` (table `tcg_order_photos`, PRIVATE bucket `tcg-order-photos`, `tcg_gallery`
+now also returns `order_photos`, `missing`, and `received` for Wrong item cards). Web: `order-photos.js`
+(section on the Incoming order detail and on the Held page; Show to seller copies/removes a public
+copy; purge 90 days after the order leaves the Follow-ups list), `gallery.html` (Missing from the
+package, Photos of the order, Ordered vs Received), `message-seller.js` (link offered when there are
+card photos OR seller-visible order photos). Design choice: order photos are private by default in a
+non-public bucket (not just unlisted), because a slip/label shows the buyer's address.
+
 - Add `wrong_item` to held reasons (CHECK in `tcg_hold_cards`, held.js, staging-review.js,
   gallery labels) with a "what arrived" note field.
 - Order-level photos (new table or `tcg_held_photos` with nullable held_id + kind + `show_to_seller`
