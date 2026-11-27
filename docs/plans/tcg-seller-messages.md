@@ -126,6 +126,16 @@ files + rewrite follow_up.txt, return a summary). Restart of the Picking API **o
 
 ## Phase 3 — Sending
 
+**STATUS 2026-11-26: built, DB- and Python-tested, not yet pushed or browser-tested.** SQL:
+`sql/tcg_messages_send.sql` (table `tcg_msg_outbox`, `tcg_approve_message` with the 20/day cap and
+subject/thread checks, `tcg_withdraw_message`) and `tcg_stage.sql` (hold reason `wrong_item`).
+Python: `importer/tcg_outbox.py` (`export_approved`, `mark_unknown` after 24 h, `ingest_msg_result`;
+a Sync also exports and ingests results). Web: `message-seller.js` (the window + templates),
+`incoming.js` (Message seller button, your-message status block with Edit/Discard/Withdraw/New draft),
+`held.js` (Message seller per order, Wrong item reason), `staging-review.js` (Wrong item reason),
+`gallery.html` (label). Still Phase 4: order-level photos, "Missing from package" list in the gallery,
+ordered-vs-received display in the gallery.
+
 - Table `tcg_msg_outbox` (id, order_number, seller, mode new|reply, thread_id, subject,
   response_needed, body, include_link, status draft|approved|exported|sent|failed|unknown,
   approved_at, exported_at, sent_at, error, created_at). RLS.

@@ -425,11 +425,20 @@ def cmd_tcg_orders_process(args):
     import json
     from importer.tcg_orders import process_inbox
     summary = process_inbox(dry_run=args.dry_run)
+    exported = {"exported": 0, "unknown": 0}
+    if not args.dry_run:
+        # a Sync also writes any approved seller messages for Grok (and flags ones Grok never answered)
+        from importer.tcg_outbox import export_approved
+        try:
+            exported = export_approved()
+        except Exception as e:
+            print(f"could not write approved messages for Grok: {e}")
     # one machine-readable line for the desktop API's Sync button
     print("SYNC_SUMMARY " + json.dumps({
         "files": summary.get("files", 0), "kinds": dict(summary.get("kinds", {})),
         "new_messages": summary.get("new_messages", 0), "followups": summary.get("followups"),
-        "error": summary.get("error")}), flush=True)
+        "results": summary.get("results", 0), "exported": exported.get("exported", 0),
+        "unknown": exported.get("unknown", 0), "error": summary.get("error")}), flush=True)
     if not args.dry_run:
         # keep the TCGplayer catalogue fresh: refresh it in this daily run once it is a week old
         from db.connection import db_cursor

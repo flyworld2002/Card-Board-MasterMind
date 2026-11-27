@@ -51,6 +51,7 @@ from importer.tcgplayer_html import (
     _load_foil_pattern_codes, _resolve_foil_pattern_code,
 )
 from importer.tcg_messages import export_follow_up, ingest_msglist, ingest_thread, message_file_kind
+from importer.tcg_outbox import ingest_msg_result
 from utils.set_name_map import _strip_tcgplayer_prefix
 
 DEFAULT_INBOX = os.getenv("TCG_ORDERS_INBOX", r"C:\Users\Fei\Dropbox\tcg_orders\inbox")
@@ -567,7 +568,7 @@ def process_inbox(inbox: str = DEFAULT_INBOX, dry_run: bool = False, keep_days: 
         mk = message_file_kind(name)      # message-center pages from Grok (tcg_messages.py)
         if mk:
             pm = okm = fm = tm = None
-            grabbed = mk[1]
+            grabbed = mk[1] or dt.date.today()
         else:
             pm, okm, fm, tm = PAGES_RE.match(name), OK_RE.match(name), FAILED_RE.match(name), TRACK_RE.match(name)
             grabbed = dt.datetime.strptime((pm or okm or fm or tm).group(1), "%Y%m%d").date()
@@ -584,6 +585,10 @@ def process_inbox(inbox: str = DEFAULT_INBOX, dry_run: bool = False, keep_days: 
                 summary["new_messages"] += st.get("new") or 0
                 note = st.get("error") or (f"thread {st['thread_id']} order {st['order']}: {st['messages']} messages, {st['new']} new"
                                            + ("" if st["tracked"] else " (order not tracked, skipped)"))
+            elif kind == "msg_result":
+                st = ingest_msg_result(f, dry_run)
+                note = st.get("error") or (f"message {st['id']}: {st['status']}" + ("" if st["found"] else " (no matching message, ignored)"))
+                summary["results"] = summary.get("results", 0) + 1
             else:
                 text = open(f, encoding="utf-8", errors="replace").read()
                 note = text[:300].replace("\n", " ")
