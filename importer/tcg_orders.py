@@ -558,7 +558,7 @@ def process_inbox(inbox: str = DEFAULT_INBOX, dry_run: bool = False, keep_days: 
         if done.get(name) == sha:
             continue
         todo.append((f, name, sha))
-    summary = {"files": len(todo), "orders": 0, "stats": Counter()}
+    summary = {"files": len(todo), "orders": 0, "stats": Counter(), "kinds": Counter(), "new_messages": 0, "followups": None}
     if todo:
         log(f"{len(todo)} new/changed file(s) in the inbox" + (" (dry run, nothing written)" if dry_run else ""))
     matcher = None
@@ -581,6 +581,7 @@ def process_inbox(inbox: str = DEFAULT_INBOX, dry_run: bool = False, keep_days: 
             elif kind == "thread":
                 st = ingest_thread(f, dry_run)
                 seen, saved = st.get("messages"), st.get("new")
+                summary["new_messages"] += st.get("new") or 0
                 note = st.get("error") or (f"thread {st['thread_id']} order {st['order']}: {st['messages']} messages, {st['new']} new"
                                            + ("" if st["tracked"] else " (order not tracked, skipped)"))
             else:
@@ -618,6 +619,7 @@ def process_inbox(inbox: str = DEFAULT_INBOX, dry_run: bool = False, keep_days: 
                 kind = "run_failed"
                 note = text[:300].replace("\n", " ")
                 log(f"  GROK REPORTED A FAILED RUN ({name}): {note}")
+        summary["kinds"][kind] += 1
         if not dry_run:
             with db_cursor() as cur:
                 cur.execute("""INSERT INTO tcg_order_files (file_name, sha256, kind, grabbed_on, window_days, orders_seen, orders_saved, note)
@@ -628,6 +630,7 @@ def process_inbox(inbox: str = DEFAULT_INBOX, dry_run: bool = False, keep_days: 
     if not dry_run:
         try:
             n_follow = export_follow_up()
+            summary["followups"] = n_follow
             log(f"  follow_up.txt: {n_follow} order(s) to follow up")
         except Exception as e:      # the outbox folder may be missing/locked; never block the order import
             log(f"  could not write follow_up.txt: {e}")

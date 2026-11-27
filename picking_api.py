@@ -55,7 +55,10 @@ secret-only design first assumed — worth keeping in mind if more
 destructive actions get added later.
 """
 
+import json
 import os
+import subprocess
+import sys
 import tempfile
 import threading
 from pathlib import Path
@@ -319,6 +322,54 @@ class DescriptionSectionUpdateRequest(BaseModel):
     item_template_current_html: str | None = None
     title: str | None = None
     subtitle: str | None = None
+
+
+# ── TCGplayer seller messages (see docs/plans/tcg-seller-messages.md) ─────────
+# Each button runs the matching main.py command in its own process, so a later change to the
+# importer code takes effect without restarting this service. One at a time: a second click while
+# one is running gets a 409 ("busy") instead of piling up.
+_tcg_msg_lock = threading.Lock()
+_REPO_DIR = Path(__file__).resolve().parent
+
+
+def _run_main_command(flag: str, summary_prefix: str, timeout: int = 420) -> dict:
+    if not _tcg_msg_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="another message sync is running, try again in a minute")
+    try:
+        env = dict(os.environ, PYTHONUTF8="1")
+        try:
+            proc = subprocess.run([sys.executable, "main.py", flag], cwd=str(_REPO_DIR), env=env,
+                                  capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            raise HTTPException(status_code=504, detail=f"{flag} took longer than {timeout} s")
+        lines = (proc.stdout or "").splitlines()
+        summary = None
+        for line in reversed(lines):
+            if line.startswith(summary_prefix + " "):
+                summary = json.loads(line[len(summary_prefix) + 1:])
+                break
+        if proc.returncode != 0 or summary is None:
+            tail = "\n".join((lines + (proc.stderr or "").splitlines())[-8:])
+            raise HTTPException(status_code=502, detail=f"{flag} failed (exit {proc.returncode}): {tail[-600:]}")
+        return {"ok": True, "summary": summary, "log_tail": lines[-12:]}
+    finally:
+        _tcg_msg_lock.release()
+
+
+@app.post("/api/tcg/messages/sync")
+def tcg_messages_sync(x_picking_token: str = Header(default="")):
+    """Read whatever Grok saved in the Dropbox inbox (orders, message pages) and rewrite follow_up.txt."""
+    if x_picking_token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="bad token")
+    return _run_main_command("--tcg-orders-process", "SYNC_SUMMARY")
+
+
+@app.post("/api/tcg/messages/export")
+def tcg_messages_export(x_picking_token: str = Header(default="")):
+    """Write approved seller messages to the Dropbox outbox for Grok to send."""
+    if x_picking_token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="bad token")
+    return _run_main_command("--tcg-messages-export", "EXPORT_SUMMARY")
 
 
 @app.post("/api/picking/refresh")

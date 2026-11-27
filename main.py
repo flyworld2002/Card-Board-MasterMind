@@ -422,8 +422,14 @@ def cmd_refresh_market_prices(args):
     print(result)
 
 def cmd_tcg_orders_process(args):
+    import json
     from importer.tcg_orders import process_inbox
-    process_inbox(dry_run=args.dry_run)
+    summary = process_inbox(dry_run=args.dry_run)
+    # one machine-readable line for the desktop API's Sync button
+    print("SYNC_SUMMARY " + json.dumps({
+        "files": summary.get("files", 0), "kinds": dict(summary.get("kinds", {})),
+        "new_messages": summary.get("new_messages", 0), "followups": summary.get("followups"),
+        "error": summary.get("error")}), flush=True)
     if not args.dry_run:
         # keep the TCGplayer catalogue fresh: refresh it in this daily run once it is a week old
         from db.connection import db_cursor
@@ -436,6 +442,11 @@ def cmd_tcg_orders_process(args):
                 catalog_run()
             except Exception as e:
                 print(f"catalogue refresh failed (will retry tomorrow): {e}")
+
+def cmd_tcg_messages_export(args):
+    import json
+    from importer.tcg_outbox import export_approved
+    print("EXPORT_SUMMARY " + json.dumps(export_approved(dry_run=args.dry_run)), flush=True)
 
 def cmd_tcg_catalog_sync(args):
     from importer.tcg_catalog import run
@@ -731,6 +742,9 @@ def main():
         help="Copy the TCGplayer Pokemon catalogue (tcgcsv.com) into the tcg_catalog_* "
              "tables and link each card product to our exact variant (importer/tcg_catalog.py). "
              "--force re-fetches every set.")
+    group.add_argument("--tcg-messages-export", action="store_true",
+        help="Write approved seller messages to the Dropbox outbox for Grok "
+             "(importer/tcg_outbox.py; called by the desktop API's Approve button).")
     group.add_argument("--tcg-orders-status", action="store_true",
         help="Print tracker counts and the open (on-order) TCGplayer orders.")
     group.add_argument("--price-refresh-tick", action="store_true",
@@ -966,6 +980,8 @@ def main():
         cmd_tcg_orders_process(args)
     elif args.tcg_catalog_sync:
         cmd_tcg_catalog_sync(args)
+    elif args.tcg_messages_export:
+        cmd_tcg_messages_export(args)
     elif args.tcg_orders_status:
         cmd_tcg_orders_status(args)
     elif args.price_refresh_tick:

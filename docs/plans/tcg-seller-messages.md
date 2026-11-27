@@ -110,6 +110,14 @@ browser. Until Phase 2 the messages are read by the daily noon run or by hand:
 
 ## Phase 2 — Desktop program (picking_api.py) endpoints
 
+**STATUS 2026-11-26: built and tested by calling the endpoint functions directly (wrong token 401, busy
+409, both summaries OK); NOT live until the Picking API (task `CBMPickingAPI`, uvicorn on :8765) is
+restarted, which needs Fei's OK.** Design change: the endpoints run the existing `main.py` commands
+as separate processes (`--tcg-orders-process` = Sync, prints `SYNC_SUMMARY {json}`;
+`--tcg-messages-export` = Approve, prints `EXPORT_SUMMARY {json}`), so Phase 3 code changes in
+`importer/tcg_outbox.py` (`export_approved()`, currently a stub returning 0) need no further restart.
+Web side: `desktop-api.js` (`callDesktop`) and the **Sync** button in the Incoming page strip.
+
 Pattern: existing `@app.post` routes with `x_picking_token` header (`PICKING_API_TOKEN`); web calls
 `PICKING_API_URL` (see staging-review.js/picking.js). Add: `POST /api/tcg/messages/export` (write
 approved messages to outbox) and `POST /api/tcg/messages/sync` (run inbox processing for message
