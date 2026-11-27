@@ -27,6 +27,12 @@ from bs4 import BeautifulSoup, NavigableString
 
 from db.connection import db_cursor
 
+# Our own TCGplayer buyer name(s): a message from one of these is ours ("out"); anyone else
+# (the seller, "Team TCGplayer") is "in". Comma-separated override: TCG_BUYER_NAMES in .env.
+BUYER_NAMES = {n.strip().casefold() for n in os.getenv("TCG_BUYER_NAMES", "Feiyu Chen,Fei Chen").split(",") if n.strip()}
+# An older inbound message only counts as "new" when its thread was still unread on TCGplayer.
+NEW_WITHIN_DAYS = 7
+
 DEFAULT_OUTBOX = os.getenv("TCG_ORDERS_OUTBOX", r"C:\Users\Fei\Dropbox\tcg_orders\outbox")
 
 MSGLIST_RE = re.compile(r"^msglist_(\d{8})(?:_\d{4})?\.html$", re.I)
@@ -179,9 +185,11 @@ def ingest_thread(path: str, dry_run: bool = False) -> dict:
             return stats
         if dry_run:
             return stats
-        cur.execute("""SELECT t.seller FROM tcg_msg_threads t WHERE t.thread_id = %s""", (t["thread_id"],))
+        cur.execute("""SELECT t.seller, t.unread_on_tcgplayer FROM tcg_msg_threads t WHERE t.thread_id = %s""", (t["thread_id"],))
         row = cur.fetchone()
         seller = (row["seller"] if row else None) or tracked[t["order_number"]]
+        was_unread = bool(row and row["unread_on_tcgplayer"])
+        recent_cutoff = dt.date.today() - dt.timedelta(days=NEW_WITHIN_DAYS)
         last_date = max([m["sent_on"] for m in t["messages"] if m["sent_on"]], default=None)
         cur.execute("""
             INSERT INTO tcg_msg_threads (thread_id, order_number, seller, last_date, message_count)
@@ -194,14 +202,17 @@ def ingest_thread(path: str, dry_run: bool = False) -> dict:
             key = (m["sender"], m["sent_on"], m["body"])
             seen_count[key] = seen_count.get(key, 0) + 1
             h = hashlib.sha256(f"{t['thread_id']}|{m['sender']}|{m['sent_on']}|{m['body']}|{seen_count[key]}".encode()).hexdigest()
-            direction = "in" if (m["sender"] or "").casefold() == (seller or "").casefold() else "out"
+            direction = "out" if (m["sender"] or "").casefold() in BUYER_NAMES else "in"
+            # not new when it is ours, or old history of a thread we had already read
+            is_old = direction == "in" and not was_unread and m["sent_on"] is not None and m["sent_on"] < recent_cutoff
             cur.execute("""
                 INSERT INTO tcg_msg_messages (thread_id, order_number, position, sender, sent_on, body, direction, msg_hash, seen_at)
                 VALUES (%s, (SELECT order_number FROM tcg_orders WHERE upper(order_number) = %s), %s, %s, %s, %s, %s, %s,
-                        CASE WHEN %s = 'out' THEN now() END)
+                        CASE WHEN %s THEN now() END)
                 ON CONFLICT (msg_hash) DO UPDATE SET position = EXCLUDED.position
                 RETURNING (xmax = 0) AS inserted""",
-                        (t["thread_id"], t["order_number"], pos, m["sender"], m["sent_on"], m["body"], direction, h, direction))
+                        (t["thread_id"], t["order_number"], pos, m["sender"], m["sent_on"], m["body"], direction, h,
+                         direction == "out" or is_old))
             stats["new"] += 1 if cur.fetchone()["inserted"] else 0
     return stats
 
