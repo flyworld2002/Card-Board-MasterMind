@@ -69,13 +69,13 @@ def export_approved(dry_run: bool = False, outbox: str = DEFAULT_OUTBOX) -> dict
 
 
 def remove_withdrawn(dry_run: bool = False, outbox: str = DEFAULT_OUTBOX) -> int:
-    """A message/rating taken back to draft (Withdraw) must disappear from the outbox so Grok never sends the old text."""
+    """A message/rating taken back to draft (Withdraw), or marked sent by hand, must disappear from the outbox so Grok never sends it (again)."""
     if not os.path.isdir(outbox):
         return 0
     n = 0
     for table, prefix in (('tcg_msg_outbox', 'msg_'), ('tcg_rating_outbox', 'rate_')):
         with db_cursor() as cur:
-            cur.execute(f"SELECT id::text AS id FROM {table} WHERE status = 'draft'")
+            cur.execute(f"SELECT id::text AS id FROM {table} WHERE status IN ('draft', 'sent')")
             drafts = {r['id'] for r in cur.fetchall()}
         for mid in drafts:
             f = os.path.join(outbox, f"{prefix}{mid}.json")
