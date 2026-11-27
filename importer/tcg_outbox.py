@@ -61,10 +61,32 @@ def export_approved(dry_run: bool = False, outbox: str = DEFAULT_OUTBOX) -> dict
             cur.execute("UPDATE tcg_msg_outbox SET status = 'exported', exported_at = now() WHERE id = %s AND status = 'approved'", (r["id"],))
         exported.append(r["id"])
     exported += export_ratings(dry_run, outbox)
+    removed = remove_withdrawn(dry_run, outbox)
     unknown = mark_unknown(dry_run)
-    if exported or unknown:
-        _log(f"outbox: {len(exported)} message(s) written for Grok, {unknown} marked unknown")
-    return {"exported": len(exported), "unknown": unknown, "note": None if exported else "nothing to send"}
+    if exported or unknown or removed:
+        _log(f"outbox: {len(exported)} written for Grok, {removed} withdrawn file(s) removed, {unknown} marked unknown")
+    return {"exported": len(exported), "removed": removed, "unknown": unknown, "note": None if exported else "nothing to send"}
+
+
+def remove_withdrawn(dry_run: bool = False, outbox: str = DEFAULT_OUTBOX) -> int:
+    """A message/rating taken back to draft (Withdraw) must disappear from the outbox so Grok never sends the old text."""
+    if not os.path.isdir(outbox):
+        return 0
+    n = 0
+    for table, prefix in (('tcg_msg_outbox', 'msg_'), ('tcg_rating_outbox', 'rate_')):
+        with db_cursor() as cur:
+            cur.execute(f"SELECT id::text AS id FROM {table} WHERE status = 'draft'")
+            drafts = {r['id'] for r in cur.fetchall()}
+        for mid in drafts:
+            f = os.path.join(outbox, f"{prefix}{mid}.json")
+            if os.path.exists(f):
+                if not dry_run:
+                    try:
+                        os.remove(f)
+                    except OSError:
+                        continue
+                n += 1
+    return n
 
 
 def mark_unknown(dry_run: bool = False) -> int:
@@ -120,7 +142,7 @@ def ingest_msg_result(path: str, dry_run: bool = False, outbox: str = DEFAULT_OU
         return stats
     with db_cursor() as cur:
         cur.execute("""UPDATE tcg_msg_outbox SET status = %s, sent_at = CASE WHEN %s = 'sent' THEN %s END, error = %s
-                       WHERE id = %s AND status IN ('approved', 'exported', 'unknown', 'failed')""",
+                       WHERE id = %s AND status IN ('approved', 'exported', 'unknown', 'failed', 'draft')""",
                     (status, status, _parse_time(data.get("sent_at")), (error or "")[:500] or None, mid))
         stats["found"] = cur.rowcount > 0
     if stats["found"]:
@@ -184,7 +206,7 @@ def ingest_rate_result(path: str, dry_run: bool = False, outbox: str = DEFAULT_O
         return stats
     with db_cursor() as cur:
         cur.execute("""UPDATE tcg_rating_outbox SET status = %s, sent_at = CASE WHEN %s = 'sent' THEN %s END, error = %s
-                       WHERE id = %s AND status IN ('approved', 'exported', 'unknown', 'failed')""",
+                       WHERE id = %s AND status IN ('approved', 'exported', 'unknown', 'failed', 'draft')""",
                     (status, status, _parse_time(data.get("sent_at")), (error or "")[:500] or None, rid))
         stats["found"] = cur.rowcount > 0
         if stats["found"] and status == "sent":
