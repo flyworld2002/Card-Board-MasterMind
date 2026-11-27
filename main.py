@@ -446,11 +446,19 @@ def cmd_tcg_orders_process(args):
             cur.execute("SELECT max(synced_at) < now() - interval '7 days' AS stale FROM tcg_catalog_groups")
             stale = cur.fetchone()["stale"]
         if stale:
-            from importer.tcg_catalog import run as catalog_run
-            try:
-                catalog_run()
-            except Exception as e:
-                print(f"catalogue refresh failed (will retry tomorrow): {e}")
+            # Takes a few minutes, so it runs as its own background process: a sync (including the automatic
+            # ones from the web app) must never wait for it. A lock file keeps two from running at once.
+            import os, subprocess, sys, time
+            lock = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "tcg_catalog.lock")
+            os.makedirs(os.path.dirname(lock), exist_ok=True)
+            if not (os.path.exists(lock) and time.time() - os.path.getmtime(lock) < 30 * 60):
+                open(lock, "w").write(str(time.time()))
+                log = open(os.path.join(os.path.dirname(lock), "tcg_catalog.log"), "a", encoding="utf-8")
+                flags = (getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)) if os.name == "nt" else 0
+                subprocess.Popen([sys.executable, os.path.abspath(__file__), "--tcg-catalog-sync"], stdout=log, stderr=log,
+                                 cwd=os.path.dirname(os.path.abspath(__file__)), creationflags=flags,
+                                 env=dict(os.environ, PYTHONUTF8="1"))
+                print("catalogue is a week old: refreshing it in the background", flush=True)
 
 def cmd_tcg_messages_export(args):
     import json
