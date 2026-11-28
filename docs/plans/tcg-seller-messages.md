@@ -291,3 +291,21 @@ STEP 1b: SEND ESCALATION EMAILS. For each outbox/email_<id>.json that does NOT a
  - If it fails, write status "failed" with the exact error and do not retry. Never send the same file twice.
  - Only send what is in a file I gave you. Never write your own emails.
 ```
+
+### "do unread" also refreshes the orders behind the unread threads (2026-11-28)
+Messages say "full refund" but the refund amount only arrives on TCGplayer's order pages, and the daily grab is a
+30-DAY window by order date, so refunds on older orders (e.g. the Sep 20 NJC Gaming order) are never refreshed by it.
+So "do unread" now ends with a small order-page grab for just the orders in the unread threads. The app already
+accepts any order-list page named `orders_<YYYYMMDD>_<anything>page<n>.html` (PAGES_RE), so no app change is needed.
+```
+"do unread" = 
+ 1. Save the Messages page as inbox/msglist_<YYYYMMDD_HHMM>.html FIRST (before opening anything).
+ 2. Open and save, as full-page HTML, ONLY the BOLD (unread) threads: inbox/thread_<order number>_<n>_<YYYYMMDD_HHMM>.html.
+ 3. For each order number that appeared in those unread threads (and ONLY those orders): open Order History, find that
+    order (use the search by order number if there is one; otherwise use the "All" time range and the page that shows it)
+    and save that Order History page as full-page HTML: inbox/orders_<YYYYMMDD>_unread_page<n>.html
+    (n = 1, 2, 3 in the order you saved them). Do not open or save any other order.
+ 4. Write inbox/msg_grab_ok_<YYYYMMDD_HHMM>.txt listing every file saved (messages AND order pages),
+    or msg_run_failed_... if something breaks.
+ Do NOT open the follow-up threads. Do NOT send anything.
+```
