@@ -459,6 +459,23 @@ def cmd_tcg_orders_process(args):
                                  cwd=os.path.dirname(os.path.abspath(__file__)), creationflags=flags,
                                  env=dict(os.environ, PYTHONUTF8="1"))
                 print("catalogue is a week old: refreshing it in the background", flush=True)
+        # a set was tied (or re-tied) on the Catalog page: re-run only the matching step, in the background too
+        with db_cursor() as cur:
+            cur.execute("""SELECT requested_at IS NOT NULL AND requested_at > COALESCE(started_at, '-infinity') AS due
+                           FROM tcg_catalog_remap WHERE id = 1""")
+            row = cur.fetchone()
+        if row and row["due"]:
+            import os, subprocess, sys
+            logdir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+            os.makedirs(logdir, exist_ok=True)
+            log = open(os.path.join(logdir, "tcg_catalog.log"), "a", encoding="utf-8")
+            flags = (getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)) if os.name == "nt" else 0
+            with db_cursor() as cur:          # mark it started first, so the next sync does not start a second one
+                cur.execute("UPDATE tcg_catalog_remap SET started_at = now() WHERE id = 1")
+            subprocess.Popen([sys.executable, os.path.abspath(__file__), "--tcg-catalog-map"], stdout=log, stderr=log,
+                             cwd=os.path.dirname(os.path.abspath(__file__)), creationflags=flags,
+                             env=dict(os.environ, PYTHONUTF8="1"))
+            print("a set was tied on the Catalog page: linking its cards in the background", flush=True)
 
 def cmd_tcg_messages_export(args):
     import json
@@ -468,6 +485,20 @@ def cmd_tcg_messages_export(args):
 def cmd_tcg_catalog_sync(args):
     from importer.tcg_catalog import run
     run(force=args.force, dry_run=args.dry_run)
+
+def cmd_tcg_catalog_map(args):
+    """Only the matching step of the catalogue sync (no download): run after a set is tied on the Catalog page."""
+    import json
+    from db.connection import db_cursor
+    from importer.tcg_catalog import map_catalog
+    with db_cursor() as cur:
+        cur.execute("UPDATE tcg_catalog_remap SET started_at = now() WHERE id = 1")
+    m = map_catalog(dry_run=args.dry_run)
+    note = json.dumps({k: v for k, v in m.items() if k != "unmapped_sets"})
+    print(note, flush=True)
+    if not args.dry_run:
+        with db_cursor() as cur:
+            cur.execute("UPDATE tcg_catalog_remap SET done_at = now(), note = %s WHERE id = 1", (note,))
 
 def cmd_tcg_orders_status(args):
     from importer.tcg_orders import status_report
@@ -759,6 +790,9 @@ def main():
         help="Copy the TCGplayer Pokemon catalogue (tcgcsv.com) into the tcg_catalog_* "
              "tables and link each card product to our exact variant (importer/tcg_catalog.py). "
              "--force re-fetches every set.")
+    group.add_argument("--tcg-catalog-map", action="store_true",
+        help="Re-run only the matching step of --tcg-catalog-sync (no download), e.g. after a TCGplayer set "
+             "was tied to one of our sets on the Catalog page. Started by the inbox sync when requested.")
     group.add_argument("--tcg-messages-export", action="store_true",
         help="Write approved seller messages to the Dropbox outbox for Grok "
              "(importer/tcg_outbox.py; called by the desktop API's Approve button).")
@@ -997,6 +1031,8 @@ def main():
         cmd_tcg_orders_process(args)
     elif args.tcg_catalog_sync:
         cmd_tcg_catalog_sync(args)
+    elif args.tcg_catalog_map:
+        cmd_tcg_catalog_map(args)
     elif args.tcg_messages_export:
         cmd_tcg_messages_export(args)
     elif args.tcg_orders_status:
